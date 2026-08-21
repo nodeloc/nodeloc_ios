@@ -11,55 +11,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
 
-// MARK: - Shared overlay header
-
-private struct OverlayHeader: View {
-    @Environment(AppState.self) private var app
-    let title: String
-    var titleWeight: Font.Weight = .medium
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button { dismissOverlay() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
-            Text(title).font(Theme.body(15, weight: titleWeight))
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
-
-    private func dismissOverlay() {
-        closeOverlay(app)
-    }
-}
-
-private func closeOverlay(_ app: AppState) {
-    if app.overlay == .post {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-            app.overlay = nil
-        }
-    } else {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            app.overlay = nil
-        }
-    }
-}
-
-private func nodelocSiteURL(_ path: String) -> URL? {
-    if path.hasPrefix("http") { return URL(string: path) }
-    if path.hasPrefix("/") {
-        return URL(string: path, relativeTo: DiscourseConfig.baseURL)?.absoluteURL
-    }
-    return URL(string: "/\(path)", relativeTo: DiscourseConfig.baseURL)?.absoluteURL
-}
 
 // MARK: - Compose
 
@@ -2066,13 +2017,6 @@ private enum SidebarAction {
 
 // MARK: - Browse nodes
 
-private struct NodeCardPair: Identifiable {
-    let first: SidebarNodeSummary
-    let second: SidebarNodeSummary?
-
-    var id: Int { first.id }
-}
-
 struct BrowseNodesOverlay: View {
     @Environment(AppState.self) private var app
     @Environment(\.openURL) private var openURL
@@ -3345,36 +3289,6 @@ struct NodeDetailOverlay: View {
 }
 
 /// Node logo, falling back to a colored initial.
-private struct NodeAvatar: View {
-    let node: SidebarNodeSummary
-    var size: CGFloat = 40
-    var cornerRadius: CGFloat = 12
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        Group {
-            if let logoURL = node.logoURL {
-                CachedRemoteImage(url: logoURL) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    fallback
-                }
-            } else {
-                fallback
-            }
-        }
-        .frame(width: size, height: size)
-        .background(nodeAccentColor(node.colorHex).opacity(0.16), in: shape)
-        .clipShape(shape)
-    }
-
-    private var fallback: some View {
-        Text(node.name.first.map(String.init) ?? "#")
-            .font(Theme.heading(size * 0.4, weight: .bold))
-            .foregroundStyle(nodeAccentColor(node.colorHex))
-    }
-}
-
 /// One topic, rendered per reading mode.
 private struct NodeTopicRow: View {
     let post: Post
@@ -3766,37 +3680,6 @@ private struct AppTile: View {
 }
 
 /// App logo with a lettered fallback.
-private struct AppLogo: View {
-    let app: DirectoryApp
-    var size: CGFloat = 64
-    var cornerRadius: CGFloat = 16
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        Group {
-            if let url = NodeSummaryFactory.resolvedURL(app.logoUrl) {
-                CachedRemoteImage(url: url) { image in
-                    image.resizable().scaledToFill()
-                } placeholder: {
-                    fallback
-                }
-            } else {
-                fallback
-            }
-        }
-        .frame(width: size, height: size)
-        .background(Theme.surface, in: shape)
-        .clipShape(shape)
-        .overlay(shape.strokeBorder(Theme.divider, lineWidth: 1))
-    }
-
-    private var fallback: some View {
-        Text(app.name.first.map(String.init) ?? "#")
-            .font(Theme.heading(size * 0.38, weight: .bold))
-            .foregroundStyle(Theme.accent)
-    }
-}
-
 /// App detail: metadata plus entry points to play or to discuss.
 struct AppDetailOverlay: View {
     @Environment(AppState.self) private var app
@@ -4617,52 +4500,6 @@ struct CreateNodeOverlay: View {
         }
         return output
     }
-}
-
-private struct NodeSummaryIcon: View {
-    let node: SidebarNodeSummary
-    var size: CGFloat = 42
-    var cornerRadius: CGFloat = 13
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        Group {
-            if let logoURL = node.logoURL {
-                CachedRemoteImage(url: logoURL) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    fallback
-                }
-            } else {
-                fallback
-            }
-        }
-        .frame(width: size, height: size)
-        .background(nodeAccentColor(node.colorHex).opacity(0.16), in: shape)
-        .clipShape(shape)
-        .overlay {
-            shape.strokeBorder(Theme.divider, lineWidth: 1)
-        }
-    }
-
-    private var fallback: some View {
-        Text(node.name.first.map(String.init) ?? "#")
-            .font(Theme.heading(size * 0.36, weight: .bold))
-            .foregroundStyle(nodeAccentColor(node.colorHex))
-            .frame(width: size, height: size)
-    }
-}
-
-private func nodeAccentColor(_ hex: String) -> Color {
-    let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-    guard let value = UInt32(cleaned, radix: 16) else { return Theme.accent }
-    return Color(hex: value)
-}
-
-extension Color {
-    static let neutral900Scrim = Theme.neutral900.opacity(0.55)
 }
 
 // MARK: - Public profile
