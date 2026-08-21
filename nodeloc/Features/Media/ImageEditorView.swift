@@ -504,7 +504,7 @@ struct ImageEditorView: View {
     private func toolButton(_ tool: ImageEditorTool) -> some View {
         let isActive = state.activeTool == tool
         return toolBarButton(icon: tool.icon, label: tool.label, isActive: isActive) {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.quicker) {
                 state.activeTool = isActive ? nil : tool
                 state.selectedTextID = nil
             }

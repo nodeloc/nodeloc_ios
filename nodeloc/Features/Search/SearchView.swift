@@ -84,7 +84,7 @@ private struct SearchExperience: View {
 
             if let selectedProfile {
                 PublicProfileOverlay(target: selectedProfile) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         self.selectedProfile = nil
                     }
                 }
@@ -214,7 +214,7 @@ private struct SearchExperience: View {
                     post: post,
                     postTransitionNamespace: postTransitionNamespace,
                     onOpenAuthor: { target in
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                        withAnimation(.panelSlide) {
                             selectedProfile = target
                         }
                     }
@@ -396,7 +396,7 @@ private struct SearchExperience: View {
     private func dismissOverlay() {
         guard isOverlay else { return }
         searchFocused = false
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+        withAnimation(.overlayPush) {
             app.overlay = nil
         }
     }

@@ -399,7 +399,7 @@ struct NodeDetailOverlay: View {
     /// Opens the composer with this node already chosen.
     private func startCompose() {
         app.composePreselectedNode = node
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+        withAnimation(.overlayPush) {
             app.overlay = .compose
         }
     }
@@ -409,7 +409,7 @@ struct NodeDetailOverlay: View {
     private func startNodeSearch() {
         let slug = store.slug.isEmpty ? node.slug : store.slug
         app.searchInitialQuery = "#\(slug) "
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        withAnimation(.panelSlide) {
             app.overlay = .search
         }
     }
@@ -529,7 +529,7 @@ struct NodeDetailOverlay: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { descriptionExpanded.toggle() }
+                    withAnimation(.quick) { descriptionExpanded.toggle() }
                 } label: {
                     Text(descriptionExpanded ? "收起" : "查看更多内容")
                         .font(Theme.body(13, weight: .semibold))
@@ -653,7 +653,7 @@ struct NodeDetailOverlay: View {
 
     private func open(_ post: Post) {
         app.selectedPost = post
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+        withAnimation(.expandCollapse) {
             app.overlay = .post
         }
     }

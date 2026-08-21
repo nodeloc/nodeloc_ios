@@ -325,7 +325,7 @@ final class AppState {
             comments: 0,
             hasImage: false
         )
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+        withAnimation(.expandCollapse) {
             overlay = .post
         }
     }

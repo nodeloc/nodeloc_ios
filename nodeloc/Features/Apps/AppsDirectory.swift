@@ -46,7 +46,7 @@ struct AppsDirectoryOverlay: View {
                         ForEach(store.visibleApps) { item in
                             Button {
                                 app.selectedApp = item
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(.quick) {
                                     app.overlay = .appDetail
                                 }
                             } label: {
@@ -214,7 +214,7 @@ struct AppDetailOverlay: View {
     private var header: some View {
         HStack {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { app.overlay = .appsDirectory }
+                withAnimation(.quick) { app.overlay = .appsDirectory }
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .semibold))
@@ -345,7 +345,7 @@ struct AppDetailOverlay: View {
             comments: 0,
             hasImage: false
         )
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+        withAnimation(.expandCollapse) {
             app.overlay = .post
         }
     }

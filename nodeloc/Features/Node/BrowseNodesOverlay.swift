@@ -65,7 +65,7 @@ struct BrowseNodesOverlay: View {
 
                 if let selectedNode {
                     NodeDetailOverlay(node: selectedNode) {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                        withAnimation(.overlayPush) {
                             self.selectedNode = nil
                         }
                     }
@@ -104,7 +104,7 @@ struct BrowseNodesOverlay: View {
                 Spacer()
 
                 Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         app.overlay = .createNode
                     }
                 } label: {
@@ -135,7 +135,7 @@ struct BrowseNodesOverlay: View {
 
     private func handleBack() {
         if showsGroupList {
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.quick) {
                 showsGroupList = false
             }
         } else {
@@ -364,7 +364,7 @@ struct BrowseNodesOverlay: View {
     }
 
     private func openGroup(_ group: NodeGroupSummary) {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(.quick) {
             showsGroupList = true
         }
         Task { await store.loadGroup(group) }
@@ -616,7 +616,7 @@ struct BrowseNodesOverlay: View {
     }
 
     private func openNode(_ node: SidebarNodeSummary) {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        withAnimation(.panelSlide) {
             selectedNode = node
         }
     }

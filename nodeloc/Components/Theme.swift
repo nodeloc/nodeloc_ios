@@ -288,3 +288,18 @@ extension String {
     /// Punctuation common in URLs and paths, where a line break looks natural.
     private static let breakOpportunities: Set<Character> = ["/", "-", "_", ".", "?", "&", "=", ":", ",", "+"]
 }
+
+// MARK: - Motion
+
+extension Animation {
+    /// Pushing a full-screen overlay in or out.
+    static let overlayPush = Animation.spring(response: 0.28, dampingFraction: 0.9)
+    /// Larger travel: the sidebar drawer, the search overlay.
+    static let panelSlide = Animation.spring(response: 0.3, dampingFraction: 0.9)
+    /// Expanding or collapsing a section in place.
+    static let expandCollapse = Animation.spring(response: 0.34, dampingFraction: 0.88)
+    /// Fades and small state flips.
+    static let quick = Animation.easeInOut(duration: 0.2)
+    /// Same intent as `quick`, a touch faster; used where a fade follows a tap.
+    static let quicker = Animation.easeInOut(duration: 0.18)
+}

@@ -353,7 +353,7 @@ struct SidebarOverlay: View {
     }
 
     private func perform(_ action: SidebarAction) {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(.quick) {
             switch action {
             case .home:
                 app.tab = .home
@@ -384,7 +384,7 @@ struct SidebarOverlay: View {
         Task {
             guard let fetched = try? await DiscourseClient().app(slug: slug).directoryApp else { return }
             app.selectedApp = fetched
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.quick) {
                 app.overlay = .appDetail
             }
         }

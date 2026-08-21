@@ -27,7 +27,7 @@ struct HomeView: View {
                             post: post,
                             postTransitionNamespace: postTransitionNamespace,
                             onOpenAuthor: { target in
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                                withAnimation(.panelSlide) {
                                     selectedProfile = target
                                 }
                             }
@@ -67,7 +67,7 @@ struct HomeView: View {
 
             if let selectedProfile {
                 PublicProfileOverlay(target: selectedProfile) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         self.selectedProfile = nil
                     }
                 }
@@ -174,7 +174,7 @@ struct HomeView: View {
             Spacer()
 
             Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                withAnimation(.overlayPush) {
                     app.overlay = .compose
                 }
             } label: {
@@ -251,7 +251,7 @@ struct PostCard: View {
 
     private func openPost() {
         app.selectedPost = post
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+        withAnimation(.expandCollapse) {
             app.overlay = .post
         }
     }
@@ -451,7 +451,7 @@ private struct FeedMediaCarousel: View {
             HStack {
                 pageButton(systemImage: "chevron.left") {
                     guard selection > 0 else { return }
-                    withAnimation(.easeInOut(duration: 0.18)) { selection -= 1 }
+                    withAnimation(.quicker) { selection -= 1 }
                 }
                 .opacity(selection > 0 ? 1 : 0)
 
@@ -459,7 +459,7 @@ private struct FeedMediaCarousel: View {
 
                 pageButton(systemImage: "chevron.right") {
                     guard selection < items.count - 1 else { return }
-                    withAnimation(.easeInOut(duration: 0.18)) { selection += 1 }
+                    withAnimation(.quicker) { selection += 1 }
                 }
                 .opacity(selection < items.count - 1 ? 1 : 0)
             }

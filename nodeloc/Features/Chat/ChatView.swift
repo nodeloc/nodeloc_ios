@@ -149,7 +149,7 @@ struct ChatView: View {
 
             HStack {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(.quick) {
                         app.overlay = .sidebar
                     }
                 } label: {
@@ -166,7 +166,7 @@ struct ChatView: View {
 
                 HStack(spacing: 0) {
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.quick) {
                             app.overlay = .compose
                         }
                     } label: {
@@ -204,7 +204,7 @@ struct ChatView: View {
         HStack(spacing: 0) {
             ForEach(MessagePane.allCases, id: \.self) { pane in
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(.quicker) {
                         selection = pane
                     }
                 } label: {
@@ -276,7 +276,7 @@ struct ChatView: View {
             HStack(spacing: 8) {
                 ForEach(ChatInboxFilter.allCases, id: \.self) { filter in
                     Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
+                        withAnimation(.quicker) {
                             chatFilter = filter
                         }
                     } label: {
@@ -803,7 +803,7 @@ private struct ChatConversationView: View {
                 if store.selectedThread == nil {
                     dismiss()
                 } else {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(.quicker) {
                         store.closeThread()
                     }
                 }
@@ -1052,7 +1052,7 @@ private struct ChatConversationView: View {
 
     private func openThread(_ thread: ChatThreadListItem) {
         Task {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.quicker) {
                 store.selectedThread = thread
             }
             await store.openThread(thread)

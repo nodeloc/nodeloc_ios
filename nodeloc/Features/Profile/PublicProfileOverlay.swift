@@ -585,7 +585,7 @@ struct PublicProfileOverlay: View {
             HStack(spacing: 24) {
                 ForEach(ProfileStore.ProfileTab.allCases) { tab in
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { selectedTab = tab }
+                        withAnimation(.quick) { selectedTab = tab }
                     } label: {
                         VStack(spacing: 7) {
                             Text(tab.rawValue)

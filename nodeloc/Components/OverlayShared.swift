@@ -42,11 +42,11 @@ struct OverlayHeader: View {
 
 func closeOverlay(_ app: AppState) {
     if app.overlay == .post {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        withAnimation(.panelSlide) {
             app.overlay = nil
         }
     } else {
-        withAnimation(.easeInOut(duration: 0.2)) {
+        withAnimation(.quick) {
             app.overlay = nil
         }
     }

@@ -1294,7 +1294,7 @@ struct MediaViewerChrome<Content: View>: View {
         .overlay {
             if isShowingNode, let node {
                 NodeDetailOverlay(node: node) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         isShowingNode = false
                     }
                 }
@@ -1304,7 +1304,7 @@ struct MediaViewerChrome<Content: View>: View {
         .overlay {
             if isShowingAuthor, let author {
                 PublicProfileOverlay(target: author) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         isShowingAuthor = false
                     }
                 }
@@ -1351,7 +1351,7 @@ struct MediaViewerChrome<Content: View>: View {
     private func caption(for context: PostVideoContext) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                withAnimation(.overlayPush) {
                     isShowingAuthor = true
                 }
             } label: {
@@ -1399,7 +1399,7 @@ struct MediaViewerChrome<Content: View>: View {
 
             if let context {
                 Button {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                    withAnimation(.overlayPush) {
                         isShowingNode = true
                     }
                 } label: {
@@ -1562,7 +1562,7 @@ private struct FullScreenVideoPage: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.2)) { isChromeVisible.toggle() }
+            withAnimation(.quick) { isChromeVisible.toggle() }
         }
         .onAppear(perform: prepare)
         .onDisappear(perform: teardown)
@@ -1744,7 +1744,7 @@ struct PostImageViewer: View {
                     ZoomableImage(
                         urlString: image.fullSizeURLString,
                         onToggleChrome: {
-                            withAnimation(.easeInOut(duration: 0.2)) { isChromeVisible.toggle() }
+                            withAnimation(.quick) { isChromeVisible.toggle() }
                         }
                     )
                     .tag(index)
@@ -2053,7 +2053,7 @@ struct PostDetailsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
+                withAnimation(.quicker) { isExpanded.toggle() }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")

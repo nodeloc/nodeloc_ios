@@ -49,7 +49,7 @@ struct PostDetailOverlay: View {
 
                 if let selectedProfile {
                     PublicProfileOverlay(target: selectedProfile) {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                        withAnimation(.overlayPush) {
                             self.selectedProfile = nil
                         }
                     }
@@ -401,7 +401,7 @@ struct PostDetailOverlay: View {
 
     private func openProfile(_ target: UserProfileTarget?) {
         guard let target else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+        withAnimation(.overlayPush) {
             selectedProfile = target
         }
     }

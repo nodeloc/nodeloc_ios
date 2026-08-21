@@ -147,7 +147,7 @@ struct MainView: View {
     private func openSearchOverlay(restoring tab: Tab) {
         let restoredTab = tab == .search ? lastContentTab : tab
         app.tab = restoredTab
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+        withAnimation(.panelSlide) {
             app.overlay = .search
         }
     }
@@ -161,7 +161,7 @@ struct MainView: View {
     }
 
     private func closeSidebar() {
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+        withAnimation(.overlayPush) {
             app.overlay = nil
         }
     }

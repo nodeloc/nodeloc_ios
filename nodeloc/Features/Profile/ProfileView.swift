@@ -315,7 +315,7 @@ struct ProfileView: View {
     /// Guests still need a way into the login flow.
     private var guestLoginAction: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.quick) {
                 app.isGuest = false
                 app.authed = false
             }
@@ -603,7 +603,7 @@ struct ProfileView: View {
             HStack(spacing: 24) {
                 ForEach(ProfileStore.ProfileTab.allCases) { tab in
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { selectedTab = tab }
+                        withAnimation(.quick) { selectedTab = tab }
                     } label: {
                         VStack(spacing: 7) {
                             Text(tab.rawValue)
@@ -790,7 +790,7 @@ struct ProfileView: View {
             authorUsername: item.username,
             authorName: item.name
         )
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+        withAnimation(.expandCollapse) {
             app.overlay = .post
         }
     }
