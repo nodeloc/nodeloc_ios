@@ -11,6 +11,7 @@ struct MainView: View {
     @Environment(AppState.self) private var app
     @Namespace private var postTransitionNamespace
     @State private var lastContentTab: Tab = .home
+    @State private var profileTabAvatar = ProfileTabAvatarStore()
 
     var body: some View {
         @Bindable var app = app
@@ -38,6 +39,15 @@ struct MainView: View {
                         Text("Home")
                     }
 
+                    SwiftUI.Tab(value: Tab.nodes) {
+                        tabContent {
+                            BrowseNodesOverlay(showsCloseButton: false)
+                        }
+                    } label: {
+                        Image(systemName: "square.grid.2x2")
+                        Text("节点")
+                    }
+
                     SwiftUI.Tab(value: Tab.chat) {
                         tabContent {
                             ChatView()
@@ -52,7 +62,14 @@ struct MainView: View {
                             ProfileView()
                         }
                     } label: {
-                        Image(systemName: "person")
+                        if let tabImage = profileTabAvatar.tabImage {
+                            // Bare Image with .original so the tab bar keeps the
+                            // photo's colors instead of template-tinting it.
+                            Image(uiImage: tabImage)
+                                .renderingMode(.original)
+                        } else {
+                            Image(systemName: "person.crop.circle")
+                        }
                         Text("Profile")
                     }
 
@@ -93,9 +110,21 @@ struct MainView: View {
                 lastContentTab = app.tab
             }
         }
+        .task(id: profileTabAvatarTaskID) {
+            await profileTabAvatar.load(isSignedIn: app.authed && !app.isGuest)
+        }
         .onChange(of: app.tab) { oldValue, newValue in
             if newValue == .search {
-                openSearchOverlay(restoring: oldValue == .search ? lastContentTab : oldValue)
+                // Selecting Search while its overlay is already up means the
+                // tap landed on the tab bar rather than the close button — the
+                // two share the bottom-right corner. Bounce the selection back
+                // without reopening, or the overlay the user is dismissing
+                // immediately returns.
+                guard app.overlay != .search else {
+                    app.tab = oldValue == .search ? lastContentTab : oldValue
+                    return
+                }
+                openSearchOverlay(restoring: oldValue)
                 return
             }
             lastContentTab = newValue
@@ -105,6 +134,16 @@ struct MainView: View {
         }
     }
 
+    private var profileTabAvatarTaskID: String {
+        "\(app.authed)-\(app.isGuest)-\(DiscourseAuth.shared.username ?? "")"
+    }
+
+    /// Opens the search overlay and moves the tab selection off `.search`.
+    ///
+    /// The selection must not stay on `.search`: that tab's own content is a
+    /// full `SearchView` in screen mode, so leaving it selected means closing
+    /// the overlay simply reveals a near-identical search screen underneath and
+    /// the close button looks like it did nothing.
     private func openSearchOverlay(restoring tab: Tab) {
         let restoredTab = tab == .search ? lastContentTab : tab
         app.tab = restoredTab
@@ -112,6 +151,7 @@ struct MainView: View {
             app.overlay = .search
         }
     }
+
 
     private func openSidebar() {
         guard app.overlay == nil else { return }
@@ -176,10 +216,16 @@ struct MainView: View {
                 .transition(.opacity)
                 .zIndex(100)
             case .search:
-                SearchOverlay(postTransitionNamespace: postTransitionNamespace)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(90)
+                SearchOverlay(
+                    postTransitionNamespace: postTransitionNamespace,
+                    initialQuery: app.searchInitialQuery
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(90)
+                // Consumed on open, so returning to search later starts blank
+                // rather than still scoped to a node the user has left.
+                .onDisappear { app.searchInitialQuery = "" }
             default:
                 Group {
                     switch overlay {
@@ -192,6 +238,8 @@ struct MainView: View {
                     case .notifications: NotificationsOverlay()
                     case .settings: SettingsOverlay()
                     case .pro: ProOverlay()
+                    case .appsDirectory: AppsDirectoryOverlay()
+                    case .appDetail: AppDetailOverlay()
                     }
                 }
                 .transition(transition(for: overlay))
@@ -219,9 +267,9 @@ struct MainView: View {
             return .move(edge: .leading)
         case .post:
             return .redditPost
-        case .compose, .search, .browseNodes, .createNode:
+        case .compose, .search, .browseNodes, .createNode, .appsDirectory:
             return .move(edge: .bottom).combined(with: .opacity)
-        case .notifications, .settings, .pro:
+        case .notifications, .settings, .pro, .appDetail:
             return .opacity
         }
     }
@@ -246,6 +294,112 @@ private extension AnyTransition {
     }
 }
 
+/// Draws `source` aspect-filled into a centered circle that occupies
+/// `contentFraction` of a transparent square canvas. The transparent margin makes
+/// the tab bar's scale-to-fit land the visible circle at an optical size
+/// comparable to the SF Symbol tab icons. `.alwaysOriginal` keeps the photo's
+/// real colors (the tab bar template-tints otherwise).
+private func paddedCircularAvatar(from source: UIImage, scale: CGFloat) -> UIImage {
+    let side: CGFloat = 40
+    let contentFraction: CGFloat = 0.58
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = scale
+    format.opaque = false
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+    let rendered = renderer.image { _ in
+        let diameter = side * contentFraction
+        let inset = (side - diameter) / 2
+        let circleRect = CGRect(x: inset, y: inset, width: diameter, height: diameter)
+        UIBezierPath(ovalIn: circleRect).addClip()
+        let aspect = max(diameter / source.size.width, diameter / source.size.height)
+        let drawSize = CGSize(width: source.size.width * aspect, height: source.size.height * aspect)
+        let origin = CGPoint(x: (side - drawSize.width) / 2, y: (side - drawSize.height) / 2)
+        source.draw(in: CGRect(origin: origin, size: drawSize))
+    }
+    return rendered.withRenderingMode(.alwaysOriginal)
+}
+
+@MainActor
+@Observable
+private final class ProfileTabAvatarStore {
+    private let client = DiscourseClient()
+    private var loadedUsername: String?
+
+    var username = ""
+    var displayName = ""
+    var avatarURL: URL?
+    var isSignedIn = false
+    /// Pre-rendered circular avatar for the tab bar (transparent-padded, original
+    /// colors). Provided as a bare `Image` so the tab bar honors its colors.
+    var tabImage: UIImage?
+
+    var initial: String {
+        let source = displayName.isEmpty ? username : displayName
+        return source.first.map { String($0).uppercased() } ?? "?"
+    }
+
+    var variant: Int {
+        abs(username.hashValue)
+    }
+
+    func load(isSignedIn: Bool) async {
+        guard isSignedIn, DiscourseAuth.shared.isAuthenticated else {
+            clear()
+            return
+        }
+
+        if let restoredUsername = DiscourseAuth.shared.username, !restoredUsername.isEmpty {
+            username = restoredUsername
+            displayName = restoredUsername
+            self.isSignedIn = true
+        }
+
+        guard loadedUsername != DiscourseAuth.shared.username || avatarURL == nil else {
+            await renderTabImage()
+            return
+        }
+
+        do {
+            let response = try await client.currentUser()
+            let user = response.currentUser
+            username = user.username
+            displayName = user.name?.isEmpty == false ? user.name! : user.username
+            avatarURL = user.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 96) }
+            self.isSignedIn = true
+            loadedUsername = user.username
+            // Earliest point the account preference is available; the store
+            // ignores it if this device has already chosen a mode.
+            NodeReadingModeStore.shared.applyAccountPreference(user.userOption?.communityViewMode)
+        } catch {
+            self.isSignedIn = !username.isEmpty
+        }
+        await renderTabImage()
+    }
+
+    /// Fetches the avatar and renders the tab-bar image once per URL.
+    private func renderTabImage() async {
+        guard tabImage == nil, let url = avatarURL else { return }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return }
+            guard let source = UIImage(data: data) else { return }
+            let scale = UITraitCollection.current.displayScale
+            tabImage = paddedCircularAvatar(from: source, scale: scale > 0 ? scale : 3)
+        } catch {
+            // Keep the SF Symbol fallback when the photo can't load.
+        }
+    }
+
+    private func clear() {
+        username = ""
+        displayName = ""
+        avatarURL = nil
+        isSignedIn = false
+        loadedUsername = nil
+        tabImage = nil
+    }
+}
+
 /// Preview helper: a signed-in app on a given tab/overlay.
 private func mainPreview(tab: Tab = .home, overlay: Overlay? = nil) -> some View {
     let app = AppState()
@@ -260,6 +414,7 @@ private func mainPreview(tab: Tab = .home, overlay: Overlay? = nil) -> some View
 }
 
 #Preview("Home") { mainPreview(tab: .home) }
+#Preview("Nodes") { mainPreview(tab: .nodes) }
 #Preview("Search") { mainPreview(tab: .search) }
 #Preview("Chat") { mainPreview(tab: .chat) }
 #Preview("Profile") { mainPreview(tab: .profile) }

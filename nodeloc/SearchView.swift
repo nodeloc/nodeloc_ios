@@ -27,11 +27,15 @@ struct SearchView: View {
 
 struct SearchOverlay: View {
     let postTransitionNamespace: Namespace.ID
+    /// Text to open with, e.g. "#slug " when scoped to a node. Defaults to
+    /// empty so the existing call sites are unaffected.
+    var initialQuery: String = ""
 
     var body: some View {
         SearchExperience(
             postTransitionNamespace: postTransitionNamespace,
-            mode: .overlay
+            mode: .overlay,
+            initialQuery: initialQuery
         )
     }
 }
@@ -45,10 +49,14 @@ private struct SearchExperience: View {
     @Environment(AppState.self) private var app
     let postTransitionNamespace: Namespace.ID
     let mode: SearchExperienceMode
+    var initialQuery: String = ""
 
     @State private var store = SearchStore()
+    private let history = SearchHistoryStore.shared
     @State private var query = ""
+    @State private var showHistory = false
     @State private var selectedScope: SearchScope = .all
+    @State private var selectedProfile: UserProfileTarget?
     @FocusState private var searchFocused: Bool
     @Namespace private var scopeSelectionNamespace
 
@@ -73,9 +81,26 @@ private struct SearchExperience: View {
                 screenSearchHeader
                     .frame(maxHeight: .infinity, alignment: .top)
             }
+
+            if let selectedProfile {
+                PublicProfileOverlay(target: selectedProfile) {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                        self.selectedProfile = nil
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(30)
+            }
         }
         .task { await store.loadCategories() }
         .onAppear {
+            // Seeding the query here rather than in an init: assigning to the
+            // @State is a real change from "", so the onChange below runs the
+            // first search. A value baked into the State's initial value would
+            // not fire it.
+            if !initialQuery.isEmpty, query.isEmpty {
+                query = initialQuery
+            }
             guard isOverlay else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                 searchFocused = true
@@ -83,6 +108,12 @@ private struct SearchExperience: View {
         }
         .onChange(of: query) { _, newValue in
             Task { await store.search(newValue) }
+        }
+        .sheet(isPresented: $showHistory) {
+            SearchHistorySheet { term in
+                showHistory = false
+                apply(term)
+            }
         }
     }
 
@@ -118,42 +149,51 @@ private struct SearchExperience: View {
 
     private var redditSuggestions: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sectionHeader(title: "最近", trailing: "历史记录")
+            // Hidden entirely when there is nothing to show, rather than an
+            // empty heading over blank space.
+            if !history.entries.isEmpty {
+                sectionHeader(title: "最近", trailing: "历史记录") {
+                    showHistory = true
+                }
                 .padding(.bottom, 12)
 
-            VStack(spacing: 0) {
-                RedditSearchRow(
-                    icon: "clock",
-                    title: "nodeloc",
-                    subtitle: nil,
-                    badge: nil,
-                    trailingIcon: "xmark"
-                )
-
-                RedditSearchRow(
-                    icon: nil,
-                    title: "r/PhotoshopRequest",
-                    subtitle: nil,
-                    badge: "Paid  $",
-                    trailingIcon: "xmark",
-                    avatarText: "PsR",
-                    avatarTint: Color(hex: 0x0B5AA8)
-                )
+                VStack(spacing: 0) {
+                    ForEach(history.recent(), id: \.self) { term in
+                        Button {
+                            apply(term)
+                        } label: {
+                            RedditSearchRow(
+                                icon: "clock",
+                                title: term,
+                                subtitle: nil,
+                                badge: nil,
+                                trailingIcon: "xmark",
+                                onTrailingTap: { history.remove(term) }
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.bottom, 24)
             }
-            .padding(.bottom, 24)
 
             sectionHeader(title: "热门", trailing: nil)
                 .padding(.bottom, 12)
 
             VStack(spacing: 0) {
                 ForEach(Self.hotSearches, id: \.self) { title in
-                    RedditSearchRow(
-                        icon: "arrow.up.right",
-                        title: title,
-                        subtitle: "根据你的兴趣",
-                        badge: nil,
-                        trailingIcon: nil
-                    )
+                    Button {
+                        apply(title)
+                    } label: {
+                        RedditSearchRow(
+                            icon: "arrow.up.right",
+                            title: title,
+                            subtitle: "根据你的兴趣",
+                            badge: nil,
+                            trailingIcon: nil
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -170,7 +210,15 @@ private struct SearchExperience: View {
             }
 
             ForEach(store.results) { post in
-                PostCard(post: post, postTransitionNamespace: postTransitionNamespace)
+                PostCard(
+                    post: post,
+                    postTransitionNamespace: postTransitionNamespace,
+                    onOpenAuthor: { target in
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                            selectedProfile = target
+                        }
+                    }
+                )
             }
 
             if !store.isSearching && store.results.isEmpty {
@@ -274,6 +322,9 @@ private struct SearchExperience: View {
                 .autocorrectionDisabled()
                 .submitLabel(.search)
                 .focused($searchFocused)
+                // Recorded on submit rather than in the live-search onChange,
+                // which fires per keystroke and would save "v", "vp", "vps".
+                .onSubmit { history.record(query) }
 
             if !query.isEmpty {
                 Button {
@@ -307,7 +358,11 @@ private struct SearchExperience: View {
         .background(Theme.bg)
     }
 
-    private func sectionHeader(title: String, trailing: String?) -> some View {
+    private func sectionHeader(
+        title: String,
+        trailing: String?,
+        action: (() -> Void)? = nil
+    ) -> some View {
         HStack {
             Text(title)
                 .font(Theme.body(14, weight: .semibold))
@@ -316,7 +371,7 @@ private struct SearchExperience: View {
             Spacer()
 
             if let trailing {
-                Button {} label: {
+                Button { action?() } label: {
                     HStack(spacing: 5) {
                         Text(trailing)
                         Image(systemName: "chevron.right")
@@ -328,6 +383,14 @@ private struct SearchExperience: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    /// Runs a saved or suggested term: fills the field, records it, and closes
+    /// the keyboard so the results are visible immediately.
+    private func apply(_ term: String) {
+        query = term
+        history.record(term)
+        searchFocused = false
     }
 
     private func dismissOverlay() {
@@ -346,6 +409,112 @@ private struct SearchExperience: View {
     ]
 }
 
+/// The full list of saved search terms, with per-row delete and a clear-all.
+private struct SearchHistorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    private let history = SearchHistoryStore.shared
+    @State private var confirmingClear = false
+
+    /// Called with the term to search for; the caller closes the sheet.
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if history.entries.isEmpty {
+                    emptyState
+                } else {
+                    list
+                }
+            }
+            .background(Theme.bg)
+            .navigationTitle("历史记录")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("完成") { dismiss() }
+                        .font(Theme.body(15, weight: .semibold))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("清空", role: .destructive) { confirmingClear = true }
+                        .font(Theme.body(15, weight: .semibold))
+                        .disabled(history.entries.isEmpty)
+                }
+            }
+            // Clearing everything can't be undone, so it asks first.
+            .confirmationDialog(
+                "清空全部历史记录？",
+                isPresented: $confirmingClear,
+                titleVisibility: .visible
+            ) {
+                Button("清空", role: .destructive) { history.clear() }
+                Button("取消", role: .cancel) {}
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var list: some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(history.entries, id: \.self) { term in
+                    Button {
+                        onSelect(term)
+                    } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundStyle(Theme.muted(0.5))
+                                .frame(width: 26)
+
+                            Text(term)
+                                .font(Theme.body(15))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(1)
+
+                            Spacer(minLength: 8)
+
+                            Button {
+                                history.remove(term)
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Theme.muted(0.5))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("删除 \(term)")
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Divider().padding(.leading, 58)
+                }
+            }
+            .padding(.top, 4)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "clock")
+                .font(.system(size: 30, weight: .medium))
+                .foregroundStyle(Theme.muted(0.34))
+            Text("还没有搜索记录")
+                .font(Theme.body(14, weight: .medium))
+                .foregroundStyle(Theme.muted(0.58))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct RedditSearchRow: View {
     let icon: String?
     let title: String
@@ -354,6 +523,9 @@ private struct RedditSearchRow: View {
     let trailingIcon: String?
     var avatarText: String?
     var avatarTint: Color = Theme.accent
+    /// Set to make the trailing icon its own control, e.g. deleting a history
+    /// entry without also running that search.
+    var onTrailingTap: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 15) {
@@ -391,10 +563,22 @@ private struct RedditSearchRow: View {
             Spacer(minLength: 8)
 
             if let trailingIcon {
-                Image(systemName: trailingIcon)
+                let glyph = Image(systemName: trailingIcon)
                     .font(.system(size: 18, weight: .regular))
                     .foregroundStyle(Theme.muted(0.58))
                     .frame(width: 28, height: 28)
+
+                if let onTrailingTap {
+                    // Its own button so deleting an entry doesn't also trigger
+                    // the row's search action underneath.
+                    Button(action: onTrailingTap) {
+                        glyph.contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("删除")
+                } else {
+                    glyph
+                }
             }
         }
         .frame(minHeight: 50)

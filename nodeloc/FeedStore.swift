@@ -28,7 +28,7 @@ final class FeedStore {
         errorText = nil
         do {
             async let latestCall = client.latest()
-            async let siteCall: SiteResponse? = try? client.site()
+            async let siteCall: SiteResponse? = await SiteResources.shared.siteResponse()
             let latest = try await latestCall
             let site = await siteCall
 
@@ -53,7 +53,23 @@ final class FeedStore {
     }
 
     private func map(topic: TopicListItem, usersByID: [Int: DiscourseUser]) -> Post {
-        let category = topic.categoryId.flatMap { categoriesByID[$0] }
+        FeedMapper.post(
+            topic: topic,
+            usersByID: usersByID,
+            client: client,
+            category: topic.categoryId.flatMap { categoriesByID[$0] }
+        )
+    }
+}
+
+/// Shared topic → Post mapping, used by the home feed and by node topic lists.
+enum FeedMapper {
+    static func post(
+        topic: TopicListItem,
+        usersByID: [Int: DiscourseUser],
+        client: DiscourseClient,
+        category: DiscourseCategory? = nil
+    ) -> Post {
         let author = topic.posters?.compactMap { poster in
             poster.userId.flatMap { usersByID[$0] }
         }.first
@@ -66,7 +82,9 @@ final class FeedStore {
             avatarLetter: letter,
             variant: topic.id % 2,
             time: DiscourseFormat.relative(topic.bumpedAt ?? topic.lastPostedAt ?? topic.createdAt),
-            title: topic.title,
+            // Titles can contain a bare URL with no wrap opportunity, which
+            // would otherwise widen the whole row.
+            title: topic.title.breakingLongTokens(),
             excerpt: DiscourseFormat.plainText(topic.excerpt),
             baseVotes: topic.likeCount ?? 0,
             comments: topic.replyCount ?? max(0, (topic.postsCount ?? 1) - 1),
@@ -76,7 +94,9 @@ final class FeedStore {
             avatarURL: author?.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
             authorUsername: author?.username,
             authorName: author?.name,
-            media: media
+            media: media,
+            tags: (topic.tags ?? []).compactMap(\.name),
+            videoURL: topic.topicVideoUrl.flatMap { NodeSummaryFactory.resolvedURL($0) }
         )
     }
 }

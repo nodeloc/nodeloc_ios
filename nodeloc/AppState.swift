@@ -31,6 +31,19 @@ struct Post: Identifiable {
     var authorName: String? = nil
     /// Feed media previews. Uses Discourse's topic thumbnails when available.
     var media: [PostMedia] = []
+    /// Discourse topic tags, shown as badges under the title.
+    var tags: [String] = []
+    /// First post's video, when the topic has one. Card mode autoplays it.
+    var videoURL: URL? = nil
+
+    /// Target for opening the author's public profile from the feed.
+    var authorProfileTarget: UserProfileTarget? {
+        guard let authorUsername else { return nil }
+        let trimmed = authorUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let displayName = authorName == trimmed ? nil : authorName
+        return UserProfileTarget(username: trimmed, displayName: displayName, avatarURL: avatarURL)
+    }
 }
 
 struct PostMedia: Identifiable, Hashable {
@@ -49,7 +62,12 @@ struct PostComment: Identifiable {
     let id: Int
     let author: String
     let time: String
-    let text: String
+    /// Parsed body. Replies render through the same pipeline as the main post
+    /// so quotes and code blocks look identical in both places.
+    let content: PostContent
+    /// What this reply won, when the topic has a red envelope. The plugin
+    /// auto-claims on reply, so this is a result rather than an action.
+    let redEnvelopeClaim: RedEnvelopeClaim?
     let votes: Int
     let postNumber: Int
     let replyToPostNumber: Int?
@@ -65,7 +83,8 @@ struct PostComment: Identifiable {
         id: Int,
         author: String,
         time: String,
-        text: String,
+        content: PostContent,
+        redEnvelopeClaim: RedEnvelopeClaim? = nil,
         votes: Int,
         postNumber: Int = 0,
         replyToPostNumber: Int? = nil,
@@ -80,7 +99,8 @@ struct PostComment: Identifiable {
         self.id = id
         self.author = author
         self.time = time
-        self.text = text
+        self.content = content
+        self.redEnvelopeClaim = redEnvelopeClaim
         self.votes = votes
         self.postNumber = postNumber
         self.replyToPostNumber = replyToPostNumber
@@ -91,6 +111,18 @@ struct PostComment: Identifiable {
         self.isLastSibling = isLastSibling
         self.ancestorTrails = ancestorTrails
         self.hasChildren = hasChildren
+    }
+
+    /// Convenience for sample data and previews, where the body is a literal
+    /// string rather than parsed HTML.
+    init(id: Int, author: String, time: String, text: String, votes: Int) {
+        self.init(
+            id: id,
+            author: author,
+            time: time,
+            content: PostContent(blocks: [.paragraph([.text(text)])]),
+            votes: votes
+        )
     }
 }
 
@@ -107,7 +139,7 @@ struct UserProfileTarget: Identifiable, Hashable {
     }
 }
 
-struct Chat: Identifiable {
+struct Chat: Identifiable, Hashable {
     let id: Int
     let name: String
     let letter: String
@@ -115,6 +147,73 @@ struct Chat: Identifiable {
     let lastMsg: String
     let time: String
     let unread: Bool
+    var avatarURL: URL? = nil
+    var threadUnreadCount: Int = 0
+}
+
+struct ChatThreadListItem: Identifiable, Hashable {
+    let id: Int
+    let channelID: Int
+    let title: String
+    let channelName: String
+    let excerpt: String
+    let time: String
+    let replyCount: Int
+    let unread: Bool
+    let avatarLetter: String
+    let variant: Int
+    var avatarURL: URL? = nil
+}
+
+struct ChatCustomEmoji: Identifiable, Hashable {
+    let shortcode: String
+    let url: URL
+    let width: Int?
+    let height: Int?
+
+    var id: String { "\(shortcode)-\(url.absoluteString)" }
+}
+
+struct ChatContentFragment: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case text(String)
+        case customEmoji(ChatCustomEmoji)
+        case lineBreak
+    }
+
+    let id: String
+    let kind: Kind
+}
+
+struct ChatSearchResult: Identifiable, Hashable {
+    let id: Int
+    let chat: Chat
+    let message: ChatConversationMessage
+    let thread: ChatThreadListItem?
+}
+
+struct ChatConversationMessage: Identifiable, Hashable {
+    let id: Int
+    let authorName: String
+    let username: String
+    let text: String
+    let time: String
+    let avatarLetter: String
+    let variant: Int
+    let avatarURL: URL?
+    let isMine: Bool
+    let thread: ChatThreadListItem?
+    var content: [ChatContentFragment] = []
+    var media: [PostMedia] = []
+
+    var authorProfileTarget: UserProfileTarget? {
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedUsername.isEmpty, trimmedUsername.lowercased() != "system" else {
+            return nil
+        }
+        let displayName = authorName == trimmedUsername ? nil : authorName
+        return UserProfileTarget(username: trimmedUsername, displayName: displayName, avatarURL: avatarURL)
+    }
 }
 
 enum NotificationKind { case like, comment, message, success, star }
@@ -146,8 +245,8 @@ struct SettingRow: Identifiable {
 
 // MARK: - Navigation
 
-enum Tab: Hashable { case home, search, chat, profile }
-enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, pro
+enum Tab: Hashable { case home, nodes, search, chat, profile }
+enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, pro, appsDirectory, appDetail
     var id: Int { hashValue }
 }
 enum AuthMode { case login, signup }
@@ -170,9 +269,18 @@ final class AppState {
     var tab: Tab = .home
     var overlay: Overlay?
     var selectedPost: Post = SampleData.posts[0]
+    /// App chosen from the directory, shown by the app detail overlay.
+    var selectedApp: DirectoryApp?
     var likedPosts: Set<Int> = []
     var plan: ProPlan = .yearly
     var navCollapsed = false
+    /// Node the composer should open with already selected, set by whoever
+    /// opens it (the node page). Cleared by the composer once read, so a later
+    /// compose started elsewhere doesn't inherit it.
+    var composePreselectedNode: SidebarNodeSummary?
+    /// Text the search overlay opens with, e.g. "#slug " to scope to one node.
+    /// Cleared by the search view once read.
+    var searchInitialQuery = ""
 
     // MARK: Derived
 
@@ -192,6 +300,46 @@ final class AppState {
     func toggleInterest(_ name: String) {
         if interests.contains(name) { interests.remove(name) }
         else { interests.insert(name) }
+    }
+
+    // MARK: Link routing
+
+    /// Profile requested by a `/u/<name>` link. The post detail and feed watch
+    /// this so a tapped mention lands on the native profile.
+    var routedProfile: UserProfileTarget?
+
+    /// Opens a nodeloc topic natively. Only the id is known from the URL, so
+    /// the post detail fills in the rest when it loads the topic.
+    func openTopic(id: Int) {
+        // Already open — nothing to do, and rebuilding would lose scroll.
+        guard !(overlay == .post && selectedPost.id == id) else { return }
+        selectedPost = Post(
+            id: id,
+            node: "",
+            avatarLetter: "N",
+            variant: id % 2,
+            time: "",
+            title: "",
+            excerpt: "",
+            baseVotes: 0,
+            comments: 0,
+            hasImage: false
+        )
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+            overlay = .post
+        }
+    }
+
+    func openProfile(username: String) {
+        routedProfile = UserProfileTarget(username: username)
+    }
+
+    /// Node requested by a `/n/<slug>` or `/c/<slug>/<id>` link. The slug is
+    /// all the URL carries; `NodeCatalog` resolves it to a full summary.
+    var routedNodeSlug: String?
+
+    func openNode(slug: String) {
+        routedNodeSlug = slug
     }
 
     // Auth copy

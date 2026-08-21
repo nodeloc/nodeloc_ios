@@ -11,6 +11,10 @@ struct HomeView: View {
     @State private var feed = FeedStore()
     @State private var lastOffset: CGFloat = 0
     @State private var headerHiddenAmount: CGFloat = 0
+    @State private var selectedProfile: UserProfileTarget?
+    /// Negative content offset while over-pulling at the top.
+    @State private var pullDistance: CGFloat = 0
+    @State private var isRefreshing = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -18,34 +22,80 @@ struct HomeView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear.frame(height: headerHeight)
-                    if feed.posts.isEmpty && feed.isLoading {
-                        ProgressView()
-                            .tint(Theme.accent)
-                            .padding(.top, 40)
-                    }
                     ForEach(feed.posts) { post in
-                        PostCard(post: post, postTransitionNamespace: postTransitionNamespace)
+                        PostCard(
+                            post: post,
+                            postTransitionNamespace: postTransitionNamespace,
+                            onOpenAuthor: { target in
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                                    selectedProfile = target
+                                }
+                            }
+                        )
                     }
                 }
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
-            .refreshable { await feed.load() }
             .task { await feed.loadIfNeeded() }
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
             } action: { _, newValue in
                 handleScroll(newValue)
             }
+            // Over-pull past the natural resting position. The scroll view's
+            // resting offset is -contentInsets.top, so measure against that
+            // rather than against 0.
+            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                max(0, -(geo.contentOffset.y + geo.contentInsets.top))
+            } action: { _, newValue in
+                pullDistance = newValue
+            }
+            .onScrollPhaseChange { _, newPhase in
+                // Fire once the drag ends past the threshold.
+                guard !newPhase.isScrolling, pullDistance >= refreshThreshold, !isRefreshing else { return }
+                isRefreshing = true
+                Task {
+                    await feed.load()
+                    isRefreshing = false
+                }
+            }
 
             if app.overlay != .post {
                 persistentHeaderButtons
+            }
+
+            if let selectedProfile {
+                PublicProfileOverlay(target: selectedProfile) {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                        self.selectedProfile = nil
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(30)
             }
         }
     }
 
     private let headerHeight: CGFloat = 56
     private let quickRevealThreshold: CGFloat = 14
+    private let refreshThreshold: CGFloat = 72
+    private let logoHeight: CGFloat = 30
+
+    /// Spinning (rather than drag-proportional) while actually loading.
+    private var isIndeterminate: Bool {
+        isRefreshing || (feed.posts.isEmpty && feed.isLoading)
+    }
+
+    private var showsLoader: Bool {
+        isIndeterminate || pullDistance > 4
+    }
+
+    /// 1 when the header is fully shown, 0 once it has scrolled away.
+    private var logoRevealProgress: CGFloat {
+        guard headerHeight > 0 else { return 1 }
+        return 1 - min(max(headerHiddenAmount / headerHeight, 0), 1)
+    }
 
     // MARK: Scroll → collapse behaviour
 
@@ -92,17 +142,34 @@ struct HomeView: View {
 
     // MARK: Header
 
+    @ViewBuilder
+    private var headerWordmark: some View {
+        if showsLoader {
+            NodelocLoader(
+                progress: isIndeterminate ? nil : pullDistance / refreshThreshold,
+                height: logoHeight
+            )
+        } else {
+            Image("NodelocWordmark")
+                .resizable()
+                .scaledToFit()
+                .frame(height: logoHeight)
+                .accessibilityLabel("NodeLoc")
+        }
+    }
+
     private var persistentHeaderButtons: some View {
         HStack {
-            Button { app.overlay = .sidebar } label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.headerText)
-                    .frame(width: 34, height: 34)
-            }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
-            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+            SidebarMenuButton()
+
+            Spacer()
+
+            // Doubles as the loading indicator: idle it's the plain wordmark,
+            // while pulling/refreshing it animates. Scrolls up out of the way
+            // with the header, while the glass buttons stay pinned.
+            headerWordmark
+                .opacity(logoRevealProgress)
+                .offset(y: -(1 - logoRevealProgress) * headerHeight * 0.6)
 
             Spacer()
 
@@ -132,7 +199,15 @@ struct PostCard: View {
     @Environment(AppState.self) private var app
     let post: Post
     let postTransitionNamespace: Namespace.ID
+    /// Opens the author's public profile; nil disables the avatar tap.
+    var onOpenAuthor: ((UserProfileTarget) -> Void)? = nil
     @State private var selectedMediaIndex = 0
+    /// Media opened straight from the card, without entering the post.
+    @State private var viewerImages: [PostImage] = []
+    @State private var viewerIndex = 0
+    @State private var viewerVideo: PostVideo?
+    /// Resolved node, so the player's header shows the same logo as elsewhere.
+    @State private var nodeSummary: SidebarNodeSummary?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -156,22 +231,60 @@ struct PostCard: View {
             isSource: app.overlay != .post || app.selectedPost.id != post.id
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            app.selectedPost = post
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-                app.overlay = .post
-            }
+        .onTapGesture(perform: openPost)
+        // Media opens over the feed, so closing returns to the same scroll
+        // position instead of dropping the reader into the post.
+        .postImageFullScreen(
+            images: $viewerImages,
+            selection: $viewerIndex,
+            presentation: PostVideoPresentation(post: post, node: nodeSummary),
+            onComment: { openPost() }
+        )
+        .postVideoFullScreen(
+            video: $viewerVideo,
+            presentation: PostVideoPresentation(post: post, node: nodeSummary),
+            // Commenting needs the post, so it opens it.
+            onComment: { openPost() }
+        )
+        .task(id: post.node) { nodeSummary = await NodeCatalog.shared.node(slug: post.node) }
+    }
+
+    private func openPost() {
+        app.selectedPost = post
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+            app.overlay = .post
         }
+    }
+
+    /// Opens the tapped media directly rather than the post.
+    private func openMedia(at index: Int) {
+        if let videoURL = post.videoURL {
+            viewerVideo = PostVideo(src: videoURL.absoluteString, posterSrc: post.imageURL?.absoluteString)
+            return
+        }
+        let images = mediaItems.map {
+            PostImage(src: $0.url.absoluteString, width: $0.width, height: $0.height)
+        }
+        guard !images.isEmpty else { return }
+        viewerImages = images
+        viewerIndex = min(max(index, 0), images.count - 1)
     }
 
     private var postHeader: some View {
         HStack(spacing: 7) {
-            RemoteAvatar(
+            let avatar = RemoteAvatar(
                 url: post.avatarURL,
                 letter: post.avatarLetter,
                 variant: post.variant,
                 size: 26
             )
+
+            if let onOpenAuthor, let target = post.authorProfileTarget {
+                Button { onOpenAuthor(target) } label: { avatar }
+                    .buttonStyle(.plain)
+            } else {
+                avatar
+            }
 
             Text(post.node)
                 .font(Theme.body(12, weight: .semibold))
@@ -226,8 +339,18 @@ struct PostCard: View {
 
     @ViewBuilder
     private var mediaPreview: some View {
-        if !mediaItems.isEmpty {
-            FeedMediaCarousel(items: mediaItems, selection: $selectedMediaIndex)
+        // A topic with a video autoplays it in place of the image carousel;
+        // the thumbnail is just its poster frame anyway.
+        if let videoURL = post.videoURL {
+            FeedVideoTile(url: videoURL, posterURL: post.imageURL) {
+                openMedia(at: 0)
+            }
+            .padding(.top, 2)
+        } else if !mediaItems.isEmpty {
+            FeedMediaCarousel(items: mediaItems, selection: $selectedMediaIndex) {
+                // Opens whichever page is showing, not always the first.
+                openMedia(at: selectedMediaIndex)
+            }
             .padding(.top, 2)
         } else if post.hasImage {
             ImagePlaceholder()
@@ -281,6 +404,8 @@ struct PostCard: View {
 private struct FeedMediaCarousel: View {
     let items: [PostMedia]
     @Binding var selection: Int
+    /// Opens the current page full screen. Nil falls through to the card.
+    var onTap: (() -> Void)?
     @State private var availableWidth: CGFloat = 362
 
     var body: some View {
@@ -289,6 +414,10 @@ private struct FeedMediaCarousel: View {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     FeedMediaPage(item: item)
                         .tag(index)
+                        // On the page, not the TabView: a gesture on the
+                        // container would fight the paging swipe.
+                        .contentShape(Rectangle())
+                        .onTapGesture { onTap?() }
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -363,23 +492,19 @@ private struct FeedMediaCarousel: View {
         .buttonStyle(.plain)
     }
 
+    /// Sized from the first item's real dimensions, Reddit-style: the card
+    /// takes the media's own shape, clamped to 16:9 wide … 4:5 tall.
     private var previewHeight: CGFloat {
-        guard let first = items.first,
-              let width = first.width,
-              let height = first.height,
-              width > 0,
-              height > 0 else {
-            return Self.defaultHeight
-        }
-
-        let previewWidth = min(max(availableWidth, 1), 500)
-        let rawHeight = previewWidth * CGFloat(height) / CGFloat(width)
-        return min(max(rawHeight, Self.minHeight), Self.maxHeight)
+        Theme.FeedMedia.height(
+            forWidth: max(availableWidth, 1),
+            mediaWidth: items.first?.width,
+            mediaHeight: items.first?.height
+        )
     }
 
+    /// Placeholder height before any media is known — a square, matching the
+    /// default aspect, so the card doesn't resize once dimensions arrive.
     static let defaultHeight: CGFloat = 230
-    private static let minHeight: CGFloat = 170
-    private static let maxHeight: CGFloat = 320
 }
 
 private struct FeedMediaPage: View {

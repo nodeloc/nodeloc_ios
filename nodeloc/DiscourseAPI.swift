@@ -125,8 +125,53 @@ struct DiscourseClient {
         try await get("site.json")
     }
 
-    func categories() async throws -> CategoriesResponse {
-        try await get("categories.json")
+    /// A node's topics for a given ordering. `path` is the parent/child slug
+    /// pair Discourse expects (e.g. "technology/ai") — /c/{slug}/{id} redirects.
+    func nodeTopics(
+        path: String,
+        categoryID: Int,
+        sort: String = "latest",
+        page: Int = 0
+    ) async throws -> CategoryTopicsResponse {
+        try await get(
+            "c/\(path)/\(categoryID)/l/\(sort).json",
+            query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
+        )
+    }
+
+    func joinNode(categoryID: Int) async throws -> NodeMembershipResponse {
+        let data = try await send("POST", path: "node/join/\(categoryID)")
+        return try Self.decode(data)
+    }
+
+    func leaveNode(categoryID: Int) async throws -> NodeMembershipResponse {
+        let data = try await send("DELETE", path: "node/leave/\(categoryID)")
+        return try Self.decode(data)
+    }
+
+    /// Sets how much a node notifies this user. `level` is a
+    /// `NodeNotificationLevel` raw value — Discourse's own integers.
+    /// Goes through `post(_:form:)` for its CSRF header: without one the
+    /// endpoint answers 403 BAD CSRF.
+    @discardableResult
+    func setCategoryNotification(categoryID: Int, level: Int) async throws -> Data {
+        try await post(
+            "category/\(categoryID)/notifications",
+            form: ["notification_level": String(level)]
+        )
+    }
+
+    private static func decode<T: Decodable>(_ data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(T.self, from: data)
+    }
+
+    func categories(includeSubcategories: Bool = false) async throws -> CategoriesResponse {
+        try await get(
+            "categories.json",
+            query: includeSubcategories ? [URLQueryItem(name: "include_subcategories", value: "true")] : []
+        )
     }
 
     func sidebarNodes() async throws -> SidebarCommunitiesResponse {
@@ -172,6 +217,74 @@ struct DiscourseClient {
         try await get("u/\(username).json")
     }
 
+    func userSummary(_ username: String) async throws -> UserSummaryResponse {
+        try await get("u/\(username)/summary.json")
+    }
+
+    /// Follow a user (discourse-follow plugin).
+    func follow(username: String) async throws {
+        try await send("PUT", path: "follow/\(username)")
+    }
+
+    /// Unfollow a user (discourse-follow plugin).
+    func unfollow(username: String) async throws {
+        try await send("DELETE", path: "follow/\(username)")
+    }
+
+    // MARK: Apps (discourse-apps plugin)
+
+    /// Published apps. The directory endpoint returns a bare JSON array.
+    func appsDirectory() async throws -> [DirectoryApp] {
+        try await get("apps/directory.json")
+    }
+
+    /// One app by slug. This payload *is* wrapped, unlike the list.
+    func app(slug: String) async throws -> DirectoryAppResponse {
+        try await get("apps/\(slug).json")
+    }
+
+    /// The sandboxed document that actually runs a webview app.
+    func appWebviewURL(installID: Int) -> URL {
+        baseURL.appending(path: "apps/installs/\(installID)/webview")
+    }
+
+    /// Group title styles from the discourse-custom-badge plugin. Public: for
+    /// non-admins the server returns only groups that have a style configured.
+    func customGroupStyles() async throws -> [CustomGroupStyleItem] {
+        try await get("discourse_custom_badge/group-styles/list")
+    }
+
+    /// Badge styles from the discourse-custom-badge plugin (badges used as titles).
+    func customBadgeStyles() async throws -> [CustomBadgeStyleItem] {
+        try await get("discourse_custom_badge/badge-styles/list")
+    }
+
+    /// 能量 (points) history from the discourse-points-service plugin.
+    func pointsHistory(username: String, page: Int = 0) async throws -> PointsHistoryResponse {
+        try await get(
+            "u/\(username)/points-history.json",
+            query: [URLQueryItem(name: "page", value: String(page))]
+        )
+    }
+
+    /// Total 能量 balance from the plugin's scores endpoint.
+    func pointsTotal(username: String) async throws -> PointsScoresResponse {
+        try await get(
+            "u/\(username)/points-scores.json",
+            query: [URLQueryItem(name: "page", value: "0")]
+        )
+    }
+
+    /// User activity stream filtered by Discourse UserAction type
+    /// (1 = likes given, 3 = bookmarks, 4 = topics, 5 = replies).
+    func userActions(username: String, filter: Int) async throws -> UserActionsResponse {
+        try await get("user_actions.json", query: [
+            URLQueryItem(name: "username", value: username),
+            URLQueryItem(name: "filter", value: String(filter)),
+            URLQueryItem(name: "offset", value: "0")
+        ])
+    }
+
     func currentUser() async throws -> CurrentUserResponse {
         try await get("session/current.json")
     }
@@ -188,7 +301,129 @@ struct DiscourseClient {
         }
     }
 
+    func chatMessages(channelID: Int, pageSize: Int = 50, targetMessageID: Int? = nil) async throws -> ChatMessagesResponse {
+        try await get(
+            "chat/api/channels/\(channelID)/messages.json",
+            query: chatMessageQuery(
+                pageSize: pageSize,
+                fetchFromLastRead: targetMessageID == nil,
+                targetMessageID: targetMessageID
+            )
+        )
+    }
+
+    func chatSearch(
+        query: String,
+        limit: Int = 20,
+        offset: Int = 0,
+        sort: String = "latest",
+        excludeThreads: Bool = false
+    ) async throws -> ChatSearchResponse {
+        let clampedLimit = min(max(limit, 1), 40)
+        let normalizedOffset = max(offset, 0)
+        return try await get(
+            "chat/api/search.json",
+            query: [
+                URLQueryItem(name: "query", value: query),
+                URLQueryItem(name: "limit", value: String(clampedLimit)),
+                URLQueryItem(name: "offset", value: String(normalizedOffset)),
+                URLQueryItem(name: "sort", value: sort),
+                URLQueryItem(name: "exclude_threads", value: excludeThreads ? "true" : "false")
+            ]
+        )
+    }
+
+    func chatThreads(channelID: Int, limit: Int = 10, offset: Int = 0) async throws -> ChatThreadsResponse {
+        try await get(
+            "chat/api/channels/\(channelID)/threads.json",
+            query: chatThreadsQuery(limit: limit, offset: offset)
+        )
+    }
+
+    func currentUserChatThreads(limit: Int = 10, offset: Int = 0) async throws -> ChatThreadsResponse {
+        try await get(
+            "chat/api/me/threads.json",
+            query: chatThreadsQuery(limit: limit, offset: offset)
+        )
+    }
+
+    func chatThreadMessages(
+        channelID: Int,
+        threadID: Int,
+        pageSize: Int = 50,
+        targetMessageID: Int? = nil
+    ) async throws -> ChatMessagesResponse {
+        try await get(
+            "chat/api/channels/\(channelID)/threads/\(threadID)/messages.json",
+            query: chatMessageQuery(
+                pageSize: pageSize,
+                fetchFromLastRead: targetMessageID == nil,
+                targetMessageID: targetMessageID
+            )
+        )
+    }
+
     // MARK: Write actions (require authentication)
+
+    func createChatMessage(channelID: Int, message: String, threadID: Int? = nil) async throws -> ChatCreateMessageResponse {
+        var form = ["message": message]
+        if let threadID {
+            form["thread_id"] = String(threadID)
+        }
+
+        let data = try await post("chat/\(channelID).json", form: form)
+        do {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(ChatCreateMessageResponse.self, from: data)
+        } catch {
+            throw DiscourseError.decoding(error)
+        }
+    }
+
+    private func chatMessageQuery(
+        pageSize: Int,
+        fetchFromLastRead: Bool,
+        targetMessageID: Int? = nil
+    ) -> [URLQueryItem] {
+        var query = [URLQueryItem(name: "page_size", value: String(pageSize))]
+        if fetchFromLastRead {
+            query.append(URLQueryItem(name: "fetch_from_last_read", value: "true"))
+        }
+        if let targetMessageID {
+            query.append(URLQueryItem(name: "target_message_id", value: String(targetMessageID)))
+        }
+        return query
+    }
+
+    private func chatThreadsQuery(limit: Int, offset: Int) -> [URLQueryItem] {
+        let clampedLimit = min(max(limit, 1), 10)
+        let normalizedOffset = max(offset, 0)
+        return [
+            URLQueryItem(name: "limit", value: String(clampedLimit)),
+            URLQueryItem(name: "offset", value: String(normalizedOffset))
+        ]
+    }
+
+    /// Bodyless authenticated request (PUT/DELETE), used by the follow endpoints.
+    @discardableResult
+    private func send(_ method: String, path: String) async throws -> Data {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAuth(to: &request, includeCSRF: true)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw DiscourseError.transport(error)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw DiscourseError.badResponse(http.statusCode)
+        }
+        return data
+    }
 
     @discardableResult
     private func post(_ path: String, form: [String: String]) async throws -> Data {
@@ -204,6 +439,72 @@ struct DiscourseClient {
             .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
             .joined(separator: "&")
             .data(using: .utf8)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw DiscourseError.transport(error)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw DiscourseError.badResponse(http.statusCode)
+        }
+        return data
+    }
+
+    /// Form-encoded request with ordered, possibly repeated keys, for any HTTP
+    /// method. Rails reads `options[]=a&options[]=b` as an array; a dictionary
+    /// can't represent that.
+    @discardableResult
+    private func formItems(
+        _ method: String,
+        path: String,
+        items: [(String, String)]
+    ) async throws -> Data {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = method
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAuth(to: &request, includeCSRF: true)
+
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        request.httpBody = items
+            .map { key, value in
+                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+                return "\(encodedKey)=\(encodedValue)"
+            }
+            .joined(separator: "&")
+            .data(using: .utf8)
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw DiscourseError.transport(error)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw DiscourseError.badResponse(http.statusCode)
+        }
+        return data
+    }
+
+    /// JSON-bodied POST. The lottery plugin's controller reads a nested `levels`
+    /// array, which form encoding can't express.
+    @discardableResult
+    private func postJSON(_ path: String, body: Encodable) async throws -> Data {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAuth(to: &request, includeCSRF: true)
+
+        do {
+            request.httpBody = try JSONEncoder().encode(body)
+        } catch {
+            throw DiscourseError.decoding(error)
+        }
 
         let (data, response): (Data, URLResponse)
         do {
@@ -275,13 +576,17 @@ struct DiscourseClient {
     }
 
     /// Creates a new topic in a category.
-    func createTopic(title: String, raw: String, categoryID: Int) async throws {
-        try await post("posts", form: [
+    /// Returns the created post, whose `topic_id` is needed by follow-up calls
+    /// like red-envelope creation.
+    @discardableResult
+    func createTopic(title: String, raw: String, categoryID: Int) async throws -> CreatePostResponse {
+        let data = try await post("posts", form: [
             "title": title,
             "raw": raw,
             "category": String(categoryID),
             "archetype": "regular",
         ])
+        return try Self.decode(data)
     }
 
     /// Creates a user-owned node under a top-level category.
@@ -313,17 +618,102 @@ struct DiscourseClient {
     }
 
     /// Uploads a composer attachment and returns the Discourse upload token/URL.
+    /// `upload_type` replaces the `type` param, which Discourse deprecated in
+    /// 3.4 and drops in 3.5.
     func uploadComposerMedia(data: Data, fileName: String, mimeType: String) async throws -> DiscourseUpload {
         try await postMultipart(
             "uploads.json",
             fields: [
-                "type": "composer",
+                "upload_type": "composer",
                 "synchronous": "true",
             ],
             file: MultipartFile(
                 fieldName: "file",
                 fileName: fileName,
                 mimeType: mimeType,
+                data: data
+            )
+        )
+    }
+
+    /// Casts a poll vote. `options[]` repeats once per selected option, which
+    /// the `[String: String]` form helper can't express — hence `formItems`.
+    func votePoll(postID: Int, pollName: String, options: [String]) async throws -> PollVoteResponse {
+        var items = [("post_id", String(postID)), ("poll_name", pollName)]
+        items.append(contentsOf: options.map { ("options[]", $0) })
+        let data = try await formItems("PUT", path: "polls/vote", items: items)
+        return try Self.decode(data)
+    }
+
+    func removePollVote(postID: Int, pollName: String) async throws -> PollVoteResponse {
+        let data = try await formItems(
+            "DELETE",
+            path: "polls/vote",
+            items: [("post_id", String(postID)), ("poll_name", pollName)]
+        )
+        return try Self.decode(data)
+    }
+
+    /// Buys lottery tickets. Each ticket costs one energy point.
+    func participateInLottery(
+        lotteryID: Int,
+        quantity: Int,
+        isRandom: Bool
+    ) async throws -> LotteryActionResponse {
+        let data = try await formItems(
+            "POST",
+            path: "lottery/\(lotteryID)/participate",
+            items: [("quantity", String(quantity)), ("random", isRandom ? "true" : "false")]
+        )
+        return try Self.decode(data)
+    }
+
+    /// Creates a red envelope on a topic that already exists.
+    ///
+    /// The plugin has no markup form: its composer stashes the values and posts
+    /// them from an `afterCreate` hook once the topic id is known
+    /// (red-envelope-topic-creation.js), so this is always a second request
+    /// after `createTopic`.
+    func createRedEnvelope(topicID: Int, totalPoints: Int, totalCount: Int) async throws -> RedEnvelopeResponse {
+        let data = try await post(
+            "red-envelopes.json",
+            form: [
+                "topic_id": String(topicID),
+                "total_points": String(totalPoints),
+                "total_count": String(totalCount),
+            ]
+        )
+        return try Self.decode(data)
+    }
+
+    /// Creates a lottery on an existing post.
+    ///
+    /// Keyed by **post id**, not topic id — `lottery_controller#create` looks up
+    /// `Post.find_by(id: params[:post_id])` and enforces one lottery per post.
+    /// Like the red envelope this runs after the post is saved, mirroring the
+    /// plugin's `addModelCallback("post", "afterCreate")`.
+    func createLottery(postID: Int, draft: LotteryDraft) async throws -> LotteryCreateResponse {
+        let data = try await postJSON("lottery", body: draft.payload(postID: postID))
+        return try Self.decode(data)
+    }
+
+    /// Uploads a video poster frame.
+    ///
+    /// Discourse links a poster to its video purely by filename: `pretty_text.rb`
+    /// looks up `Upload.where("original_filename LIKE ?", "#{video_sha1}.%")`
+    /// when rendering the video placeholder. So the file *must* be named after
+    /// the video's SHA1, and there is no markdown that references it.
+    func uploadVideoPoster(data: Data, videoSHA1: String) async throws -> DiscourseUpload {
+        try await postMultipart(
+            "uploads.json",
+            fields: [
+                "upload_type": "thumbnail",
+                "synchronous": "true",
+            ],
+            file: MultipartFile(
+                fieldName: "file",
+                fileName: "\(videoSHA1).png",
+                mimeType: "image/png",
                 data: data
             )
         )
@@ -373,13 +763,20 @@ enum DiscourseFormat {
     }
 
     /// Strips HTML tags and decodes a few common entities for plain-text excerpts.
+    /// Excerpt text for list rows. Post *bodies* go through `PostHTMLParser`
+    /// instead; this is only for previews where formatting isn't wanted.
+    ///
+    /// Long tokens are made breakable, because a bare URL in an excerpt has no
+    /// wrap opportunity and would widen the row past the screen.
     static func plainText(_ html: String?) -> String {
         guard let html else { return "" }
         var text = html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
                         "&#39;": "'", "&hellip;": "…", "&nbsp;": " "]
         for (entity, value) in entities { text = text.replacingOccurrences(of: entity, with: value) }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .breakingLongTokens()
     }
 
     static func mediaItems(for topic: TopicListItem) -> [PostMedia] {

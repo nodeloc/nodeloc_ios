@@ -94,6 +94,33 @@ enum Theme {
     static let radiusMd: CGFloat = 8
     static let radiusLg: CGFloat = 14
 
+    // MARK: Feed media
+    //
+    // Reddit sizes card media by the media's own aspect ratio and clamps only
+    // the extremes: wider than 16:9 gets pillarboxed, taller than 4:5 is
+    // cropped behind a "see full image" affordance. A fixed height instead
+    // letterboxes every portrait photo and crops every panorama.
+    enum FeedMedia {
+        /// Widest shape before the card stops getting shorter.
+        static let minAspect: CGFloat = 9.0 / 16.0   // 0.5625 h/w
+        /// Tallest shape before the card stops getting taller (4:5 portrait).
+        static let maxAspect: CGFloat = 5.0 / 4.0    // 1.25 h/w
+        /// Used until the real dimensions are known.
+        static let defaultAspect: CGFloat = 1.0
+
+        /// Height for a media box of `width`, given the media's pixel size.
+        /// Ratios are height ÷ width so the clamp reads in the same direction.
+        static func height(forWidth width: CGFloat, mediaWidth: Int?, mediaHeight: Int?) -> CGFloat {
+            let ratio: CGFloat
+            if let w = mediaWidth, let h = mediaHeight, w > 0, h > 0 {
+                ratio = CGFloat(h) / CGFloat(w)
+            } else {
+                ratio = defaultAspect
+            }
+            return width * min(max(ratio, minAspect), maxAspect)
+        }
+    }
+
     // MARK: Typography — the system substitute for "Inter".
     static func heading(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
         .system(size: size, weight: weight)
@@ -157,4 +184,107 @@ extension View {
         background(tint)
             .background(.ultraThinMaterial)
     }
+
+    /// Fills a fixed-height, full-width banner slot without letting the image
+    /// dictate the layout width.
+    ///
+    /// `.aspectRatio(contentMode: .fill)` scales to *cover*, so a wide, short
+    /// image becomes much wider than the screen. `.clipShape` only clips the
+    /// drawing — the frame stays oversized, and a `ScrollView` will adopt it as
+    /// the content width, dragging every sibling out with it. Sizing an empty
+    /// box first and hanging the image in an `overlay` keeps the layout width
+    /// fixed while the image still fills.
+    func filledBanner<S: Shape>(height: CGFloat, clip: S) -> some View {
+        Color.clear
+            .frame(height: height)
+            .frame(maxWidth: .infinity)
+            .overlay { self.scaledToFill() }
+            .clipShape(clip)
+    }
+
+    /// Stops a subview's intrinsic width from widening its ancestors.
+    ///
+    /// SwiftUI reports a `Text`'s minimum width as its longest *unbreakable*
+    /// run, so one long URL, hash, or English word in user content propagates
+    /// all the way up and pushes the whole screen sideways. Clipping to the
+    /// proposed width contains that without affecting normal content.
+    ///
+    /// Apply to any container rendering user-generated text or images.
+    func clampedToWidth() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+    }
+
+}
+
+// MARK: - Text wrapping
+
+extension String {
+    /// Inserts zero-width spaces into runs that have no natural break, so long
+    /// URLs and hashes wrap instead of forcing their container wider.
+    ///
+    /// A zero-width space is invisible and copy-paste keeps the original text
+    /// on Apple platforms, which is why this is preferable to truncating.
+    func breakingLongTokens(every maxRun: Int = 18) -> String {
+        // Cheap pre-check: most strings need no work, and re-running on already
+        // broken text must be a no-op or repeated renders would compound marks.
+        guard containsUnbreakableRun(longerThan: maxRun) else { return self }
+
+        var result = ""
+        var runLength = 0
+        for character in self {
+            if character.isWhitespace || character.isNewline || Self.isNaturallyBreakable(character) {
+                runLength = 0
+            } else if Self.breakOpportunities.contains(character) {
+                // Break *after* URL punctuation, which reads naturally.
+                runLength = 0
+                result.append(character)
+                result.append("\u{200B}")
+                continue
+            } else {
+                runLength += 1
+                if runLength > maxRun {
+                    result.append("\u{200B}")
+                    runLength = 1
+                }
+            }
+            result.append(character)
+        }
+        return result
+    }
+
+    private func containsUnbreakableRun(longerThan maxRun: Int) -> Bool {
+        var runLength = 0
+        for character in self {
+            if character.isWhitespace
+                || character.isNewline
+                || character == "\u{200B}"
+                || Self.isNaturallyBreakable(character)
+                || Self.breakOpportunities.contains(character) {
+                runLength = 0
+            } else {
+                runLength += 1
+                if runLength > maxRun { return true }
+            }
+        }
+        return false
+    }
+
+    /// CJK and similar scripts wrap between any two characters, so they never
+    /// form an unbreakable run and need no help.
+    private static func isNaturallyBreakable(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        switch scalar.value {
+        case 0x2E80...0x9FFF,    // CJK radicals through unified ideographs
+             0xAC00...0xD7AF,    // Hangul syllables
+             0xF900...0xFAFF,    // CJK compatibility ideographs
+             0xFF00...0xFFEF:    // Full-width forms and punctuation
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Punctuation common in URLs and paths, where a line break looks natural.
+    private static let breakOpportunities: Set<Character> = ["/", "-", "_", ".", "?", "&", "=", ":", ",", "+"]
 }

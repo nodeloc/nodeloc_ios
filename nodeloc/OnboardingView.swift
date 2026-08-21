@@ -71,6 +71,9 @@ struct OnboardingView: View {
 /// Simple wrapping flow layout for chips/tags.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
+    /// Horizontal alignment of each row. Defaults to `.leading` to preserve
+    /// existing call sites; `.center` centers each wrapped row.
+    var alignment: HorizontalAlignment = .leading
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
@@ -92,19 +95,39 @@ struct FlowLayout: Layout {
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
         var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
+        for row in rows(maxWidth: bounds.width, subviews: subviews) {
+            let rowWidth = row.reduce(CGFloat(0)) { $0 + subviews[$1].sizeThatFits(.unspecified).width }
+                + spacing * CGFloat(max(0, row.count - 1))
+            var x = bounds.minX
+            switch alignment {
+            case .center: x += (bounds.width - rowWidth) / 2
+            case .trailing: x += bounds.width - rowWidth
+            default: break
             }
-            sub.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+            var rowHeight: CGFloat = 0
+            for index in row {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+                rowHeight = max(rowHeight, size.height)
+            }
+            y += rowHeight + spacing
         }
+    }
+
+    private func rows(maxWidth: CGFloat, subviews: Subviews) -> [[Int]] {
+        var rows: [[Int]] = [[]]
+        var x: CGFloat = 0
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, !rows[rows.count - 1].isEmpty {
+                rows.append([])
+                x = 0
+            }
+            rows[rows.count - 1].append(index)
+            x += size.width + spacing
+        }
+        return rows
     }
 }

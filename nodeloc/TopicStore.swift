@@ -6,25 +6,35 @@
 //
 
 import Foundation
+import UIKit
 
 @MainActor
 @Observable
 final class TopicStore {
     private let client = DiscourseClient()
 
-    var body = ""
+    /// Parsed body of the first post. Replaces the old plain-text `body`.
+    var content = PostContent.empty
     var comments: [PostComment] = []
     var isLoading = false
     var isLoadingMore = false
     var isSubmitting = false
     var totalReplyCount = 0
     var firstAuthor: UserProfileTarget?
+    /// Plugin payloads for the first post and the topic.
+    var firstPostPolls: [PostPoll] = []
+    var myPollVotes: [String: [String]] = [:]
+    var lottery: PostLottery?
+    var redEnvelope: TopicRedEnvelope?
     private(set) var firstPostID: Int?
     private var loadedID: Int?
     private var allPosts: [TopicPost] = []
     private var streamPostIDs: [Int] = []
     private var loadedPostIDs: Set<Int> = []
     private let pageSize = 20
+    /// Parsed bodies keyed by post id + edit version, so scrolling back through
+    /// a long topic doesn't re-parse HTML that hasn't changed.
+    private let contentCache = ParsedContentCache.shared
 
     var hasMoreComments: Bool {
         !remainingPostIDs.isEmpty
@@ -37,10 +47,14 @@ final class TopicStore {
     func load(topicID: Int) async {
         guard loadedID != topicID else { return }
         isLoading = true
-        body = ""
+        content = .empty
         comments = []
         totalReplyCount = 0
         firstAuthor = nil
+        firstPostPolls = []
+        myPollVotes = [:]
+        lottery = nil
+        redEnvelope = nil
         allPosts = []
         streamPostIDs = []
         loadedPostIDs = []
@@ -54,18 +68,196 @@ final class TopicStore {
                     displayName: firstPost.name,
                     avatarURL: firstPost.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 120) }
                 )
+                firstPostPolls = firstPost.polls ?? []
+                myPollVotes = firstPost.pollsVotes ?? [:]
+                lottery = firstPost.lottery
             }
-            body = DiscourseFormat.plainText(posts.first?.cooked)
+            redEnvelope = topic.redEnvelope
             allPosts = posts
             streamPostIDs = topic.postStream.stream ?? posts.map(\.id)
             loadedPostIDs = Set(posts.map(\.id))
             totalReplyCount = max(0, (topic.postsCount ?? streamPostIDs.count) - 1)
+
+            // Parse off the main actor before touching any @Observable state.
+            await parseContents(for: posts)
+            content = posts.first.map { parsedContent(for: $0) } ?? .empty
             comments = nestedComments(from: orderedPosts())
             loadedID = topicID
         } catch {
-            // Leave body/comments empty; the overlay falls back to the list excerpt.
+            // Leave content/comments empty; the overlay falls back to the excerpt.
         }
         isLoading = false
+    }
+
+    // MARK: Plugin actions
+
+    /// Poll names with a request in flight. Guards against double-taps sending
+    /// duplicate votes.
+    private(set) var pollsInFlight: Set<String> = []
+    private(set) var isLotteryBusy = false
+    var pluginErrorText: String?
+
+    func vote(pollName: String, options: [String]) async {
+        guard let postID = firstPostID, !pollsInFlight.contains(pollName) else { return }
+        pollsInFlight.insert(pollName)
+        defer { pollsInFlight.remove(pollName) }
+
+        // Optimistic: reflect the selection immediately, roll back on failure.
+        let previousVotes = myPollVotes[pollName]
+        let previousPolls = firstPostPolls
+        myPollVotes[pollName] = options
+
+        do {
+            let response = try await client.votePoll(postID: postID, pollName: pollName, options: options)
+            if let poll = response.poll { replacePoll(poll, name: pollName) }
+            if let vote = response.vote { myPollVotes[pollName] = vote }
+        } catch {
+            myPollVotes[pollName] = previousVotes
+            firstPostPolls = previousPolls
+            pluginErrorText = failureText(error)
+        }
+    }
+
+    func removeVote(pollName: String) async {
+        guard let postID = firstPostID, !pollsInFlight.contains(pollName) else { return }
+        pollsInFlight.insert(pollName)
+        defer { pollsInFlight.remove(pollName) }
+
+        let previousVotes = myPollVotes[pollName]
+        let previousPolls = firstPostPolls
+        myPollVotes[pollName] = []
+
+        do {
+            let response = try await client.removePollVote(postID: postID, pollName: pollName)
+            if let poll = response.poll { replacePoll(poll, name: pollName) }
+        } catch {
+            myPollVotes[pollName] = previousVotes
+            firstPostPolls = previousPolls
+            pluginErrorText = failureText(error)
+        }
+    }
+
+    func participateInLottery(quantity: Int, isRandom: Bool) async {
+        guard let lottery, !isLotteryBusy else { return }
+        isLotteryBusy = true
+        defer { isLotteryBusy = false }
+
+        do {
+            let response = try await client.participateInLottery(
+                lotteryID: lottery.id,
+                quantity: quantity,
+                isRandom: isRandom
+            )
+            if response.success == false {
+                pluginErrorText = response.error ?? "参与失败。"
+                return
+            }
+            if let updated = response.lottery {
+                self.lottery = updated
+            } else if let topicID = loadedID {
+                // The endpoint doesn't always echo the lottery back; refetch so
+                // ticket counts stay truthful.
+                await refreshLottery(topicID: topicID)
+            }
+        } catch {
+            pluginErrorText = failureText(error)
+        }
+    }
+
+    private func replacePoll(_ poll: PostPoll, name: String) {
+        if let index = firstPostPolls.firstIndex(where: { $0.pollName == name }) {
+            firstPostPolls[index] = poll
+        }
+    }
+
+    private func refreshLottery(topicID: Int) async {
+        guard let topic = try? await client.topic(id: topicID),
+              let first = topic.postStream.posts.first
+        else { return }
+        lottery = first.lottery
+    }
+
+    private func failureText(_ error: Error) -> String {
+        if case DiscourseError.badResponse(let status) = error {
+            switch status {
+            case 403: return "没有权限执行该操作。"
+            case 422: return "操作被拒绝，可能条件不满足。"
+            default: return "操作失败（\(status)）。"
+            }
+        }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    // MARK: Parsed content
+
+    private static func cacheKey(_ post: TopicPost) -> String {
+        "\(post.id)-\(post.version ?? 0)"
+    }
+
+    /// Parsed bodies, shared across `TopicStore` instances.
+    ///
+    /// This used to be a per-instance dictionary that died with the store, so
+    /// backing out of a topic and reopening it re-parsed every post from HTML.
+    /// The key already carries the post's edit version, so a stale entry can't
+    /// outlive an edit. Bounded because a long session visits many topics.
+    @MainActor
+    final class ParsedContentCache {
+        static let shared = ParsedContentCache()
+
+        private let cache = NSCache<NSString, Box>()
+
+        /// NSCache needs a class type; `PostContent` is a struct.
+        final class Box {
+            let content: PostContent
+            init(_ content: PostContent) { self.content = content }
+        }
+
+        private init() {
+            cache.countLimit = 600
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in self.cache.removeAllObjects() }
+            }
+        }
+
+        func content(forKey key: String) -> PostContent? {
+            cache.object(forKey: key as NSString)?.content
+        }
+
+        func insert(_ content: PostContent, forKey key: String) {
+            cache.setObject(Box(content), forKey: key as NSString)
+        }
+    }
+
+    /// Parses every post body concurrently off the main actor and fills the
+    /// cache. Doing this in one pass keeps `nestedComments` synchronous.
+    private func parseContents(for posts: [TopicPost]) async {
+        let pending = posts.filter { contentCache.content(forKey: Self.cacheKey($0)) == nil }
+        guard !pending.isEmpty else { return }
+
+        let parsed = await withTaskGroup(of: (String, PostContent).self) { group in
+            for post in pending {
+                let key = Self.cacheKey(post)
+                let html = post.cooked
+                group.addTask { (key, await PostHTMLParser.parse(html)) }
+            }
+            var results: [String: PostContent] = [:]
+            for await (key, value) in group { results[key] = value }
+            return results
+        }
+        for (key, value) in parsed { contentCache.insert(value, forKey: key) }
+    }
+
+    private func parsedContent(for post: TopicPost) -> PostContent {
+        if let cached = contentCache.content(forKey: Self.cacheKey(post)) { return cached }
+        // Fallback for posts that arrived outside `parseContents`.
+        let parsed = PostHTMLParser.parseSync(post.cooked)
+        contentCache.insert(parsed, forKey: Self.cacheKey(post))
+        return parsed
     }
 
     func loadMoreComments(topicID: Int) async {
@@ -81,6 +273,10 @@ final class TopicStore {
             let newPosts = response.postStream.posts.filter { !loadedPostIDs.contains($0.id) }
             allPosts.append(contentsOf: newPosts)
             loadedPostIDs.formUnion(postIDs)
+            // Parse before building the rows, otherwise `nestedComments` falls
+            // back to the synchronous parser and stalls the main actor for the
+            // whole page of replies.
+            await parseContents(for: newPosts)
             comments = nestedComments(from: orderedPosts())
         } catch {
             // Keep the loaded comments visible; the user can retry from the load-more button.
@@ -150,7 +346,8 @@ final class TopicStore {
                     id: post.id,
                     author: post.username,
                     time: DiscourseFormat.relative(post.createdAt),
-                    text: DiscourseFormat.plainText(post.cooked),
+                    content: parsedContent(for: post),
+                    redEnvelopeClaim: post.redEnvelopeClaim,
                     votes: post.likeCount,
                     postNumber: post.postNumber ?? 0,
                     replyToPostNumber: post.replyToPostNumber,
@@ -214,11 +411,11 @@ final class TopicStore {
         return parent.username
     }
 
+    /// Stays plain text: the quote preview is a single truncated line, and
+    /// truncating a parsed block tree correctly is a lot of work for no gain.
     private func quotedParentText(for parent: TopicPost?) -> String? {
         guard let parent, parent.postNumber != 1 else { return nil }
-        let text = DiscourseFormat.plainText(parent.cooked)
-        guard !text.isEmpty else { return nil }
-        let preview = String(text.prefix(120))
-        return preview == text ? text : "\(preview)..."
+        let text = parsedContent(for: parent).excerpt(limit: 120)
+        return text.isEmpty ? nil : text
     }
 }
