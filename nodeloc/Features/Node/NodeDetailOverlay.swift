@@ -157,8 +157,7 @@ struct NodeDetailOverlay: View {
             .navigationTitle("话题排序依据")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
+        .standardSheet([.medium])
     }
 
     /// Mirrors the web plugin's about panel: identity, description, the three
@@ -233,8 +232,7 @@ struct NodeDetailOverlay: View {
             .navigationTitle("关于节点")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private func aboutStat(_ value: Int?, _ label: String) -> some View {
@@ -262,7 +260,7 @@ struct NodeDetailOverlay: View {
 
     private func floatingHeader(scrollProxy: ScrollViewProxy) -> some View {
         HStack(spacing: 8) {
-            glassButton(borderShape: .circle, action: onClose) {
+            FloatingHeaderButton(action: onClose) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Theme.headerText)
@@ -271,7 +269,7 @@ struct NodeDetailOverlay: View {
 
             // Node identity, revealed once the header has scrolled past. Tapping
             // returns to the top, the same gesture as the profile capsule.
-            glassButton(borderShape: .capsule) {
+            FloatingHeaderButton(borderShape: .capsule) {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     scrollProxy.scrollTo(topAnchor, anchor: .top)
                 }
@@ -440,19 +438,6 @@ struct NodeDetailOverlay: View {
         }
         .buttonStyle(.plain)
         .disabled(store.isTogglingJoin)
-    }
-
-    private func glassButton<Label: View>(
-        borderShape: ButtonBorderShape,
-        action: @escaping () -> Void,
-        @ViewBuilder label: () -> Label
-    ) -> some View {
-        Button(action: action) {
-            label().frame(height: headerControlHeight)
-        }
-        .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-        .buttonBorderShape(borderShape)
-        .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
     }
 
     // MARK: Banner + summary

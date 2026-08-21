@@ -470,8 +470,7 @@ struct ProfileView: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private var badgeSheet: some View {
@@ -527,8 +526,7 @@ struct ProfileView: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private struct BadgeSheetItem: Identifiable {

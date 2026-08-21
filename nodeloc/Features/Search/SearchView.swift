@@ -222,14 +222,7 @@ private struct SearchExperience: View {
             }
 
             if !store.isSearching && store.results.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 30, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.34))
-                    Text("没有找到相关内容")
-                        .font(Theme.body(14, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.58))
-                }
+                EmptyStateView(icon: "magnifyingglass", message: "没有找到相关内容")
                 .frame(maxWidth: .infinity)
                 .padding(.top, 54)
             }
@@ -451,8 +444,7 @@ private struct SearchHistorySheet: View {
                 Button("取消", role: .cancel) {}
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private var list: some View {
@@ -503,14 +495,7 @@ private struct SearchHistorySheet: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "clock")
-                .font(.system(size: 30, weight: .medium))
-                .foregroundStyle(Theme.muted(0.34))
-            Text("还没有搜索记录")
-                .font(Theme.body(14, weight: .medium))
-                .foregroundStyle(Theme.muted(0.58))
-        }
+        EmptyStateView(icon: "clock", message: "还没有搜索记录")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

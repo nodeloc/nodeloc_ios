@@ -517,8 +517,7 @@ private struct AppAboutSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private func factRow(_ label: String, _ value: String) -> some View {

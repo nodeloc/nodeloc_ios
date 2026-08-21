@@ -477,8 +477,7 @@ struct PublicProfileOverlay: View {
             .navigationTitle("徽章")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     private var nodesSheet: some View {
@@ -520,8 +519,7 @@ struct PublicProfileOverlay: View {
             .navigationTitle("常去节点")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .standardSheet()
     }
 
     @ViewBuilder

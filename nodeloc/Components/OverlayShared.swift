@@ -196,3 +196,32 @@ struct AppLogo: View {
             .foregroundStyle(Theme.accent)
     }
 }
+
+// MARK: - Sheet scaffolding
+
+extension View {
+    /// The detent + drag-indicator pair every sheet in the app repeats.
+    func standardSheet(_ detents: Set<PresentationDetent> = [.medium, .large]) -> some View {
+        presentationDetents(detents)
+            .presentationDragIndicator(.visible)
+    }
+}
+
+/// Icon over a short message, for a list with nothing in it.
+struct EmptyStateView: View {
+    let icon: String
+    let message: String
+    var iconSize: CGFloat = 30
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: iconSize, weight: .medium))
+                .foregroundStyle(Theme.muted(0.34))
+            Text(message)
+                .font(Theme.body(14, weight: .medium))
+                .foregroundStyle(Theme.muted(0.58))
+                .multilineTextAlignment(.center)
+        }
+    }
+}
