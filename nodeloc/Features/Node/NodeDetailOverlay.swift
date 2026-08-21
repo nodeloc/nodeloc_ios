@@ -65,7 +65,7 @@ struct NodeDetailOverlay: View {
                 // Floating chrome, kept clear of the status bar. The banner still
                 // bleeds up behind it via its own safe-area padding.
                 floatingHeader(scrollProxy: proxy)
-                    .padding(.top, topSafeAreaInset)
+                    .padding(.top, UIApplication.topSafeAreaInset)
                     .frame(maxWidth: .infinity, alignment: .top)
                     .zIndex(10)
             }
@@ -460,7 +460,7 @@ struct NodeDetailOverlay: View {
     @ViewBuilder
     private var banner: some View {
         // Runs to the very top, behind the status bar and floating buttons.
-        let height = bannerHeight + topSafeAreaInset
+        let height = bannerHeight + UIApplication.topSafeAreaInset
         return Group {
             if let backgroundURL = store.backgroundURL {
                 CachedRemoteImage(url: backgroundURL) { image in
@@ -658,11 +658,6 @@ struct NodeDetailOverlay: View {
         }
     }
 
-    private var topSafeAreaInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
-            .first ?? 47
-    }
 }
 
 /// Node logo, falling back to a colored initial.

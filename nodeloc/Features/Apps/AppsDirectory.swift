@@ -424,7 +424,7 @@ struct AppWebViewOverlay: View {
         .glassEffect(.regular.tint(Theme.bg.opacity(0.5)), in: .capsule)
         .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
         // Clear of the status bar, since the frame ignores safe areas.
-        .padding(.top, appTopSafeAreaInset)
+        .padding(.top, UIApplication.topSafeAreaInset)
     }
 }
 
@@ -553,12 +553,6 @@ private struct AppAboutSheet: View {
     }
 }
 
-/// Top inset used by views that intentionally ignore safe areas.
-private var appTopSafeAreaInset: CGFloat {
-    UIApplication.shared.connectedScenes
-        .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
-        .first ?? 47
-}
 
 /// The app's code runs one level deeper, inside the server document's
 /// opaque-origin iframe, so the document is loaded as-is.

@@ -53,7 +53,7 @@ struct ProfileView: View {
             // itself — otherwise the buttons land under the notch.
             .overlay(alignment: .top) {
                 floatingHeaderButtons(scrollProxy: proxy)
-                    .padding(.top, topSafeArea)
+                    .padding(.top, UIApplication.topSafeAreaInset)
             }
         }
         .task(id: app.authed) { await store.load(isAppAuthed: app.authed) }
@@ -74,7 +74,7 @@ struct ProfileView: View {
             // safe area, so the banner's own frame already covers the status
             // bar. Its height grows to match, keeping the avatar's overlap.
             profileBanner
-                .frame(height: bannerHeight + topSafeArea + pullStretch)
+                .frame(height: bannerHeight + UIApplication.topSafeAreaInset + pullStretch)
                 // Pinned to the top of the scroll content while it grows, so
                 // pulling down never opens a gap above the image.
                 .offset(y: -pullStretch)
@@ -159,18 +159,11 @@ struct ProfileView: View {
     /// Height reserved for the floating button row.
     private var headerBarHeight: CGFloat { FloatingHeader.controlHeight + 16 }
 
-    /// Status-bar height, added back wherever the ignored safe area needs it.
-    private var topSafeArea: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
-            .max() ?? 0
-    }
-
     /// Banner artwork. Scales to *cover* whatever height the hero gives it —
     /// enlarging a small image or shrinking a large one — then crops the
     /// overflow. It must not carry its own fixed height: the container is
-    /// `bannerHeight + topSafeArea`, so a hard-coded `bannerHeight` left the
-    /// image short by the status bar, with gaps above and below.
+    /// `bannerHeight` plus the status bar, so a hard-coded `bannerHeight` left
+    /// the image short by the status bar, with gaps above and below.
     @ViewBuilder
     private var profileBanner: some View {
         if let backgroundURL = store.backgroundURL {

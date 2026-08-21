@@ -170,7 +170,7 @@ struct PublicProfileOverlay: View {
     }
 
     /// Banner height, including the area behind the status bar.
-    private var bannerHeight: CGFloat { 188 + topSafeAreaInset }
+    private var bannerHeight: CGFloat { 188 + UIApplication.topSafeAreaInset }
 
     private var profileHero: some View {
         VStack(spacing: 0) {
@@ -184,11 +184,6 @@ struct PublicProfileOverlay: View {
         }
     }
 
-    private var topSafeAreaInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
-            .first ?? 47
-    }
 
     /// Fixed-height banner: a tall image is aspect-filled then cropped to
     /// `bannerHeight` rather than pushing the content below it down.

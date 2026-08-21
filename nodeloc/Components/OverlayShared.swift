@@ -60,6 +60,23 @@ func nodelocSiteURL(_ path: String) -> URL? {
     return URL(string: "/\(path)", relativeTo: DiscourseConfig.baseURL)?.absoluteURL
 }
 
+// MARK: - Safe area
+
+extension UIApplication {
+    /// Status-bar height, for views that ignore the safe area and have to add
+    /// it back themselves.
+    ///
+    /// `max` rather than `first` because scene order is not defined, and the
+    /// fallback is a real status-bar height rather than zero: the list is empty
+    /// until a window attaches, and returning zero there collapses the banner
+    /// that this value is sizing and slides it under the notch.
+    static var topSafeAreaInset: CGFloat {
+        shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
+            .max() ?? 47
+    }
+}
+
 // MARK: - Node identity
 
 /// Two nodes side by side, for the two-column browse grid.
