@@ -490,6 +490,17 @@ struct DiscourseClient {
         return data
     }
 
+    /// Saves account preferences. `items` are already-encoded `user_option`
+    /// pairs; repeated keys such as `watched_category_ids[]` are why this goes
+    /// through `formItems` rather than a dictionary.
+    ///
+    /// `PUT /u/:username` is Discourse's own route (`users#update`) and rejects
+    /// a request without a CSRF token with 403.
+    @discardableResult
+    func updatePreferences(username: String, items: [(String, String)]) async throws -> Data {
+        try await formItems("PUT", path: "u/\(username).json", items: items)
+    }
+
     /// JSON-bodied POST. The lottery plugin's controller reads a nested `levels`
     /// array, which form encoding can't express.
     @discardableResult

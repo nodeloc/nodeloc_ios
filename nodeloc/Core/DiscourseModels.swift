@@ -713,15 +713,9 @@ struct CurrentUser: Decodable {
     let canCreatePoll: Bool?
     /// Spendable balance for red envelopes (discourse-gamification).
     let gamificationScore: Int?
-    /// Account preferences. discourse-community adds `community_view_mode` here
-    /// through `add_to_serializer(:current_user_option, …)`.
-    let userOption: CurrentUserOption?
-}
-
-/// The slice of `current_user.user_option` the app reads.
-struct CurrentUserOption: Decodable {
-    /// "compact" / "expand" / "card", chosen in the site's interface preferences.
-    let communityViewMode: String?
+    /// Account preferences. Modelled by `UserPreferences`, which also carries
+    /// discourse-community's `community_view_mode`.
+    let userOption: UserPreferences?
 }
 
 struct CurrentUserResponse: Decodable { let currentUser: CurrentUser }

@@ -370,6 +370,9 @@ private final class ProfileTabAvatarStore {
             // Earliest point the account preference is available; the store
             // ignores it if this device has already chosen a mode.
             NodeReadingModeStore.shared.applyAccountPreference(user.userOption?.communityViewMode)
+            // Same payload already carries every other preference, so settings
+            // opens with real values instead of refetching.
+            UserPreferencesStore.shared.apply(user.userOption)
         } catch {
             self.isSignedIn = !username.isEmpty
         }

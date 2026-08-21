@@ -10,6 +10,9 @@ import SwiftUI
 struct ContentView: View {
     @State private var app = AppState()
     @State private var browser = BrowserState.shared
+    /// Drives the app-wide colour scheme; read here so a change redraws
+    /// everything below.
+    private var preferences = UserPreferencesStore.shared
     /// Resolved from `app.routedNodeSlug`; a link only carries the slug.
     @State private var resolvedNode: SidebarNodeSummary?
 
@@ -30,6 +33,10 @@ struct ContentView: View {
         }
         .foregroundStyle(Theme.text)
         .tint(Theme.accent)
+        // Theme's colours are already light/dark pairs, so overriding the
+        // scheme here is all "深色/浅色" needs. `.auto` passes nil and follows
+        // the system.
+        .preferredColorScheme(preferences.colorMode.colorScheme)
         // One handler for the whole app: inline links in post bodies are
         // AttributedString link runs that SwiftUI opens itself, so there is no
         // per-link callback — intercepting here is what catches them all.

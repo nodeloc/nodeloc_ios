@@ -122,11 +122,20 @@ enum Theme {
     }
 
     // MARK: Typography — the system substitute for "Inter".
+    //
+    // Every font in the app is built through these two, so the reader's text
+    // size preference is applied here rather than at each of ~400 call sites.
     static func heading(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight)
+        .system(size: scaled(size), weight: weight)
     }
     static func body(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight)
+        .system(size: scaled(size), weight: weight)
+    }
+
+    /// Rounded so text lands on whole points. The scale is a stored property,
+    /// cheap enough to read on every font construction.
+    private static func scaled(_ size: CGFloat) -> CGFloat {
+        (size * UserPreferencesStore.shared.textScale).rounded()
     }
 
     /// Two-variant avatar palette used across posts, chats, communities.
