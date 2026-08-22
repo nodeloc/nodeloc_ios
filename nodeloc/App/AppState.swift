@@ -261,7 +261,7 @@ struct PMConversation: Identifiable {
     let letter: String
     let variant: Int
     let time: String
-    let unread: Bool
+    var unread: Bool
 }
 
 struct Community: Identifiable {

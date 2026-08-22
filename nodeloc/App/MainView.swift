@@ -121,6 +121,15 @@ struct MainView: View {
             // user to open the inbox.
             await inbox.load()
         }
+        .onChange(of: app.tab) { _, newValue in
+            // Re-entering the inbox refreshes counts (things may have been read
+            // elsewhere) and clears the notifications badge.
+            guard newValue == .chat else { return }
+            Task {
+                await inbox.reload()
+                await inbox.markNotificationsRead()
+            }
+        }
         .onChange(of: app.tab) { oldValue, newValue in
             if newValue == .search {
                 // Selecting Search while its overlay is already up means the

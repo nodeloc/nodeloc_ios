@@ -140,7 +140,14 @@ struct ChatView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
-        .task { await store.load() }
+        .task {
+            await store.load()
+            // Opening the inbox lands on 通知; clear its badge like the web bell.
+            if selection == .notifications { await store.markNotificationsRead() }
+        }
+        .onChange(of: selection) { _, pane in
+            if pane == .notifications { Task { await store.markNotificationsRead() } }
+        }
     }
 
     private var messageHeader: some View {
@@ -351,6 +358,7 @@ struct ChatView: View {
         Group {
             ForEach(store.conversations) { conversation in
                 Button {
+                    store.markConversationRead(id: conversation.id)
                     app.openTopic(id: conversation.id)
                 } label: {
                     PMConversationRow(conversation: conversation)

@@ -53,9 +53,15 @@ enum LinkRouter {
             }
         }
 
-        // /u/<username> and /u/<username>/summary.
+        // /u/<username> and its public profile tabs open natively. Deeper
+        // routes like /u/<name>/messages/group/<g> (where staff/group-message
+        // notifications point) are inboxes with no native screen, so they fall
+        // through to the in-app browser rather than being mistaken for a profile.
         if segments.first == "u", segments.count >= 2 {
-            return .profile(username: segments[1])
+            let profileTabs: Set<String> = ["summary", "activity", "badges"]
+            if segments.count == 2 || profileTabs.contains(segments[2]) {
+                return .profile(username: segments[1])
+            }
         }
 
         // /n/<slug> — discourse-community's node route, which appears in real

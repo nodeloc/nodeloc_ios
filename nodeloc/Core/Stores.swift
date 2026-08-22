@@ -2524,6 +2524,24 @@ final class MessageCenterStore {
         await load()
     }
 
+    /// Marks all notifications read (as opening the notifications menu does on
+    /// the web) so the tab badge clears once the inbox is opened.
+    func markNotificationsRead() async {
+        guard unreadNotifications > 0 else { return }
+        unreadNotifications = 0
+        try? await client.markNotificationsRead()
+    }
+
+    /// Clears a conversation's unread dot and the PM count when it's opened.
+    /// The server marks the topic read once its posts are viewed; this keeps
+    /// the badge honest immediately.
+    func markConversationRead(id: Int) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }),
+              conversations[index].unread else { return }
+        conversations[index].unread = false
+        unreadPrivateMessages = conversations.filter(\.unread).count
+    }
+
     func load() async {
         guard DiscourseAuth.shared.isAuthenticated else {
             needsLogin = true
@@ -2543,10 +2561,11 @@ final class MessageCenterStore {
         errorText = nil
         defer { isLoading = false }
 
-        // Unread counts (notifications + PMs) ride along on the current user.
+        // Unread notification count rides along on the current user. The PM
+        // count is derived from the conversation list below so it matches the
+        // rows' own unread dots.
         if let current = try? await client.currentUser().currentUser {
             unreadNotifications = current.unreadNotifications ?? 0
-            unreadPrivateMessages = current.newPersonalMessagesNotificationsCount ?? 0
         }
 
         do {
@@ -2560,6 +2579,7 @@ final class MessageCenterStore {
             do {
                 let response = try await client.privateMessages(username: username)
                 conversations = Self.conversations(from: response, client: client)
+                unreadPrivateMessages = conversations.filter(\.unread).count
             } catch {
                 if errorText == nil {
                     errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

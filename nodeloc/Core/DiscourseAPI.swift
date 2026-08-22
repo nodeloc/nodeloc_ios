@@ -306,6 +306,13 @@ struct DiscourseClient {
         try await get("topics/private-messages/\(username).json")
     }
 
+    /// Marks every notification read and bumps last-seen — what Discourse does
+    /// when you open the notifications menu, so the unread badge clears.
+    @discardableResult
+    func markNotificationsRead() async throws -> Data {
+        try await send("PUT", path: "notifications/mark-read")
+    }
+
     func chatChannels() async throws -> ChatChannelsResponse {
         do {
             return try await get("chat/api/me/channels.json")
