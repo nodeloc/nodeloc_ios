@@ -101,6 +101,10 @@ struct PostComment: Identifiable {
     let isLastSibling: Bool
     let ancestorTrails: [Bool]
     let hasChildren: Bool
+    /// The post number of the top-level reply this comment's thread hangs off —
+    /// its "nest group". Comments render grouped by this, with a gap between
+    /// groups.
+    let groupID: Int
 
     init(
         id: Int,
@@ -117,7 +121,8 @@ struct PostComment: Identifiable {
         nestingDepth: Int = 0,
         isLastSibling: Bool = true,
         ancestorTrails: [Bool] = [],
-        hasChildren: Bool = false
+        hasChildren: Bool = false,
+        groupID: Int = 0
     ) {
         self.id = id
         self.author = author
@@ -134,6 +139,7 @@ struct PostComment: Identifiable {
         self.isLastSibling = isLastSibling
         self.ancestorTrails = ancestorTrails
         self.hasChildren = hasChildren
+        self.groupID = groupID
     }
 
     /// Convenience for sample data and previews, where the body is a literal

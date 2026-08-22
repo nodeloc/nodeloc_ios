@@ -380,7 +380,7 @@ final class TopicStore {
         var result: [PostComment] = []
         var visited = Set<Int>()
 
-        func append(_ post: TopicPost, depth: Int, isLastSibling: Bool, ancestorTrails: [Bool]) {
+        func append(_ post: TopicPost, depth: Int, isLastSibling: Bool, ancestorTrails: [Bool], groupID: Int) {
             guard !visited.contains(post.id) else { return }
             visited.insert(post.id)
 
@@ -402,7 +402,8 @@ final class TopicStore {
                     nestingDepth: min(depth, 4),
                     isLastSibling: isLastSibling,
                     ancestorTrails: ancestorTrails,
-                    hasChildren: !childPosts.isEmpty
+                    hasChildren: !childPosts.isEmpty,
+                    groupID: groupID
                 )
             )
 
@@ -414,18 +415,27 @@ final class TopicStore {
                     child,
                     depth: depth + 1,
                     isLastSibling: index == lastChildIndex,
-                    ancestorTrails: nextTrails
+                    ancestorTrails: nextTrails,
+                    groupID: groupID
                 )
             }
         }
 
+        // Each top-level reply and its descendants are one nest group, keyed by
+        // the root reply's post number.
         let lastRootIndex = rootReplies.count - 1
         for (index, root) in rootReplies.enumerated() {
-            append(root, depth: 0, isLastSibling: index == lastRootIndex, ancestorTrails: [])
+            append(
+                root,
+                depth: 0,
+                isLastSibling: index == lastRootIndex,
+                ancestorTrails: [],
+                groupID: root.postNumber ?? root.id
+            )
         }
 
         for post in replies where !visited.contains(post.id) {
-            append(post, depth: 0, isLastSibling: true, ancestorTrails: [])
+            append(post, depth: 0, isLastSibling: true, ancestorTrails: [], groupID: post.postNumber ?? post.id)
         }
 
         return result

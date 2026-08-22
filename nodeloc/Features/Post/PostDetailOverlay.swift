@@ -516,7 +516,14 @@ struct PostDetailOverlay: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 28)
                 } else {
-                    ForEach(visibleComments) { comment in
+                    let comments = visibleComments
+                    ForEach(Array(comments.enumerated()), id: \.element.id) { index, comment in
+                        // A short blank row separates one nest group from the
+                        // next (a new top-level reply thread).
+                        if index > 0, comment.groupID != comments[index - 1].groupID {
+                            groupSeparator
+                        }
+
                         NestedReplyRow(
                             comment: comment,
                             isCollapsed: collapsedCommentIDs.contains(comment.id),
@@ -541,6 +548,15 @@ struct PostDetailOverlay: View {
                 }
             }
         }
+    }
+
+    /// The short blank band between nest groups.
+    private var groupSeparator: some View {
+        Rectangle()
+            .fill(Theme.divider.opacity(0.5))
+            .frame(maxWidth: .infinity)
+            .frame(height: 8)
+            .padding(.horizontal, -20)
     }
 
     private func loadMoreRepliesButton(for post: Post) -> some View {
