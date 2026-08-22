@@ -1,6 +1,7 @@
 {
   "images" : [
     {
+      "filename" : "appicon-light-1024.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -12,17 +13,7 @@
           "value" : "dark"
         }
       ],
-      "idiom" : "universal",
-      "platform" : "ios",
-      "size" : "1024x1024"
-    },
-    {
-      "appearances" : [
-        {
-          "appearance" : "luminosity",
-          "value" : "tinted"
-        }
-      ],
+      "filename" : "appicon-dark-1024.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"

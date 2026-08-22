@@ -44,7 +44,9 @@ struct MainView: View {
                             BrowseNodesOverlay(showsCloseButton: false)
                         }
                     } label: {
-                        Image(systemName: "square.grid.2x2")
+                        // The brand mark, template-rendered so it tints with
+                        // selection like the SF Symbols on the other tabs.
+                        Image("NodeMark")
                         Text("节点")
                     }
 
