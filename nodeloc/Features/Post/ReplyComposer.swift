@@ -54,6 +54,10 @@ struct ReplyComposer: View {
     @Binding var text: String
     let isSubmitting: Bool
     let isAuthenticated: Bool
+    /// The username being replied to; shows a "回复xxx" header when set.
+    var replyingTo: String? = nil
+    /// Called when the user dismisses the reply target chip.
+    var onClearReplyTarget: (() -> Void)? = nil
     let onSubmit: () -> Void
 
     // Rich text is the source of truth while composing.
@@ -120,6 +124,10 @@ struct ReplyComposer: View {
                 tall = false
             }
         }
+        .onChange(of: replyingTo) { _, target in
+            // Tapping "回复" on a post opens the composer aimed at that user.
+            if target != nil { withAnimation(.quicker) { expanded = true } }
+        }
         .onChange(of: text) { _, newValue in
             // Parent cleared the draft after a successful send → reset + close.
             if newValue.isEmpty {
@@ -185,6 +193,7 @@ struct ReplyComposer: View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.divider).frame(height: 1)
             dragHandle
+            if let replyingTo { replyTargetHeader(replyingTo) }
             hintLine
             editor
             if !imageAttachments.isEmpty {
@@ -202,6 +211,29 @@ struct ReplyComposer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+    }
+
+    private func replyTargetHeader(_ username: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+            Text("回复 \(username)")
+                .font(Theme.body(13, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Button {
+                onClearReplyTarget?()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.muted(0.4))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 
     private var hintLine: some View {

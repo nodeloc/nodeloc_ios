@@ -790,14 +790,50 @@ struct DiscourseClient {
         ])
     }
 
+    /// Removes a previously-given like (post_action_type_id 2).
+    func unlikePost(id: Int) async throws {
+        try await formItems("DELETE", path: "post_actions/\(id)", items: [
+            ("post_action_type_id", "2"),
+        ])
+    }
+
     /// Posts a reply to a topic.
+    /// 打赏 — discourse-reward. Gives `amount` energy to a post.
     @discardableResult
-    func reply(topicID: Int, raw: String) async throws -> CreatePostResponse {
-        let data = try await post("posts", form: [
+    func giveReward(postID: Int, amount: Int, note: String? = nil) async throws -> Data {
+        var form = ["post_id": String(postID), "amount": String(amount)]
+        if let note, !note.isEmpty { form["note"] = note }
+        return try await post("reward/give", form: form)
+    }
+
+    /// Repost — discourse-community. Republishes a topic into a node.
+    @discardableResult
+    func repost(topicID: Int, categoryID: Int, title: String) async throws -> Data {
+        try await post("node/repost", form: [
+            "topic_id": String(topicID),
+            "category_id": String(categoryID),
+            "title": title,
+        ])
+    }
+
+    @discardableResult
+    func reply(topicID: Int, raw: String, replyToPostNumber: Int? = nil) async throws -> CreatePostResponse {
+        var form = [
             "raw": raw,
             "topic_id": String(topicID),
-        ])
+        ]
+        if let replyToPostNumber { form["reply_to_post_number"] = String(replyToPostNumber) }
+        let data = try await post("posts", form: form)
         return try Self.decode(data)
+    }
+
+    /// Bookmarks a post (保存书签).
+    @discardableResult
+    func bookmark(postID: Int) async throws -> Data {
+        try await post("bookmarks", form: [
+            "bookmarkable_id": String(postID),
+            "bookmarkable_type": "Post",
+        ])
     }
 
     /// Creates a new topic in a category.

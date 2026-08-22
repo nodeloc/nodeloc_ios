@@ -212,6 +212,16 @@ struct ComposeOverlay: View {
                 selectedCommunity = preselected
                 app.composePreselectedNode = nil
             }
+            // Reposting a topic pre-fills the title and body for editing.
+            if let prefillTitle = app.composePrefillTitle {
+                title = prefillTitle
+                app.composePrefillTitle = nil
+            }
+            if let prefillBody = app.composePrefillBody {
+                bodyText = AttributedString(prefillBody)
+                app.composePrefillBody = nil
+                focusedField = .body
+            }
         }
         .onDisappear { cleanUpMediaTempFiles() }
         .onChange(of: imageSelections) { _, items in

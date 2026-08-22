@@ -33,6 +33,16 @@ struct PostDetailOverlay: View {
     @State private var reader = TopicReadTracker()
     @State private var skeletonPulse = false
     @State private var showSortDialog = false
+    /// The user being replied to (drives the composer's "回复xxx" header). Its
+    /// post number becomes `reply_to_post_number` on submit.
+    @State private var replyTarget: String?
+    @State private var replyTargetNumber: Int?
+    /// A reply the ellipsis (…) sheet is open for.
+    @State private var moreSheetComment: PostComment?
+    /// The post id the 打赏 sheet is giving to.
+    @State private var rewardTarget: Int?
+    /// Rewards to show in the per-user 打赏 detail sheet.
+    @State private var rewardDetail: RewardDetail?
     @FocusState private var isReplyFocused: Bool
 
     var body: some View {
@@ -111,7 +121,7 @@ struct PostDetailOverlay: View {
         .environment(
             \.postVideoActions,
             PostVideoActions(
-                remoteLike: { Task { await topic.like() } },
+                remoteLike: { Task { await topic.toggleFirstPostLike() } },
                 comment: { focusReplyField() }
             )
         )
@@ -125,7 +135,7 @@ struct PostDetailOverlay: View {
                 author: authorProfileTarget(for: post),
                 commentCount: replyCount(for: post)
             ),
-            onRemoteLike: { Task { await topic.like() } },
+            onRemoteLike: { Task { await topic.toggleFirstPostLike() } },
             onComment: { focusReplyField() }
         )
         .alert(
@@ -137,6 +147,85 @@ struct PostDetailOverlay: View {
         ) {
             Button("好", role: .cancel) { topic.pluginErrorText = nil }
         }
+        // Ellipsis (…) menu on a reply.
+        .sheet(item: $moreSheetComment) { comment in
+            replyMoreSheet(comment, post: post)
+        }
+        // 打赏 amount picker.
+        .sheet(isPresented: Binding(
+            get: { rewardTarget != nil },
+            set: { if !$0 { rewardTarget = nil } }
+        )) {
+            if let postID = rewardTarget {
+                RewardSheet(postID: postID) { amount, note in
+                    try await topic.giveReward(postID: postID, amount: amount, note: note)
+                }
+            }
+        }
+        // 打赏 detail — who rewarded, and how much.
+        .sheet(item: $rewardDetail) { detail in
+            RewardDetailSheet(rewards: detail.rewards)
+        }
+    }
+
+    /// The ellipsis (…) bottom sheet for a reply: 分享 / 转发 / 保存书签 / 举报.
+    private func replyMoreSheet(_ comment: PostComment, post: Post) -> some View {
+        let postURL = DiscourseConfig.baseURL.appending(path: "t/\(post.id)/\(comment.postNumber)")
+        return NavigationStack {
+            VStack(spacing: 0) {
+                ShareLink(item: postURL) {
+                    moreSheetRow("分享", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    moreSheetComment = nil
+                    startRepost(for: post)
+                } label: {
+                    moreSheetRow("转发", systemImage: "arrow.2.squarepath")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    moreSheetComment = nil
+                    Task { try? await topic.bookmark(postID: comment.id) }
+                } label: {
+                    moreSheetRow("保存书签", systemImage: "bookmark")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    moreSheetComment = nil
+                    BrowserState.shared.open(postURL)
+                } label: {
+                    moreSheetRow("举报", systemImage: "flag", tint: Theme.danger)
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 6)
+            .background(Theme.bg)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .standardSheet([.medium])
+    }
+
+    private func moreSheetRow(_ title: String, systemImage: String, tint: Color? = nil) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(tint ?? Theme.muted(0.55))
+                .frame(width: 26)
+            Text(title)
+                .font(Theme.body(15, weight: .semibold))
+                .foregroundStyle(tint ?? Theme.text)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private let readerTopInset: CGFloat = 62
@@ -460,8 +549,12 @@ struct PostDetailOverlay: View {
             .buttonStyle(.plain)
             .disabled(authorProfileTarget(for: post) == nil)
             VStack(alignment: .leading, spacing: 2) {
-                Text(topic.firstAuthor?.username ?? post.authorUsername ?? post.node)
-                    .font(Theme.body(13, weight: .semibold))
+                HStack(spacing: 6) {
+                    Text(topic.firstAuthor?.username ?? post.authorUsername ?? post.node)
+                        .font(Theme.body(13, weight: .semibold))
+                    authorFlairBadge(topic.firstAuthorFlairURL)
+                    authorTitleChip(topic.firstAuthorTitle)
+                }
                 Text(post.time)
                     .font(Theme.body(12))
                     .foregroundStyle(Theme.muted(0.48))
@@ -501,28 +594,99 @@ struct PostDetailOverlay: View {
 
 
     private func postActions(for post: Post) -> some View {
-        HStack(spacing: 18) {
-            Button {
-                let wasLiked = app.isLiked(post)
-                app.toggleLike(post)
-                if !wasLiked { Task { await topic.like() } }
-            } label: {
-                Label("\(app.voteCount(post))", systemImage: app.isLiked(post) ? "heart.fill" : "heart")
-                    .labelStyle(CompactLabelStyle())
-                    .foregroundStyle(app.isLiked(post) ? Theme.love : Theme.muted(0.42))
-            }
-            .buttonStyle(.plain)
+        let isOwn = isOwnAuthor(topic.firstAuthor?.username ?? post.authorUsername)
+        return HStack(spacing: 16) {
+            // Like + comment counts grouped in a rounded rect.
+            HStack(spacing: 14) {
+                // You can't like your own post, so it's a static stat then.
+                Button {
+                    Task { await topic.toggleFirstPostLike() }
+                } label: {
+                    Label("\(topic.firstPostLikeCount)", systemImage: topic.firstPostLikedByMe ? "heart.fill" : "heart")
+                        .labelStyle(CompactLabelStyle())
+                        .foregroundStyle(topic.firstPostLikedByMe ? Theme.love : Theme.muted(0.5))
+                }
+                .buttonStyle(.plain)
+                .disabled(isOwn)
 
-            Label("\(replyCount(for: post))", systemImage: "bubble.left")
-                .labelStyle(CompactLabelStyle())
+                Label("\(replyCount(for: post))", systemImage: "bubble.left")
+                    .labelStyle(CompactLabelStyle())
+                    .foregroundStyle(Theme.muted(0.5))
+
+                // Total 打赏 received, tappable for the per-user breakdown.
+                if topic.firstPostRewards.contains(where: { $0.amount > 0 }) {
+                    Button {
+                        rewardDetail = RewardDetail(rewards: topic.firstPostRewards)
+                    } label: {
+                        rewardTotalLabel(topic.firstPostRewards)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .font(Theme.body(12, weight: .medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Theme.surface, in: Capsule())
 
             Spacer(minLength: 0)
 
-            Image(systemName: "arrowshape.turn.up.left")
-            Image(systemName: "link")
+            postActionIcon("arrowshape.turn.up.left") {
+                startReply(to: topic.firstAuthor?.username ?? post.authorUsername, postNumber: 1)
+            }
+            postActionIcon("arrow.2.squarepath") { startRepost(for: post) }
+            // No 打赏 button on your own post.
+            if !isOwn {
+                postActionIcon("bolt") {
+                    if let id = topic.firstPostID { rewardTarget = id }
+                }
+            }
+        }
+        .foregroundStyle(Theme.muted(0.5))
+    }
+
+    /// The "⚡ N" total-reward chip shared by the OP and reply action bars.
+    private func rewardTotalLabel(_ rewards: [PostReward]) -> some View {
+        let total = rewards.filter { $0.amount > 0 }.reduce(0) { $0 + $1.amount }
+        return HStack(spacing: 3) {
+            Image(systemName: "bolt.fill")
+            Text("\(total)")
         }
         .font(Theme.body(12, weight: .medium))
-        .foregroundStyle(Theme.muted(0.42))
+        .foregroundStyle(Theme.accent)
+    }
+
+    /// A tappable icon used in the OP action bar.
+    private func postActionIcon(_ systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(Theme.muted(0.5))
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Opens the composer targeting a specific user's post.
+    private func startReply(to author: String?, postNumber: Int) {
+        replyTarget = author
+        replyTargetNumber = postNumber
+        isReplyFocused = true
+    }
+
+    /// Opens the composer pre-filled to repost this topic: original title, plus
+    /// a link to the original that oneboxes into a preview. Both stay editable.
+    private func startRepost(for post: Post) {
+        app.composePrefillTitle = post.title
+        app.composePrefillBody = DiscourseConfig.baseURL.appending(path: "t/\(post.id)").absoluteString
+        withAnimation(.overlayPush) { app.overlay = .compose }
+    }
+
+    /// The signed-in user's username, for "can't act on my own post" checks.
+    private var currentUsername: String? { DiscourseAuth.shared.username }
+
+    private func isOwnAuthor(_ username: String?) -> Bool {
+        guard let me = currentUsername, let username else { return false }
+        return me.caseInsensitiveCompare(username) == .orderedSame
     }
 
     private func repliesSection(for post: Post) -> some View {
@@ -563,6 +727,12 @@ struct PostDetailOverlay: View {
                                 isCollapsed: collapsedCommentIDs.contains(comment.id),
                                 onToggleCollapse: { toggleCollapse(comment) },
                                 onOpenAuthor: { openProfile($0) },
+                                isOwn: isOwnAuthor(comment.author),
+                                onReply: { startReply(to: comment.author, postNumber: comment.postNumber) },
+                                onLike: { Task { await topic.toggleReplyLike(id: comment.id) } },
+                                onReward: { rewardTarget = comment.id },
+                                onRewardDetail: { rewardDetail = RewardDetail(rewards: comment.rewards) },
+                                onMore: { moreSheetComment = comment },
                                 onImageTap: { image in
                                     // Page through just this reply's images.
                                     let images = comment.content.images
@@ -698,11 +868,19 @@ struct PostDetailOverlay: View {
             text: $draft,
             isSubmitting: topic.isSubmitting,
             isAuthenticated: DiscourseAuth.shared.isAuthenticated,
+            replyingTo: replyTarget,
+            onClearReplyTarget: {
+                replyTarget = nil
+                replyTargetNumber = nil
+            },
             onSubmit: {
                 let text = draft
+                let replyTo = replyTargetNumber
                 Task {
-                    if let number = await topic.submitReply(text, topicID: post.id) {
+                    if let number = await topic.submitReply(text, topicID: post.id, replyToPostNumber: replyTo) {
                         draft = ""          // resets + collapses the composer
+                        replyTarget = nil
+                        replyTargetNumber = nil
                         scrollTarget = number   // scroll to the new reply once it's laid out
                     }
                 }
@@ -753,6 +931,13 @@ private struct NestedReplyRow: View {
     let isCollapsed: Bool
     let onToggleCollapse: () -> Void
     let onOpenAuthor: (UserProfileTarget) -> Void
+    /// True when the reply is the current user's own (can't like/reward it).
+    let isOwn: Bool
+    let onReply: () -> Void
+    let onLike: () -> Void
+    let onReward: () -> Void
+    let onRewardDetail: () -> Void
+    let onMore: () -> Void
     var onImageTap: ((PostImage) -> Void)?
 
     var body: some View {
@@ -811,21 +996,14 @@ private struct NestedReplyRow: View {
             Text(comment.author)
                 .font(Theme.body(12, weight: .semibold))
 
+            authorFlairBadge(comment.flairURL)
+            authorTitleChip(comment.authorTitle)
+
             Text("· \(comment.time)")
                 .font(Theme.body(12))
                 .foregroundStyle(Theme.muted(0.42))
 
-            if let parentNumber = comment.replyToPostNumber, parentNumber > 1 {
-                Text("to #\(parentNumber)")
-                    .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.34))
-            }
-
             Spacer(minLength: 0)
-
-            Text("#\(comment.postNumber)")
-                .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.26))
 
             if comment.hasChildren {
                 Button(action: onToggleCollapse) {
@@ -841,19 +1019,53 @@ private struct NestedReplyRow: View {
     }
 
     private var actionBar: some View {
-        HStack(spacing: 16) {
-            if comment.votes > 0 {
-                Label("\(comment.votes)", systemImage: "heart")
-                    .labelStyle(CompactLabelStyle())
+        HStack(spacing: 20) {
+            // Total 打赏 received on this reply, tappable for the breakdown.
+            if comment.rewards.contains(where: { $0.amount > 0 }) {
+                Button(action: onRewardDetail) {
+                    let total = comment.rewards.filter { $0.amount > 0 }.reduce(0) { $0 + $1.amount }
+                    HStack(spacing: 3) {
+                        Image(systemName: "bolt.fill")
+                        Text("\(total)")
+                    }
+                    .font(Theme.body(12, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
             }
 
             Spacer(minLength: 0)
 
-            Image(systemName: "arrowshape.turn.up.left")
-            Image(systemName: "link")
+            replyActionIcon("ellipsis", action: onMore)
+            replyActionIcon("arrowshape.turn.up.left", action: onReply)
+            // Can't like your own reply.
+            Button(action: onLike) {
+                HStack(spacing: 4) {
+                    Image(systemName: comment.isLiked ? "heart.fill" : "heart")
+                    if comment.votes > 0 {
+                        Text("\(comment.votes)")
+                    }
+                }
+                .font(Theme.body(12, weight: .medium))
+                .foregroundStyle(comment.isLiked ? Theme.love : Theme.muted(0.4))
+            }
+            .buttonStyle(.plain)
+            .disabled(isOwn)
+            // No 打赏 button on your own reply.
+            if !isOwn {
+                replyActionIcon("bolt", action: onReward)
+            }
         }
-        .font(Theme.body(12, weight: .medium))
-        .foregroundStyle(Theme.muted(0.38))
+        .foregroundStyle(Theme.muted(0.4))
+    }
+
+    private func replyActionIcon(_ systemName: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.muted(0.4))
+        }
+        .buttonStyle(.plain)
     }
 
     private var contentLeading: CGFloat {
@@ -935,4 +1147,198 @@ private struct RedditThreadRails: View {
     private static let indentStep: CGFloat = NestedReplyRow.indentStep
     private static let maxIndentLevels: Int = NestedReplyRow.maxIndentLevels
     private static let railWidth: CGFloat = 1
+}
+
+// MARK: - Author flair + title
+
+/// The small badge icon a user wears next to their name (Discourse "flair").
+@ViewBuilder
+func authorFlairBadge(_ url: URL?) -> some View {
+    if let url {
+        CachedRemoteImage(url: url) { image in
+            image.resizable().scaledToFit()
+        } placeholder: {
+            Color.clear
+        }
+        .frame(width: 15, height: 15)
+        .clipShape(Circle())
+    }
+}
+
+/// The user's worn title (头衔), shown as a subtle chip after their name.
+@ViewBuilder
+func authorTitleChip(_ title: String?) -> some View {
+    if let title, !title.trimmingCharacters(in: .whitespaces).isEmpty {
+        Text(title)
+            .font(Theme.body(11, weight: .medium))
+            .foregroundStyle(Theme.muted(0.5))
+            .lineLimit(1)
+    }
+}
+
+// MARK: - 打赏 (reward) sheet
+
+/// Gives energy to a post via discourse-reward. Quick amounts plus an optional note.
+private struct RewardSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let postID: Int
+    /// Performs the give; throws so the sheet can surface a failure.
+    let onGive: (Int, String?) async throws -> Void
+
+    private let amounts = [1, 5, 10, 20, 50]
+    @State private var amount = 5
+    @State private var note = ""
+    @State private var isSubmitting = false
+    @State private var errorText: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("选择打赏能量")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.5))
+
+                HStack(spacing: 10) {
+                    ForEach(amounts, id: \.self) { value in
+                        Button {
+                            amount = value
+                        } label: {
+                            Text("\(value)")
+                                .font(Theme.body(15, weight: .semibold))
+                                .foregroundStyle(amount == value ? Theme.bg : Theme.text)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(
+                                    amount == value ? Theme.accent : Theme.surface,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                TextField("附言（可选）", text: $note, axis: .vertical)
+                    .font(Theme.body(15))
+                    .lineLimit(1...3)
+                    .padding(12)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                if let errorText {
+                    Text(errorText)
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.danger)
+                }
+
+                Button {
+                    submit()
+                } label: {
+                    Group {
+                        if isSubmitting {
+                            ProgressView().tint(Theme.bg)
+                        } else {
+                            Text("打赏 \(amount)")
+                                .font(Theme.body(15, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(Theme.bg)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .background(Theme.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .background(Theme.bg)
+            .navigationTitle("打赏")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+        .standardSheet([.medium])
+    }
+
+    private func submit() {
+        isSubmitting = true
+        errorText = nil
+        Task {
+            do {
+                try await onGive(amount, note.isEmpty ? nil : note)
+                dismiss()
+            } catch {
+                errorText = "打赏失败，请稍后再试"
+            }
+            isSubmitting = false
+        }
+    }
+}
+
+// MARK: - 打赏 detail
+
+/// Wrapper so an array of rewards can drive a `.sheet(item:)`.
+struct RewardDetail: Identifiable {
+    let id = UUID()
+    let rewards: [PostReward]
+}
+
+/// Lists who rewarded a post and how much.
+private struct RewardDetailSheet: View {
+    let rewards: [PostReward]
+
+    private var visible: [PostReward] { rewards.filter { $0.amount > 0 } }
+    private var total: Int { visible.reduce(0) { $0 + $1.amount } }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(visible) { reward in
+                        rewardRow(reward)
+                    }
+                }
+                .padding(.top, 6)
+            }
+            .background(Theme.bg)
+            .navigationTitle("打赏 \(total)")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .standardSheet([.medium, .large])
+    }
+
+    private func rewardRow(_ reward: PostReward) -> some View {
+        HStack(spacing: 12) {
+            RemoteAvatar(
+                url: reward.avatarTemplate.flatMap { DiscourseClient().avatarURL(template: $0, size: 80) },
+                letter: String(reward.username?.first ?? "?"),
+                variant: reward.id,
+                size: 36
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(reward.username ?? "未知用户")
+                    .font(Theme.body(14, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                if let note = reward.note, !note.isEmpty {
+                    Text(note)
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.muted(0.55))
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 3) {
+                Image(systemName: "bolt.fill")
+                Text("\(reward.amount)")
+            }
+            .font(Theme.body(14, weight: .semibold))
+            .foregroundStyle(Theme.accent)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }

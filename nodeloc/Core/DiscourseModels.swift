@@ -418,7 +418,24 @@ struct UserBadgesResponse: Decodable {
 
 // MARK: - Topic detail
 
-struct ActionSummary: Decodable { let id: Int; let count: Int? }
+struct ActionSummary: Decodable {
+    let id: Int
+    let count: Int?
+    /// Whether the current user has performed this action (e.g. already liked).
+    let acted: Bool?
+}
+
+/// discourse-reward: one reward given to a post. Serialized in `post.rewards`.
+struct PostReward: Decodable, Identifiable {
+    let id: Int
+    let userId: Int?
+    let username: String?
+    let avatarTemplate: String?
+    let amount: Int
+    let note: String?
+    let createdAt: String?
+    let isSystemReward: Bool?
+}
 
 struct TopicPost: Decodable, Identifiable {
     let id: Int
@@ -449,9 +466,20 @@ struct TopicPost: Decodable, Identifiable {
     let directReplyCount: Int?
     /// All descendants under this post (what the web "N 条回复" count shows).
     let totalDescendantCount: Int?
+    /// The author's worn title and flair (the badge icon shown by their name).
+    let userTitle: String?
+    let flairName: String?
+    let flairUrl: String?
+    /// discourse-reward: rewards this post has received.
+    let rewards: [PostReward]?
 
     /// Like count lives in actions_summary with action id 2.
     var likeCount: Int { actionsSummary?.first { $0.id == 2 }?.count ?? 0 }
+    /// Whether the current user has already liked this post.
+    var likedByMe: Bool { actionsSummary?.first { $0.id == 2 }?.acted ?? false }
+    /// Total energy this post has been rewarded (excludes system deducts, which
+    /// are negative and shouldn't count as "被打赏").
+    var rewardTotal: Int { (rewards ?? []).filter { $0.amount > 0 }.reduce(0) { $0 + $1.amount } }
 }
 
 /// `GET /n/{slug}/{id}.json?sort=` — Discourse's nested-replies view. The OP is

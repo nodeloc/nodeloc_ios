@@ -91,7 +91,7 @@ struct PostComment: Identifiable {
     /// What this reply won, when the topic has a red envelope. The plugin
     /// auto-claims on reply, so this is a result rather than an action.
     let redEnvelopeClaim: RedEnvelopeClaim?
-    let votes: Int
+    var votes: Int
     let postNumber: Int
     let replyToPostNumber: Int?
     let parentAuthor: String?
@@ -110,6 +110,13 @@ struct PostComment: Identifiable {
     let isLoadMore: Bool
     let loadMoreParent: Int
     let loadMoreRemaining: Int
+    /// The author's worn title and flair badge icon.
+    let authorTitle: String?
+    let flairURL: URL?
+    /// Whether the current user has liked this reply.
+    var isLiked: Bool
+    /// discourse-reward rewards this reply has received.
+    let rewards: [PostReward]
 
     init(
         id: Int,
@@ -130,7 +137,11 @@ struct PostComment: Identifiable {
         groupID: Int = 0,
         isLoadMore: Bool = false,
         loadMoreParent: Int = 0,
-        loadMoreRemaining: Int = 0
+        loadMoreRemaining: Int = 0,
+        authorTitle: String? = nil,
+        flairURL: URL? = nil,
+        isLiked: Bool = false,
+        rewards: [PostReward] = []
     ) {
         self.id = id
         self.author = author
@@ -151,6 +162,10 @@ struct PostComment: Identifiable {
         self.isLoadMore = isLoadMore
         self.loadMoreParent = loadMoreParent
         self.loadMoreRemaining = loadMoreRemaining
+        self.authorTitle = authorTitle
+        self.flairURL = flairURL
+        self.isLiked = isLiked
+        self.rewards = rewards
     }
 
     /// Convenience for sample data and previews, where the body is a literal
@@ -327,6 +342,10 @@ final class AppState {
     /// opens it (the node page). Cleared by the composer once read, so a later
     /// compose started elsewhere doesn't inherit it.
     var composePreselectedNode: SidebarNodeSummary?
+    /// Title/body the composer opens pre-filled with, set when reposting a topic.
+    /// Cleared by the composer once read.
+    var composePrefillTitle: String?
+    var composePrefillBody: String?
     /// Text the search overlay opens with, e.g. "#slug " to scope to one node.
     /// Cleared by the search view once read.
     var searchInitialQuery = ""

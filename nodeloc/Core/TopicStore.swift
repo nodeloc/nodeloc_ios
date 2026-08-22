@@ -124,6 +124,15 @@ final class TopicStore {
     var isSubmitting = false
     var totalReplyCount = 0
     var firstAuthor: UserProfileTarget?
+    /// OP author's worn title and flair badge.
+    var firstAuthorTitle: String?
+    var firstAuthorFlairURL: URL?
+    /// Whether the current user has liked the OP.
+    var firstPostLikedByMe = false
+    /// The OP's like count (kept here so the toggle can update it live).
+    var firstPostLikeCount = 0
+    /// Rewards the OP has received (for the 打赏 total + detail sheet).
+    var firstPostRewards: [PostReward] = []
     /// Plugin payloads for the first post and the topic.
     var firstPostPolls: [PostPoll] = []
     var myPollVotes: [String: [String]] = [:]
@@ -161,6 +170,11 @@ final class TopicStore {
         comments = []
         totalReplyCount = 0
         firstAuthor = nil
+        firstAuthorTitle = nil
+        firstAuthorFlairURL = nil
+        firstPostLikedByMe = false
+        firstPostLikeCount = 0
+        firstPostRewards = []
         firstPostPolls = []
         myPollVotes = [:]
         lottery = nil
@@ -179,6 +193,11 @@ final class TopicStore {
                 firstPostPolls = firstPost.polls ?? []
                 myPollVotes = firstPost.pollsVotes ?? [:]
                 lottery = firstPost.lottery
+                firstAuthorTitle = firstPost.userTitle
+                firstAuthorFlairURL = NodeSummaryFactory.resolvedURL(firstPost.flairUrl)
+                firstPostLikedByMe = firstPost.likedByMe
+                firstPostLikeCount = firstPost.likeCount
+                firstPostRewards = firstPost.rewards ?? []
             }
             redEnvelope = topic.redEnvelope
             totalReplyCount = max(0, (topic.postsCount ?? 1) - 1)
@@ -485,7 +504,11 @@ final class TopicStore {
                     isLastSibling: isLast,
                     ancestorTrails: trails,
                     hasChildren: !kids.isEmpty,
-                    groupID: groupID
+                    groupID: groupID,
+                    authorTitle: post.userTitle,
+                    flairURL: NodeSummaryFactory.resolvedURL(post.flairUrl),
+                    isLiked: post.likedByMe,
+                    rewards: post.rewards ?? []
                 )
             )
             let nextTrails = trails + [!isLast]
@@ -540,28 +563,76 @@ final class TopicStore {
         return out
     }
 
-    /// Sends a like for the topic's first post (no-op for guests).
-    func like() async {
+    /// Toggles the like on the topic's first post (like ↔ unlike), optimistically
+    /// updating the count. No-op for guests.
+    func toggleFirstPostLike() async {
         guard DiscourseAuth.shared.isAuthenticated, let id = firstPostID else { return }
-        try? await client.likePost(id: id)
+        let wasLiked = firstPostLikedByMe
+        firstPostLikedByMe.toggle()
+        firstPostLikeCount += wasLiked ? -1 : 1
+        do {
+            if wasLiked { try await client.unlikePost(id: id) }
+            else { try await client.likePost(id: id) }
+        } catch {
+            firstPostLikedByMe = wasLiked
+            firstPostLikeCount += wasLiked ? 1 : -1
+        }
     }
 
     /// Posts a reply and reloads the thread. Returns true on success.
     /// Posts a reply and reloads the thread. Returns the new reply's post number
     /// on success (so the reader can scroll to it), or nil on failure.
-    func submitReply(_ raw: String, topicID: Int) async -> Int? {
+    func submitReply(_ raw: String, topicID: Int, replyToPostNumber: Int? = nil) async -> Int? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard DiscourseAuth.shared.isAuthenticated, !trimmed.isEmpty else { return nil }
         isSubmitting = true
         defer { isSubmitting = false }
         do {
-            let created = try await client.reply(topicID: topicID, raw: trimmed)
+            let created = try await client.reply(topicID: topicID, raw: trimmed, replyToPostNumber: replyToPostNumber)
             loadedID = nil
             await load(topicID: topicID)
             return created.postNumber
         } catch {
             return nil
         }
+    }
+
+    /// Toggles the like on a reply (like ↔ unlike), optimistically updating the
+    /// row's count so the heart responds immediately.
+    func toggleReplyLike(id: Int) async {
+        guard DiscourseAuth.shared.isAuthenticated,
+              let index = comments.firstIndex(where: { $0.id == id }) else { return }
+        let wasLiked = comments[index].isLiked
+        comments[index].isLiked.toggle()
+        comments[index].votes += wasLiked ? -1 : 1
+        do {
+            if wasLiked { try await client.unlikePost(id: id) }
+            else { try await client.likePost(id: id) }
+        } catch {
+            guard let now = comments.firstIndex(where: { $0.id == id }) else { return }
+            comments[now].isLiked = wasLiked
+            comments[now].votes += wasLiked ? 1 : -1
+        }
+    }
+
+    /// 打赏 — gives energy to a post via discourse-reward, then reloads so the
+    /// new reward total shows.
+    func giveReward(postID: Int, amount: Int, note: String?) async throws {
+        try await client.giveReward(postID: postID, amount: amount, note: note)
+        if let id = loadedID {
+            loadedID = nil
+            await load(topicID: id)
+        }
+    }
+
+    /// 保存书签 — bookmarks a post.
+    func bookmark(postID: Int) async throws {
+        try await client.bookmark(postID: postID)
+    }
+
+    /// Repost — republishes this topic into another node via discourse-community.
+    func repost(topicID: Int, categoryID: Int, title: String) async throws {
+        try await client.repost(topicID: topicID, categoryID: categoryID, title: title)
     }
 
     private func nestedComments(from posts: [TopicPost]) -> [PostComment] {
