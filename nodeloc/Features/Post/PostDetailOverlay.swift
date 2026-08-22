@@ -584,27 +584,39 @@ struct PostDetailOverlay: View {
     /// A "view N more replies" affordance under a nested post, indented to match
     /// where those replies will appear.
     private func loadMoreChildrenRow(_ comment: PostComment) -> some View {
-        Button {
-            Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
-        } label: {
-            HStack(spacing: 5) {
-                Text("另外 \(comment.loadMoreRemaining) 个回复")
-                    .font(Theme.body(13, weight: .semibold))
-                if topic.isLoadingChildren(comment.loadMoreParent) {
-                    ProgressView().controlSize(.mini).tint(Theme.muted(0.5))
-                } else {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .bold))
+        let depth = min(max(comment.nestingDepth, 0), NestedReplyRow.maxIndentLevels)
+        let leading = depth > 0
+            ? CGFloat(depth) * NestedReplyRow.indentStep + NestedReplyRow.railContentGap
+            : 0
+
+        return ZStack(alignment: .topLeading) {
+            // Same rails as the replies, so the row lines up beside the vertical
+            // thread line at its level.
+            RedditThreadRails(depth: depth)
+                .frame(width: leading)
+
+            Button {
+                Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
+            } label: {
+                HStack(spacing: 5) {
+                    Text("另外 \(comment.loadMoreRemaining) 个回复")
+                        .font(Theme.body(13, weight: .semibold))
+                    if topic.isLoadingChildren(comment.loadMoreParent) {
+                        ProgressView().controlSize(.mini).tint(Theme.muted(0.5))
+                    } else {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
+                    }
                 }
+                .foregroundStyle(Theme.muted(0.55))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 9)
+                .padding(.leading, leading)
+                .contentShape(Rectangle())
             }
-            .foregroundStyle(Theme.muted(0.55))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 9)
-            .padding(.leading, CGFloat(min(comment.nestingDepth, 5)) * 16 + 8)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .disabled(topic.isLoadingChildren(comment.loadMoreParent))
         }
-        .buttonStyle(.plain)
-        .disabled(topic.isLoadingChildren(comment.loadMoreParent))
     }
 
     // MARK: Skeleton
