@@ -2,13 +2,44 @@
 //  ReplyComposer.swift
 //  nodeloc
 //
-//  The "加入对话" reply bar at the bottom of a post. A simplified composer:
-//  text with a formatting toolbar behind `Aa`, one image upload, and a Klipy
-//  GIF picker. No poll / lottery / red envelope — those belong to new topics.
+//  The "加入对话" reply bar at the bottom of a post. A simplified WYSIWYG
+//  composer: rich text (real bold/italic/strike, not markdown tokens) exported
+//  to markdown on submit, one image upload, and a Klipy GIF picker. Images and
+//  GIFs ride as attachment chips since SwiftUI's rich editor can't inline them.
 //
 
 import PhotosUI
 import SwiftUI
+
+// MARK: - Emphasis attribute
+
+/// A bitmask (bold=1, italic=2, strike=4) stored alongside the rendered font so
+/// the exact styling can be recovered when exporting to markdown.
+enum EmphasisAttribute: CodableAttributedStringKey {
+    typealias Value = Int
+    static let name = "nodeloc.emphasis"
+}
+
+extension AttributeScopes {
+    struct NodelocAttributes: AttributeScope {
+        let emphasis: EmphasisAttribute
+    }
+    var nodeloc: NodelocAttributes.Type { NodelocAttributes.self }
+}
+
+extension AttributeDynamicLookup {
+    subscript<T: AttributedStringKey>(
+        dynamicMember keyPath: KeyPath<AttributeScopes.NodelocAttributes, T>
+    ) -> T {
+        self[T.self]
+    }
+}
+
+private enum Emphasis {
+    static let bold = 1
+    static let italic = 2
+    static let strike = 4
+}
 
 /// Carries the reply text's natural height up so the editor can auto-grow.
 private struct EditorHeightKey: PreferenceKey {
@@ -19,50 +50,53 @@ private struct EditorHeightKey: PreferenceKey {
 }
 
 struct ReplyComposer: View {
+    /// The exported markdown, owned by the parent (used for submit + clear).
     @Binding var text: String
     let isSubmitting: Bool
     let isAuthenticated: Bool
     let onSubmit: () -> Void
 
+    // Rich text is the source of truth while composing.
+    @State private var rich = AttributedString()
+    @State private var selection = AttributedTextSelection()
+    @State private var attachments: [Attachment] = []
+
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
-    /// Normal state auto-grows natively (1…maxLines). `tall` snaps to the max
-    /// height. While dragging the handle, the height follows the finger
-    /// (`previewHeight`) and snaps on release.
+    @State private var expanded = false
+
+    // Height / drag.
     @State private var tall = false
     @State private var isDragging = false
     @State private var previewHeight: CGFloat = 0
-    /// Natural height of the current text, measured off-screen for auto-grow.
     @State private var naturalHeight: CGFloat = 44
     private let minHeight: CGFloat = 44
     private let maxHeight: CGFloat = 320
+    private let collapseThreshold: CGFloat = 60
 
-    /// The editor's height right now: the live drag height while dragging, the
-    /// max when snapped tall, otherwise the content's natural height.
-    private var currentHeight: CGFloat {
-        if isDragging { return previewHeight }
-        return tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
-    }
+    // Media state.
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
-    @State private var hasImage = false
-
-    // Klipy GIF search state.
     @State private var gifQuery = ""
     @State private var gifs: [GifItem] = []
     @State private var isSearchingGifs = false
     @State private var gifSearchTask: Task<Void, Never>?
 
-    /// Collapsed = just the tappable "加入对话" bar; expanded = full editor.
-    @State private var expanded = false
-    private let collapseThreshold: CGFloat = 60
-
     private enum Mode { case plain, formatting }
+
+    private var plainText: String { String(rich.characters) }
+    private var hasImage: Bool { attachments.contains { !$0.isGif } }
+
+    private var currentHeight: CGFloat {
+        if isDragging { return previewHeight }
+        return tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
+    }
 
     private var canSubmit: Bool {
         isAuthenticated && !isSubmitting
-            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !attachments.isEmpty)
     }
 
     var body: some View {
@@ -82,14 +116,22 @@ struct ReplyComposer: View {
                 tall = false
             }
         }
+        .onChange(of: text) { _, newValue in
+            // Parent cleared the draft after a successful send → reset.
+            if newValue.isEmpty {
+                rich = AttributedString()
+                attachments = []
+                selection = AttributedTextSelection()
+            }
+        }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
             Task { await uploadImage(item) }
         }
     }
 
-    /// The resting bar: tap to open the editor. Shows the in-progress draft when
-    /// there is one, so collapsing doesn't hide what you typed.
+    // MARK: Collapsed bar
+
     private var collapsedBar: some View {
         Button {
             if isAuthenticated { withAnimation(.quicker) { expanded = true } }
@@ -97,7 +139,7 @@ struct ReplyComposer: View {
             HStack {
                 Text(collapsedText)
                     .font(Theme.body(15))
-                    .foregroundStyle(text.isEmpty ? Theme.muted(0.45) : Theme.text)
+                    .foregroundStyle(plainText.isEmpty ? Theme.muted(0.45) : Theme.text)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -120,22 +162,21 @@ struct ReplyComposer: View {
     }
 
     private var collapsedText: String {
-        if !text.isEmpty { return text }
+        if !plainText.isEmpty { return plainText }
+        if !attachments.isEmpty { return "已添加 \(attachments.count) 个附件" }
         return isAuthenticated ? "加入对话" : "登录后参与讨论"
     }
+
+    // MARK: Expanded composer
 
     private var expandedComposer: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.divider).frame(height: 1)
-
             dragHandle
-
             hintLine
-
             editor
-
+            if !attachments.isEmpty { attachmentRow }
             toolbar
-
             if showGiphy {
                 giphyPanel
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -156,8 +197,6 @@ struct ReplyComposer: View {
         .padding(.top, 10)
     }
 
-    /// Drag the handle to resize interactively: it follows the finger, then on
-    /// release snaps to the max height (dragged up) or collapses (dragged down).
     private var dragHandle: some View {
         Capsule()
             .fill(Theme.divider)
@@ -172,8 +211,6 @@ struct ReplyComposer: View {
                             isDragging = true
                             previewHeight = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
                         }
-                        // Follow the finger, allowing a little slack past the
-                        // ends so there's travel before it snaps.
                         let base = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
                         previewHeight = min(max(minHeight - 30, base - value.translation.height), maxHeight + 20)
                     }
@@ -194,7 +231,7 @@ struct ReplyComposer: View {
 
     private var editor: some View {
         ZStack(alignment: .topLeading) {
-            if text.isEmpty {
+            if plainText.isEmpty {
                 Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
                     .font(Theme.body(15))
                     .foregroundStyle(Theme.muted(0.4))
@@ -202,7 +239,7 @@ struct ReplyComposer: View {
                     .padding(.vertical, 8)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $text)
+            TextEditor(text: $rich, selection: $selection)
                 .font(Theme.body(15))
                 .tint(Theme.accent)
                 .scrollContentBackground(.hidden)
@@ -211,10 +248,8 @@ struct ReplyComposer: View {
         }
         .frame(height: currentHeight)
         .padding(.horizontal, 12)
-        // Measures the text's natural height (self-sizing, so it isn't clamped
-        // by the fixed frame) to drive auto-grow.
         .background {
-            Text(text.isEmpty ? " " : text)
+            Text(plainText.isEmpty ? " " : plainText)
                 .font(Theme.body(15))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 8)
@@ -229,20 +264,49 @@ struct ReplyComposer: View {
         .onPreferenceChange(EditorHeightKey.self) { naturalHeight = $0 }
     }
 
+    // MARK: Attachments
+
+    private var attachmentRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { attachment in
+                    ZStack(alignment: .topTrailing) {
+                        CachedRemoteImage(url: attachment.previewURL) { image in
+                            image.resizable().scaledToFill()
+                        } placeholder: {
+                            Rectangle().fill(Theme.neutral300)
+                        }
+                        .frame(width: 72, height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                        Button {
+                            attachments.removeAll { $0.id == attachment.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.white, .black.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(4)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+        }
+        .scrollIndicators(.hidden)
+    }
+
     // MARK: Toolbar
 
     @ViewBuilder
     private var toolbar: some View {
         HStack(spacing: 4) {
             switch mode {
-            case .plain:
-                plainTools
-            case .formatting:
-                formattingTools
+            case .plain: plainTools
+            case .formatting: formattingTools
             }
-
             Spacer(minLength: 8)
-
             submitButton
         }
         .padding(.horizontal, 12)
@@ -296,19 +360,20 @@ struct ReplyComposer: View {
     }
 
     private var formattingTools: some View {
-        HStack(spacing: 2) {
+        let active = currentEmphasis
+        return HStack(spacing: 2) {
             iconTool("xmark") { withAnimation(.quicker) { mode = .plain } }
-            iconTool("bold") { wrap("**", "**") }
-            iconTool("italic") { wrap("*", "*") }
-            iconTool("strikethrough") { wrap("~~", "~~") }
-            iconTool("textformat.size") { prependLine("## ") }
-            iconTool("exclamationmark.triangle") { wrap("[spoiler]", "[/spoiler]") }
-            iconTool("link") { append("[链接](https://)") }
+            iconTool("bold", isActive: active & Emphasis.bold != 0) { toggleEmphasis(Emphasis.bold) }
+            iconTool("italic", isActive: active & Emphasis.italic != 0) { toggleEmphasis(Emphasis.italic) }
+            iconTool("strikethrough", isActive: active & Emphasis.strike != 0) { toggleEmphasis(Emphasis.strike) }
         }
     }
 
     private var submitButton: some View {
-        Button(action: onSubmit) {
+        Button {
+            text = exportMarkdown()
+            onSubmit()
+        } label: {
             Group {
                 if isSubmitting {
                     ProgressView().tint(Theme.accent)
@@ -325,12 +390,13 @@ struct ReplyComposer: View {
         .disabled(!canSubmit)
     }
 
-    private func iconTool(_ systemName: String, action: @escaping () -> Void) -> some View {
+    private func iconTool(_ systemName: String, isActive: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Theme.text)
+                .foregroundStyle(isActive ? Theme.accent : Theme.text)
                 .frame(width: 38, height: 34)
+                .background(isActive ? Theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -340,6 +406,57 @@ struct ReplyComposer: View {
             .fill(Theme.divider)
             .frame(width: 1, height: 20)
             .padding(.horizontal, 4)
+    }
+
+    // MARK: Rich-text formatting
+
+    private var currentEmphasis: Int {
+        selection.typingAttributes(in: rich).emphasis ?? 0
+    }
+
+    private func toggleEmphasis(_ flag: Int) {
+        let active = (currentEmphasis & flag) != 0
+        rich.transformAttributes(in: &selection) { container in
+            var mask = container.emphasis ?? 0
+            mask = active ? (mask & ~flag) : (mask | flag)
+            container.emphasis = mask == 0 ? nil : mask
+
+            var font = Font.system(size: 15)
+            if mask & Emphasis.bold != 0 { font = font.bold() }
+            if mask & Emphasis.italic != 0 { font = font.italic() }
+            container.font = font
+            container.strikethroughStyle = (mask & Emphasis.strike != 0) ? Text.LineStyle.single : nil
+        }
+        focused = true
+    }
+
+    /// Serialises the rich text (plus attachments) to Discourse markdown.
+    private func exportMarkdown() -> String {
+        var out = ""
+        for run in rich.runs {
+            let piece = String(rich[run.range].characters)
+            guard !piece.isEmpty else { continue }
+            out += wrapEmphasis(piece, mask: run.emphasis ?? 0)
+        }
+        var result = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        for attachment in attachments {
+            result += (result.isEmpty ? "" : "\n\n") + attachment.markdown
+        }
+        return result
+    }
+
+    /// Wraps a run in markdown, keeping surrounding whitespace outside the tokens.
+    private func wrapEmphasis(_ text: String, mask: Int) -> String {
+        guard mask != 0 else { return text }
+        let leading = String(text.prefix { $0 == " " || $0 == "\n" })
+        let trailing = String(text.reversed().prefix { $0 == " " || $0 == "\n" }.reversed())
+        let core = String(text.dropFirst(leading.count).dropLast(trailing.count))
+        guard !core.isEmpty else { return text }
+        var wrapped = core
+        if mask & Emphasis.strike != 0 { wrapped = "~~\(wrapped)~~" }
+        if mask & Emphasis.italic != 0 { wrapped = "*\(wrapped)*" }
+        if mask & Emphasis.bold != 0 { wrapped = "**\(wrapped)**" }
+        return leading + wrapped + trailing
     }
 
     // MARK: Giphy panel
@@ -401,24 +518,7 @@ struct ReplyComposer: View {
         .padding(.bottom, 8)
     }
 
-    // MARK: Text mutation
-
-    private func wrap(_ prefix: String, _ suffix: String) {
-        text = text.isEmpty ? prefix + suffix : prefix + text + suffix
-        focused = true
-    }
-
-    private func prependLine(_ token: String) {
-        text = token + text
-        focused = true
-    }
-
-    private func append(_ token: String) {
-        text += token
-        focused = true
-    }
-
-    // MARK: Image
+    // MARK: Media
 
     private func uploadImage(_ item: PhotosPickerItem) async {
         isUploadingImage = true
@@ -431,12 +531,9 @@ struct ReplyComposer: View {
             data: data,
             fileName: "image-\(UUID().uuidString).\(ext)",
             mimeType: mime
-        ), let url = upload.url else { return }
-        append("\n![image](\(url))\n")
-        hasImage = true
+        ), let raw = upload.url, let url = URL(string: raw) else { return }
+        attachments.append(Attachment(previewURL: url, markdown: "![image](\(raw))", isGif: false))
     }
-
-    // MARK: GIF search
 
     private func scheduleGifSearch() {
         gifSearchTask?.cancel()
@@ -460,11 +557,25 @@ struct ReplyComposer: View {
     }
 
     private func insertGif(_ gif: GifItem) {
-        append("\n![\(gif.title)|\(gif.width)x\(gif.height)](\(gif.url.absoluteString))\n")
+        attachments.append(
+            Attachment(
+                previewURL: gif.url,
+                markdown: "![\(gif.title)|\(gif.width)x\(gif.height)](\(gif.url.absoluteString))",
+                isGif: true
+            )
+        )
         withAnimation(.quicker) { showGiphy = false }
     }
 
-    /// A flattened Klipy result: picks whatever format the response provides.
+    // MARK: Models
+
+    struct Attachment: Identifiable {
+        let id = UUID()
+        let previewURL: URL
+        let markdown: String
+        let isGif: Bool
+    }
+
     struct GifItem: Identifiable {
         let id = UUID()
         let title: String
