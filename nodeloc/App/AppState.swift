@@ -379,6 +379,16 @@ final class AppState {
         routedNodeSlug = slug
     }
 
+    /// A group whose PM inbox a notification asked to open. The inbox watches
+    /// this to switch to the 私信 pane and select that group's filter.
+    var inboxRequestedGroup: String?
+
+    func openGroupInbox(group: String) {
+        overlay = nil
+        tab = .chat
+        inboxRequestedGroup = group
+    }
+
     // Auth copy
     var authTitle: String { authMode == .login ? "Welcome back." : "Create your account." }
     var authSubtitle: String {

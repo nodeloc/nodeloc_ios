@@ -142,12 +142,27 @@ struct ChatView: View {
         .background(Theme.bg.ignoresSafeArea())
         .task {
             await store.load()
+            let handled = await applyInboxRequestIfNeeded()
             // Opening the inbox lands on 通知; clear its badge like the web bell.
-            if selection == .notifications { await store.markNotificationsRead() }
+            if !handled, selection == .notifications { await store.markNotificationsRead() }
         }
         .onChange(of: selection) { _, pane in
             if pane == .notifications { Task { await store.markNotificationsRead() } }
         }
+        .onChange(of: app.inboxRequestedGroup) { _, _ in
+            Task { await applyInboxRequestIfNeeded() }
+        }
+    }
+
+    /// Honors a group-message notification: switch to 私信 and select the group.
+    /// Returns whether a request was pending.
+    @discardableResult
+    private func applyInboxRequestIfNeeded() async -> Bool {
+        guard let group = app.inboxRequestedGroup else { return false }
+        selection = .privateMessages
+        app.inboxRequestedGroup = nil
+        await store.selectPMGroup(group)
+        return true
     }
 
     private var messageHeader: some View {
@@ -354,22 +369,65 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder
     private var privateMessageList: some View {
-        Group {
-            ForEach(store.conversations) { conversation in
-                Button {
-                    store.markConversationRead(id: conversation.id)
-                    app.openTopic(id: conversation.id)
-                } label: {
-                    PMConversationRow(conversation: conversation)
-                }
-                .buttonStyle(.plain)
-            }
-
-            if !store.isLoading && store.conversations.isEmpty {
-                emptyState(title: "暂无私信", icon: "envelope")
-            }
+        if !store.messageGroups.isEmpty {
+            pmFilterBar
+                .padding(.bottom, 8)
         }
+
+        if store.isLoadingGroupPMs {
+            ProgressView()
+                .tint(Theme.accent)
+                .padding(.top, 32)
+        }
+
+        ForEach(store.visibleConversations) { conversation in
+            Button {
+                store.markConversationRead(id: conversation.id)
+                app.openTopic(id: conversation.id)
+            } label: {
+                PMConversationRow(conversation: conversation)
+            }
+            .buttonStyle(.plain)
+        }
+
+        if !store.isLoading && !store.isLoadingGroupPMs && store.visibleConversations.isEmpty {
+            emptyState(title: "暂无私信", icon: "envelope")
+        }
+    }
+
+    /// 个人 + one chip per group with a message inbox.
+    private var pmFilterBar: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                pmFilterChip(title: "个人", isSelected: store.selectedPMGroup == nil) {
+                    Task { await store.selectPMGroup(nil) }
+                }
+                ForEach(store.messageGroups, id: \.self) { group in
+                    pmFilterChip(title: group, isSelected: store.selectedPMGroup == group) {
+                        Task { await store.selectPMGroup(group) }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func pmFilterChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.quicker) { action() }
+        } label: {
+            Text(title)
+                .font(Theme.body(15, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Theme.text : Theme.muted(0.58))
+                .lineLimit(1)
+                .padding(.horizontal, 16)
+                .frame(height: 38)
+                .background(isSelected ? Theme.neutral300 : Color.clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var chatList: some View {

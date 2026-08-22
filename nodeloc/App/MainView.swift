@@ -55,7 +55,7 @@ struct MainView: View {
                             ChatView()
                         }
                     } label: {
-                        Image(systemName: "bubble.left.and.bubble.right")
+                        Image(systemName: "bubble.left")
                         Text("Message")
                     }
                     .badge(inbox.unreadTotal)

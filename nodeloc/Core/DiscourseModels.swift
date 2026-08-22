@@ -843,6 +843,14 @@ struct CurrentUser: Decodable {
     /// PMs; `newPersonalMessagesNotificationsCount` is the unread-PM count.
     let unreadNotifications: Int?
     let newPersonalMessagesNotificationsCount: Int?
+    /// The user's groups; those with `hasMessages` get a filter in the PM inbox.
+    let groups: [CurrentUserGroup]?
+}
+
+struct CurrentUserGroup: Decodable {
+    let id: Int?
+    let name: String
+    let hasMessages: Bool?
 }
 
 struct CurrentUserResponse: Decodable { let currentUser: CurrentUser }

@@ -28,6 +28,9 @@ enum LinkRouter {
         case profile(username: String)
         /// A nodeloc node; open the native node page.
         case node(slug: String)
+        /// A group's PM inbox (staff/moderators), where group-message
+        /// notifications point; opens the inbox filtered to that group.
+        case groupInbox(group: String)
         /// Anything else, including nodeloc pages with no native equivalent.
         case web(URL)
         /// Not openable in a web view (mailto:, tel:, custom schemes).
@@ -58,6 +61,13 @@ enum LinkRouter {
         // notifications point) are inboxes with no native screen, so they fall
         // through to the in-app browser rather than being mistaken for a profile.
         if segments.first == "u", segments.count >= 2 {
+            // /u/<name>/messages/group/<g> (or /messages/<g>) → the group inbox.
+            if segments.count >= 4, segments[2] == "messages" {
+                let group = (segments[3] == "group" && segments.count >= 5)
+                    ? segments[4]
+                    : segments[3]
+                return .groupInbox(group: group)
+            }
             let profileTabs: Set<String> = ["summary", "activity", "badges"]
             if segments.count == 2 || profileTabs.contains(segments[2]) {
                 return .profile(username: segments[1])
@@ -117,6 +127,9 @@ extension View {
                 return .handled
             case .node(let slug):
                 app.openNode(slug: slug)
+                return .handled
+            case .groupInbox(let group):
+                app.openGroupInbox(group: group)
                 return .handled
             case .web(let url):
                 browser.open(url)

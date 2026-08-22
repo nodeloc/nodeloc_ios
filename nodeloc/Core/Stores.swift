@@ -2494,9 +2494,21 @@ final class MessageCenterStore {
     private let client = DiscourseClient()
 
     var notifications: [AppNotification] = []
-    /// Real private-message conversations (from /topics/private-messages),
+    /// Personal private-message conversations (from /topics/private-messages),
     /// not the PM-typed notifications the old code derived.
     var conversations: [PMConversation] = []
+    /// Conversations for the currently selected group filter.
+    var groupConversations: [PMConversation] = []
+    /// Group names with a message inbox — the PM pane's filter options.
+    var messageGroups: [String] = []
+    /// nil = personal inbox; otherwise the selected group's name.
+    var selectedPMGroup: String?
+    var isLoadingGroupPMs = false
+
+    /// What the PM pane shows for the current filter.
+    var visibleConversations: [PMConversation] {
+        selectedPMGroup == nil ? conversations : groupConversations
+    }
     var chats: [Chat] = []
     var threads: [ChatThreadListItem] = []
     var chatSearchResults: [ChatSearchResult] = []
@@ -2542,6 +2554,30 @@ final class MessageCenterStore {
         unreadPrivateMessages = conversations.filter(\.unread).count
     }
 
+    /// Switches the PM pane's filter. `nil` shows the personal inbox (already
+    /// loaded); a group name fetches that group's PMs.
+    func selectPMGroup(_ group: String?) async {
+        selectedPMGroup = group
+        guard let group,
+              let username = DiscourseAuth.shared.username else {
+            groupConversations = []
+            return
+        }
+        // A group arriving from a notification may not be in the fetched list
+        // yet; surface it as a chip so the filter shows as selected.
+        if !messageGroups.contains(group) { messageGroups.append(group) }
+        isLoadingGroupPMs = true
+        defer { isLoadingGroupPMs = false }
+        do {
+            let response = try await client.groupPrivateMessages(username: username, group: group)
+            // Guard against a slow response landing after the user switched away.
+            guard selectedPMGroup == group else { return }
+            groupConversations = Self.conversations(from: response, client: client)
+        } catch {
+            if selectedPMGroup == group { groupConversations = [] }
+        }
+    }
+
     /// Marks a chat channel read up to its latest message (server) and clears
     /// its unread locally so the chat badge drops immediately.
     func markChatChannelRead(channelID: Int, messageID: Int) async {
@@ -2572,11 +2608,15 @@ final class MessageCenterStore {
         errorText = nil
         defer { isLoading = false }
 
-        // Unread notification count rides along on the current user. The PM
+        // Unread notification count rides along on the current user, as does
+        // the list of groups with a message inbox (for the PM filter). The PM
         // count is derived from the conversation list below so it matches the
         // rows' own unread dots.
         if let current = try? await client.currentUser().currentUser {
             unreadNotifications = current.unreadNotifications ?? 0
+            messageGroups = (current.groups ?? [])
+                .filter { $0.hasMessages == true }
+                .map(\.name)
         }
 
         do {

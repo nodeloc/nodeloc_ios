@@ -306,6 +306,11 @@ struct DiscourseClient {
         try await get("topics/private-messages/\(username).json")
     }
 
+    /// PMs addressed to one of the user's groups (staff, moderators, …).
+    func groupPrivateMessages(username: String, group: String) async throws -> PrivateMessagesResponse {
+        try await get("topics/private-messages-group/\(username)/\(group).json")
+    }
+
     /// Marks every notification read and bumps last-seen — what Discourse does
     /// when you open the notifications menu, so the unread badge clears.
     @discardableResult
