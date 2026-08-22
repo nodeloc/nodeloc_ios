@@ -250,10 +250,16 @@ struct PostCard: View {
     }
 
     private func openPost() {
+        app.markTopicOpened(id: post.id)
         app.selectedPost = post
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }
+    }
+
+    /// New/unread for the signed-in user, unless opened this session.
+    private var showsUnreadDot: Bool {
+        post.isUnread && !app.locallyReadTopicIDs.contains(post.id)
     }
 
     /// Opens the tapped media directly rather than the post.
@@ -284,6 +290,12 @@ struct PostCard: View {
                     .buttonStyle(.plain)
             } else {
                 avatar
+            }
+
+            if showsUnreadDot {
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: 7, height: 7)
             }
 
             Text(post.node)

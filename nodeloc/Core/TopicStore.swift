@@ -8,6 +8,51 @@
 import Foundation
 import UIKit
 
+/// Tracks which posts the reader sees and for how long, then reports it to
+/// Discourse (POST /topics/timings). That marks the posts read, accrues the
+/// user's read time and posts-read count, and clears the topic's unread dot —
+/// the same bookkeeping the web client's screen tracker does.
+@MainActor
+final class TopicReadTracker {
+    private let client = DiscourseClient()
+    private var topicID: Int?
+    /// Post numbers currently on screen.
+    private var visible: Set<Int> = []
+    /// Unsent read time per post number, and total time in the topic, in ms.
+    private var pendingByPost: [Int: Int] = [:]
+    private var pendingTopicTime = 0
+
+    func begin(topicID: Int) {
+        self.topicID = topicID
+        visible = [1]        // the first post is on screen when a topic opens
+        pendingByPost = [:]
+        pendingTopicTime = 0
+    }
+
+    func setVisible(_ postNumber: Int, _ isVisible: Bool) {
+        if isVisible { visible.insert(postNumber) } else { visible.remove(postNumber) }
+    }
+
+    /// Called on a ~1s heartbeat: credit the elapsed time to on-screen posts.
+    func tick(elapsedMs: Int = 1000) {
+        guard topicID != nil, !visible.isEmpty else { return }
+        for postNumber in visible {
+            pendingByPost[postNumber, default: 0] += elapsedMs
+        }
+        pendingTopicTime += elapsedMs
+    }
+
+    /// Sends and clears accumulated timings. A no-op when nothing is pending.
+    func flush() async {
+        guard let topicID, !pendingByPost.isEmpty else { return }
+        let timings = pendingByPost
+        let time = pendingTopicTime
+        pendingByPost = [:]
+        pendingTopicTime = 0
+        try? await client.sendTopicTimings(topicID: topicID, topicTimeMs: time, timings: timings)
+    }
+}
+
 @MainActor
 @Observable
 final class TopicStore {

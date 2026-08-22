@@ -26,6 +26,9 @@ struct PostDetailOverlay: View {
     /// A reply's post number to scroll to once its row is loaded, taken from
     /// `AppState.pendingReplyPostNumber` when a notification opens the topic.
     @State private var scrollTarget: Int?
+    /// Reports read progress (posts seen + time) so the server records it and
+    /// the topic's unread dot clears.
+    @State private var reader = TopicReadTracker()
     @FocusState private var isReplyFocused: Bool
 
     var body: some View {
@@ -71,6 +74,21 @@ struct PostDetailOverlay: View {
             scrollTarget = app.pendingReplyPostNumber
             app.pendingReplyPostNumber = nil
             await topic.load(topicID: post.id)
+        }
+        .task(id: post.id) {
+            // Read-progress heartbeat: credit on-screen posts each second,
+            // flush periodically, and flush once more on leaving or switching
+            // topics (the task is cancelled then).
+            reader.begin(topicID: post.id)
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { break }
+                reader.tick()
+                ticks += 1
+                if ticks % 10 == 0 { await reader.flush() }
+            }
+            await reader.flush()
         }
         .task(id: post.node) { nodeSummary = await NodeCatalog.shared.node(slug: post.node) }
         // Identity for the full-screen video chrome. Set here rather than
@@ -162,6 +180,8 @@ struct PostDetailOverlay: View {
                     .foregroundStyle(Theme.text)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, 14)
+                    // The title standing in for the first post being on screen.
+                    .onScrollVisibilityChange(threshold: 0.2) { reader.setVisible(1, $0) }
 
                 if let envelope = topic.redEnvelope {
                     RedEnvelopeBanner(envelope: envelope)
@@ -511,6 +531,8 @@ struct PostDetailOverlay: View {
                         )
                         // Scroll anchor for notification deep links (/t/…/<post>).
                         .id(comment.postNumber)
+                        // Credit read time to this reply while it's on screen.
+                        .onScrollVisibilityChange(threshold: 0.5) { reader.setVisible(comment.postNumber, $0) }
                     }
 
                     if topic.hasMoreComments {

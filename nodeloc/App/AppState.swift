@@ -22,6 +22,8 @@ struct Post: Identifiable {
     let comments: Int
     let hasImage: Bool
     var pinned: Bool = false
+    /// New or has-unread-posts for the signed-in user — shows the read dot.
+    var isUnread: Bool = false
     /// Real topic image (when loaded from Discourse); nil falls back to the hatch placeholder.
     var imageURL: URL? = nil
     /// Real author avatar (when loaded from Discourse); nil falls back to initials.
@@ -346,7 +348,16 @@ final class AppState {
     /// Opens a nodeloc topic natively. Only the id is known from the URL, so
     /// the post detail fills in the rest when it loads the topic. `postNumber`,
     /// when present, scrolls to that reply once it's loaded.
+    /// Topics opened this session, so their unread dot clears immediately
+    /// without waiting for the list to reload from the server.
+    var locallyReadTopicIDs: Set<Int> = []
+
+    func markTopicOpened(id: Int) {
+        locallyReadTopicIDs.insert(id)
+    }
+
     func openTopic(id: Int, postNumber: Int? = nil) {
+        markTopicOpened(id: id)
         pendingReplyPostNumber = postNumber
         // Already open — nothing to do, and rebuilding would lose scroll.
         guard !(overlay == .post && selectedPost.id == id) else { return }

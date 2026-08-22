@@ -318,6 +318,22 @@ struct DiscourseClient {
         try await send("PUT", path: "notifications/mark-read")
     }
 
+    /// Reports read progress for a topic: `topicTimeMs` is time spent in the
+    /// topic this batch, `timings` maps post number → ms it was on screen. The
+    /// server marks those posts read, accrues the user's read time and
+    /// posts-read count, and clears the topic's new/unread state.
+    @discardableResult
+    func sendTopicTimings(topicID: Int, topicTimeMs: Int, timings: [Int: Int]) async throws -> Data {
+        var form = [
+            "topic_id": String(topicID),
+            "topic_time": String(topicTimeMs),
+        ]
+        for (postNumber, ms) in timings {
+            form["timings[\(postNumber)]"] = String(ms)
+        }
+        return try await post("topics/timings", form: form)
+    }
+
     func chatChannels() async throws -> ChatChannelsResponse {
         do {
             return try await get("chat/api/me/channels.json")

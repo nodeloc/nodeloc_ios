@@ -76,6 +76,10 @@ enum FeedMapper {
         let media = DiscourseFormat.mediaItems(for: topic)
         let node = category.map { "n/\($0.slug)" } ?? "n/nodeloc"
         let letter = String((author?.username ?? category?.name ?? "N").prefix(1)).uppercased()
+        // New topic, or read progress trailing the latest post.
+        let hasUnreadPosts = (topic.lastReadPostNumber ?? 0) < (topic.highestPostNumber ?? 0)
+            && topic.lastReadPostNumber != nil
+        let isUnread = topic.unseen == true || hasUnreadPosts
         return Post(
             id: topic.id,
             node: node,
@@ -90,6 +94,7 @@ enum FeedMapper {
             comments: topic.replyCount ?? max(0, (topic.postsCount ?? 1) - 1),
             hasImage: !media.isEmpty,
             pinned: topic.pinned ?? false,
+            isUnread: isUnread,
             imageURL: media.first?.url,
             avatarURL: author?.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
             authorUsername: author?.username,

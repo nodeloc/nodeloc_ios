@@ -38,6 +38,12 @@ struct TopicListItem: Decodable, Identifiable {
     let bumpedAt: String?
     let categoryId: Int?
     let pinned: Bool?
+    /// Per-user read state (present only when signed in), used for the new/
+    /// unread dot: `unseen` is a brand-new topic; a `lastReadPostNumber` below
+    /// `highestPostNumber` means there are unread posts.
+    let unseen: Bool?
+    let lastReadPostNumber: Int?
+    let highestPostNumber: Int?
     let excerpt: String?
     let imageUrl: String?
     /// Discourse's responsive image set: the same picture at several widths
