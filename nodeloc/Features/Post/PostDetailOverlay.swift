@@ -911,21 +911,19 @@ private struct RedditThreadRails: View {
     let depth: Int
 
     var body: some View {
-        Canvas { context, size in
-            guard visibleDepth > 0 else { return }
-
-            for index in 0..<visibleDepth {
-                var path = Path()
-                let x = CGFloat(index) * Self.indentStep + Self.railWidth / 2
-                path.move(to: CGPoint(x: x, y: -1))
-                path.addLine(to: CGPoint(x: x, y: size.height + 1))
-                context.stroke(
-                    path,
-                    with: .color(Self.railColor),
-                    lineWidth: Self.railWidth
-                )
+        // Plain Rectangles rather than a Canvas: each fills the row's height
+        // deterministically as a background, so deep/newly-expanded rows always
+        // get their lines (a greedy Canvas could collapse to zero height).
+        HStack(spacing: 0) {
+            ForEach(0..<visibleDepth, id: \.self) { _ in
+                Rectangle()
+                    .fill(Self.railColor)
+                    .frame(width: Self.railWidth)
+                Color.clear
+                    .frame(width: Self.indentStep - Self.railWidth)
             }
         }
+        .frame(maxHeight: .infinity)
         .allowsHitTesting(false)
     }
 
