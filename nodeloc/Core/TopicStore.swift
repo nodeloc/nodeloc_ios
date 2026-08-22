@@ -494,9 +494,12 @@ final class TopicStore {
                 append(kid, parent: post, depth: depth + 1, isLast: index == last, trails: nextTrails, groupID: groupID)
             }
 
-            // More direct replies exist than are loaded → a "load more" row.
-            let remaining = (post.directReplyCount ?? 0) - kids.count
-            if remaining > 0, let parentNumber = post.postNumber {
+            // Actionable when direct replies remain unloaded; the count shown
+            // is the whole subtree (matching the web's "N 条回复").
+            let directRemaining = (post.directReplyCount ?? 0) - kids.count
+            let subtreeRemaining = (post.totalDescendantCount ?? post.directReplyCount ?? 0)
+                - subtreeCount(kids)
+            if directRemaining > 0, subtreeRemaining > 0, let parentNumber = post.postNumber {
                 result.append(
                     PostComment(
                         id: -post.id,
@@ -509,7 +512,7 @@ final class TopicStore {
                         groupID: groupID,
                         isLoadMore: true,
                         loadMoreParent: parentNumber,
-                        loadMoreRemaining: remaining
+                        loadMoreRemaining: subtreeRemaining
                     )
                 )
             }
@@ -520,6 +523,11 @@ final class TopicStore {
             append(root, parent: nil, depth: 0, isLast: index == lastRoot, trails: [], groupID: root.postNumber ?? root.id)
         }
         return result
+    }
+
+    /// Total posts under these nodes, counted recursively.
+    private func subtreeCount(_ posts: [TopicPost]) -> Int {
+        posts.reduce(0) { $0 + 1 + subtreeCount($1.children ?? []) }
     }
 
     private func flatten(_ posts: [TopicPost]) -> [TopicPost] {

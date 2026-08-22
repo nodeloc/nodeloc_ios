@@ -445,6 +445,8 @@ struct TopicPost: Decodable, Identifiable {
     /// `var` so more can be appended from the children endpoint.
     var children: [TopicPost]?
     let directReplyCount: Int?
+    /// All descendants under this post (what the web "N 条回复" count shows).
+    let totalDescendantCount: Int?
 
     /// Like count lives in actions_summary with action id 2.
     var likeCount: Int { actionsSummary?.first { $0.id == 2 }?.count ?? 0 }
