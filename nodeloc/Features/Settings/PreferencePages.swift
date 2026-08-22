@@ -330,9 +330,11 @@ struct PreferencePage: View {
                 title: "默认日历",
                 options: DefaultCalendar.allCases,
                 label: \.label,
-                selection: prefs.choice(
+                selection: prefs.nameChoice(
                     \.defaultCalendar, "default_calendar",
-                    default: DefaultCalendar.noneSelected
+                    default: DefaultCalendar.noneSelected,
+                    name: \.wireName,
+                    from: DefaultCalendar.init(wireName:)
                 )
             )
             SettingsPickerRow(
@@ -396,7 +398,12 @@ struct PreferencePage: View {
                 title: "聊天编辑器发送方式",
                 options: SendShortcut.allCases,
                 label: \.label,
-                selection: prefs.choice(\.sendShortcut, "send_shortcut", default: SendShortcut.enter)
+                selection: prefs.nameChoice(
+                    \.sendShortcut, "send_shortcut",
+                    default: SendShortcut.enter,
+                    name: \.wireName,
+                    from: SendShortcut.init(wireName:)
+                )
             )
             SettingsToggleRow(
                 title: "侧边栏链接到筛选列表",

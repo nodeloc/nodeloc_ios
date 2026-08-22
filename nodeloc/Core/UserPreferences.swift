@@ -184,6 +184,23 @@ enum SendShortcut: Int, CaseIterable, Identifiable {
         case .metaEnter: return "⌘ + Enter"
         }
     }
+
+    /// `UserOption#send_shortcut` is a Rails enum: it travels as its name, not
+    /// the integer, both when read and when written.
+    var wireName: String {
+        switch self {
+        case .enter: return "enter"
+        case .metaEnter: return "meta_enter"
+        }
+    }
+
+    init?(wireName: String) {
+        switch wireName {
+        case "enter": self = .enter
+        case "meta_enter": self = .metaEnter
+        default: return nil
+        }
+    }
 }
 
 enum DefaultCalendar: Int, CaseIterable, Identifiable {
@@ -198,6 +215,25 @@ enum DefaultCalendar: Int, CaseIterable, Identifiable {
         case .noneSelected: return "未选择"
         case .ics: return "ICS"
         case .google: return "Google 日历"
+        }
+    }
+
+    /// `UserOption#default_calendar` is a Rails enum: it travels as its name,
+    /// not the integer, both when read and when written.
+    var wireName: String {
+        switch self {
+        case .noneSelected: return "none_selected"
+        case .ics: return "ics"
+        case .google: return "google"
+        }
+    }
+
+    init?(wireName: String) {
+        switch wireName {
+        case "none_selected": self = .noneSelected
+        case "ics": self = .ics
+        case "google": self = .google
+        default: return nil
         }
     }
 }
@@ -351,7 +387,8 @@ struct UserPreferences: Codable, Equatable {
 
     // Other
     var timezone: String?
-    var defaultCalendar: Int?
+    /// A Rails enum name ("none_selected"/"ics"/"google"), not an integer.
+    var defaultCalendar: String?
     var bookmarkAutoDeletePreference: Int?
     var skipNewUserTips: Bool?
     var compositionMode: Int?
@@ -366,7 +403,8 @@ struct UserPreferences: Codable, Equatable {
     /// A name, not an integer: `UserOption#title_count_mode` reads through
     /// `Enum#[]`, which maps the stored key back to its symbol.
     var titleCountMode: String?
-    var sendShortcut: Int?
+    /// A Rails enum name ("enter"/"meta_enter"), not an integer.
+    var sendShortcut: String?
     var sidebarLinkToFilteredList: Bool?
     var sidebarShowCountOfNewItems: Bool?
 
@@ -570,6 +608,32 @@ extension UserPreferencesStore {
                     await self.save(
                         { $0[keyPath: keyPath] = newValue.rawValue },
                         items: [(wireKey, String(newValue.rawValue))]
+                    )
+                }
+            }
+        )
+    }
+
+    /// A binding for a Rails-enum option whose value travels as its name
+    /// ("ics", "meta_enter") rather than an integer. The enum keeps its `Int`
+    /// raw value for the UI; only the wire form differs.
+    func nameChoice<Option>(
+        _ keyPath: WritableKeyPath<UserPreferences, String?>,
+        _ wireKey: String,
+        default fallback: Option,
+        name: @escaping (Option) -> String,
+        from: @escaping (String) -> Option?
+    ) -> Binding<Option> {
+        Binding(
+            get: {
+                self.preferences[keyPath: keyPath].flatMap(from) ?? fallback
+            },
+            set: { newValue in
+                let wire = name(newValue)
+                Task {
+                    await self.save(
+                        { $0[keyPath: keyPath] = wire },
+                        items: [(wireKey, wire)]
                     )
                 }
             }
