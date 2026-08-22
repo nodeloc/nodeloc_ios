@@ -16,7 +16,9 @@ struct PostDetailOverlay: View {
     @State private var topic = TopicStore()
     @State private var draft = ""
     @State private var collapsedCommentIDs: Set<Int> = []
-    @State private var detailScrollOffset: CGFloat = 0
+    /// Header reveal progress (0…1). Held in an @Observable read only by the
+    /// floating header so scroll updates don't invalidate the whole reader body.
+    @State private var reveal = ReaderHeaderReveal()
     @State private var selectedProfile: UserProfileTarget?
     /// Full-screen image viewer state. Non-empty means the viewer is showing.
     @State private var viewerImages: [PostImage] = []
@@ -266,17 +268,18 @@ struct PostDetailOverlay: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             replyComposer(for: post)
         }
+        // Map straight to the reveal progress: identical values coalesce, so
+        // scrolling the long body past the reveal band doesn't churn state
+        // every frame (the previous raw-offset state invalidated the whole
+        // reader body continuously).
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            max(0, geometry.contentOffset.y)
+            let offset = max(0, geometry.contentOffset.y)
+            return min(max((offset - 36) / 72, 0), 1)
         } action: { _, newValue in
-            detailScrollOffset = newValue
+            reveal.progress = newValue
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg)
-    }
-
-    private var nodeRevealProgress: CGFloat {
-        min(max((detailScrollOffset - 36) / 72, 0), 1)
     }
 
     private func floatingReaderHeader(for post: Post) -> some View {
@@ -290,9 +293,11 @@ struct PostDetailOverlay: View {
                     .frame(width: readerHeaderControlHeight, height: readerHeaderControlHeight)
             }
 
-            nodePill(for: post)
-                .opacity(nodeRevealProgress)
-                .offset(y: (1 - nodeRevealProgress) * -4)
+            // Only this subview reads `reveal`, so scroll updates re-render the
+            // pill alone rather than the whole reader body.
+            RevealingView(reveal: reveal) {
+                nodePill(for: post)
+            }
 
             Spacer(minLength: 0)
 
@@ -791,6 +796,27 @@ private struct NestedReplyRow: View {
     fileprivate static let indentStep: CGFloat = 16
     fileprivate static let railContentGap: CGFloat = 8
     fileprivate static let maxIndentLevels: Int = 5
+}
+
+/// Holds the header reveal progress separately from the view so scroll updates
+/// invalidate only the views that read it.
+@MainActor
+@Observable
+final class ReaderHeaderReveal {
+    var progress: CGFloat = 0
+}
+
+/// Fades/slides its content by the reveal progress. Isolated so scrolling
+/// re-renders just the node pill, not the whole reader.
+private struct RevealingView<Content: View>: View {
+    let reveal: ReaderHeaderReveal
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        content
+            .opacity(reveal.progress)
+            .offset(y: (1 - reveal.progress) * -4)
+    }
 }
 
 /// Gentle opacity pulse for skeleton placeholders.
