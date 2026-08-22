@@ -10,6 +10,14 @@
 import PhotosUI
 import SwiftUI
 
+/// Carries the reply text's natural height up so the editor can auto-grow.
+private struct EditorHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct ReplyComposer: View {
     @Binding var text: String
     let isSubmitting: Bool
@@ -22,18 +30,19 @@ struct ReplyComposer: View {
     /// Normal state auto-grows natively (1…maxLines). `tall` snaps to the max
     /// height. While dragging the handle, the height follows the finger
     /// (`previewHeight`) and snaps on release.
-    private let maxLines = 8
     @State private var tall = false
     @State private var isDragging = false
     @State private var previewHeight: CGFloat = 0
-    @State private var renderedHeight: CGFloat = 44
+    /// Natural height of the current text, measured off-screen for auto-grow.
+    @State private var naturalHeight: CGFloat = 44
     private let minHeight: CGFloat = 44
     private let maxHeight: CGFloat = 320
 
-    /// Explicit height while dragging or snapped tall; nil = native auto-grow.
-    private var appliedHeight: CGFloat? {
+    /// The editor's height right now: the live drag height while dragging, the
+    /// max when snapped tall, otherwise the content's natural height.
+    private var currentHeight: CGFloat {
         if isDragging { return previewHeight }
-        return tall ? maxHeight : nil
+        return tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
     }
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
@@ -161,14 +170,12 @@ struct ReplyComposer: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
-                            previewHeight = renderedHeight
+                            previewHeight = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
                         }
                         // Follow the finger, allowing a little slack past the
                         // ends so there's travel before it snaps.
-                        previewHeight = min(
-                            max(minHeight - 30, renderedHeight - value.translation.height),
-                            maxHeight + 20
-                        )
+                        let base = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
+                        previewHeight = min(max(minHeight - 30, base - value.translation.height), maxHeight + 20)
                     }
                     .onEnded { value in
                         let travel = value.translation.height
@@ -186,23 +193,40 @@ struct ReplyComposer: View {
     }
 
     private var editor: some View {
-        TextField(
-            isAuthenticated ? "加入对话" : "登录后参与讨论",
-            text: $text,
-            axis: .vertical
-        )
-        .font(Theme.body(15))
-        .tint(Theme.accent)
-        .lineLimit(1...maxLines)
-        .focused($focused)
-        .disabled(!isAuthenticated)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .frame(height: appliedHeight, alignment: .top)
-        .clipped()
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-            if !isDragging { renderedHeight = height }
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
+                    .font(Theme.body(15))
+                    .foregroundStyle(Theme.muted(0.4))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $text)
+                .font(Theme.body(15))
+                .tint(Theme.accent)
+                .scrollContentBackground(.hidden)
+                .focused($focused)
+                .disabled(!isAuthenticated)
         }
+        .frame(height: currentHeight)
+        .padding(.horizontal, 12)
+        // Measures the text's natural height (self-sizing, so it isn't clamped
+        // by the fixed frame) to drive auto-grow.
+        .background {
+            Text(text.isEmpty ? " " : text)
+                .font(Theme.body(15))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: EditorHeightKey.self, value: geo.size.height)
+                    }
+                )
+                .hidden()
+        }
+        .onPreferenceChange(EditorHeightKey.self) { naturalHeight = $0 }
     }
 
     // MARK: Toolbar
