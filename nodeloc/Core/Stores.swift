@@ -2452,6 +2452,38 @@ final class ChatStore {
     }
 }
 
+/// Resolves a notification to the nodeloc URL its row should open. Topic-based
+/// kinds (replies, mentions, likes, PMs) build a /t/<slug>/<id>/<post> deep
+/// link; the rest resolve to their web page. The URL is fed through
+/// `LinkRouter`, so topics/PMs open natively and badges/groups/chat open in the
+/// in-app browser. `nil` when nothing sensible to open (row stays inert).
+enum NotificationRouting {
+    static func url(for notification: DiscourseNotification) -> URL? {
+        let base = DiscourseConfig.baseURL
+
+        if let topicID = notification.topicId {
+            let slug = notification.slug ?? "topic"
+            var path = "t/\(slug)/\(topicID)"
+            if let post = notification.postNumber, post > 1 { path += "/\(post)" }
+            return base.appending(path: path)
+        }
+
+        let data = notification.data
+        if let channel = data?.chatChannelId {
+            var path = "chat/c/-/\(channel)"
+            if let message = data?.chatMessageId { path += "/\(message)" }
+            return base.appending(path: path)
+        }
+        if let badgeID = data?.badgeId {
+            return base.appending(path: "badges/\(badgeID)/\(data?.badgeSlug ?? "-")")
+        }
+        if let group = data?.groupName, let username = data?.username {
+            return base.appending(path: "u/\(username)/messages/group/\(group)")
+        }
+        return nil
+    }
+}
+
 @MainActor
 @Observable
 final class MessageCenterStore {
@@ -2574,7 +2606,8 @@ final class MessageCenterStore {
             name: name,
             text: text(for: notification, kind: kind),
             time: DiscourseFormat.relative(notification.createdAt),
-            unread: !notification.read
+            unread: !notification.read,
+            url: NotificationRouting.url(for: notification)
         )
     }
 
@@ -2642,7 +2675,8 @@ final class NotificationsStore {
             name: name,
             text: text(for: notification, kind: kind),
             time: DiscourseFormat.relative(notification.createdAt),
-            unread: !notification.read
+            unread: !notification.read,
+            url: NotificationRouting.url(for: notification)
         )
     }
 

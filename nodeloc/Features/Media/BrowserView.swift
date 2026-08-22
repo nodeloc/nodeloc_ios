@@ -21,8 +21,9 @@ import WebKit
 /// hook. One `environment(\.openURL)` handler at the root catches all of them.
 enum LinkRouter {
     enum Destination: Equatable {
-        /// A nodeloc topic; open the native post detail.
-        case topic(id: Int)
+        /// A nodeloc topic; open the native post detail. `postNumber`, when the
+        /// URL carries one (/t/slug/id/45), scrolls to that reply.
+        case topic(id: Int, postNumber: Int?)
         /// A nodeloc user; open the native profile.
         case profile(username: String)
         /// A nodeloc node; open the native node page.
@@ -46,7 +47,9 @@ enum LinkRouter {
             // post number, as in /t/slug/123/45.
             let numbers = segments.dropFirst().compactMap(Int.init)
             if let id = numbers.first {
-                return .topic(id: id)
+                // The number after the id, when present, is the post number.
+                let postNumber = numbers.count > 1 ? numbers[1] : nil
+                return .topic(id: id, postNumber: postNumber)
             }
         }
 
@@ -100,8 +103,8 @@ extension View {
     func routesLinksInApp(app: AppState, browser: BrowserState) -> some View {
         environment(\.openURL, OpenURLAction { url in
             switch LinkRouter.destination(for: url) {
-            case .topic(let id):
-                app.openTopic(id: id)
+            case .topic(let id, let postNumber):
+                app.openTopic(id: id, postNumber: postNumber)
                 return .handled
             case .profile(let username):
                 app.openProfile(username: username)

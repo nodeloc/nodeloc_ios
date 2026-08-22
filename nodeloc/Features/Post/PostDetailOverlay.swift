@@ -23,6 +23,9 @@ struct PostDetailOverlay: View {
     @State private var viewerIndex = 0
     /// The post's node, resolved for its logo — `Post` carries only "n/slug".
     @State private var nodeSummary: SidebarNodeSummary?
+    /// A reply's post number to scroll to once its row is loaded, taken from
+    /// `AppState.pendingReplyPostNumber` when a notification opens the topic.
+    @State private var scrollTarget: Int?
     @FocusState private var isReplyFocused: Bool
 
     var body: some View {
@@ -62,7 +65,13 @@ struct PostDetailOverlay: View {
             .background(Theme.bg)
         }
         .background(Theme.bg.ignoresSafeArea())
-        .task(id: post.id) { await topic.load(topicID: post.id) }
+        .task(id: post.id) {
+            // Consume the scroll target before loading so it can't leak into a
+            // later, unrelated topic opened in the same overlay.
+            scrollTarget = app.pendingReplyPostNumber
+            app.pendingReplyPostNumber = nil
+            await topic.load(topicID: post.id)
+        }
         .task(id: post.node) { nodeSummary = await NodeCatalog.shared.node(slug: post.node) }
         // Identity for the full-screen video chrome. Set here rather than
         // inside PostContentView so the video sees the same like state the
@@ -117,6 +126,29 @@ struct PostDetailOverlay: View {
     private let readerHeaderShadow = FloatingHeader.shadow
 
     private func detailSurface(for post: Post) -> some View {
+        ScrollViewReader { proxy in
+            scrollBody(for: post)
+                // Replies arrive after the topic loads (and again on "load
+                // more"); each change is a chance to land on the target reply
+                // once its row exists. If it never loads, we stay put.
+                .onChange(of: topic.comments.count) { _, _ in
+                    scrollToTargetIfLoaded(proxy)
+                }
+        }
+    }
+
+    private func scrollToTargetIfLoaded(_ proxy: ScrollViewProxy) {
+        guard let target = scrollTarget else { return }
+        // Post #1 is the original post — the view already opens at the top.
+        guard target > 1 else { scrollTarget = nil; return }
+        guard topic.comments.contains(where: { $0.postNumber == target }) else { return }
+        withAnimation(.easeInOut(duration: 0.35)) {
+            proxy.scrollTo(target, anchor: .top)
+        }
+        scrollTarget = nil
+    }
+
+    private func scrollBody(for post: Post) -> some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
                 Color.clear.frame(height: readerTopInset)
@@ -477,6 +509,8 @@ struct PostDetailOverlay: View {
                                 viewerIndex = images.firstIndex { $0.src == image.src } ?? 0
                             }
                         )
+                        // Scroll anchor for notification deep links (/t/…/<post>).
+                        .id(comment.postNumber)
                     }
 
                     if topic.hasMoreComments {

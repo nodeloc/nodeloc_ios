@@ -562,8 +562,19 @@ private struct ChatPublicProfileView: View {
 
 private struct MessageNotificationRow: View {
     let notification: AppNotification
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
+        Button {
+            if let url = notification.url { openURL(url) }
+        } label: {
+            rowContent
+        }
+        .buttonStyle(.plain)
+        .disabled(notification.url == nil)
+    }
+
+    private var rowContent: some View {
         HStack(alignment: .top, spacing: 13) {
             ZStack {
                 Circle()

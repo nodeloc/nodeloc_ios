@@ -34,8 +34,19 @@ struct NotificationsOverlay: View {
 
 private struct NotificationRow: View {
     let notification: AppNotification
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
+        Button {
+            if let url = notification.url { openURL(url) }
+        } label: {
+            rowContent
+        }
+        .buttonStyle(.plain)
+        .disabled(notification.url == nil)
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: iconWeight))

@@ -53,7 +53,7 @@ struct MainView: View {
                             ChatView()
                         }
                     } label: {
-                        Image(systemName: "bell")
+                        Image(systemName: "bubble.left.and.bubble.right")
                         Text("Message")
                     }
 

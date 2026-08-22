@@ -850,6 +850,12 @@ struct NotificationData: Decodable {
     let displayUsername: String?
     let username: String?
     let badgeName: String?
+    // Routing hints for notifications that don't point at a topic.
+    let badgeId: Int?
+    let badgeSlug: String?
+    let groupName: String?
+    let chatChannelId: Int?
+    let chatMessageId: Int?
 }
 
 struct DiscourseNotification: Decodable, Identifiable {
@@ -858,6 +864,11 @@ struct DiscourseNotification: Decodable, Identifiable {
     let read: Bool
     let createdAt: String?
     let data: NotificationData?
+    // Present on topic-based notifications (replies, mentions, likes, PMs);
+    // together they build the /t/<slug>/<id>/<post> deep link the row taps.
+    let topicId: Int?
+    let postNumber: Int?
+    let slug: String?
 }
 
 struct NotificationsResponse: Decodable {

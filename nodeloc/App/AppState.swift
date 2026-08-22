@@ -246,6 +246,10 @@ struct AppNotification: Identifiable {
     let text: String
     let time: String
     let unread: Bool
+    /// Where tapping the row goes. Routed through `LinkRouter`, so topics/PMs
+    /// open natively and badge/group/chat notifications open in the in-app
+    /// browser. `nil` means the row isn't tappable.
+    var url: URL? = nil
 }
 
 struct Community: Identifiable {
@@ -322,9 +326,16 @@ final class AppState {
     /// this so a tapped mention lands on the native profile.
     var routedProfile: UserProfileTarget?
 
+    /// A reply's post number to scroll to once the topic's replies load, set
+    /// when a notification (or a deep link with a post anchor) opens a topic.
+    /// The post detail consumes it; unset means "open at the top."
+    var pendingReplyPostNumber: Int?
+
     /// Opens a nodeloc topic natively. Only the id is known from the URL, so
-    /// the post detail fills in the rest when it loads the topic.
-    func openTopic(id: Int) {
+    /// the post detail fills in the rest when it loads the topic. `postNumber`,
+    /// when present, scrolls to that reply once it's loaded.
+    func openTopic(id: Int, postNumber: Int? = nil) {
+        pendingReplyPostNumber = postNumber
         // Already open — nothing to do, and rebuilding would lose scroll.
         guard !(overlay == .post && selectedPost.id == id) else { return }
         selectedPost = Post(
