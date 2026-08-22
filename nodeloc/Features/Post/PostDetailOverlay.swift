@@ -812,7 +812,7 @@ private struct RedditThreadRails: View {
                 path.addLine(to: CGPoint(x: x, y: size.height + 1))
                 context.stroke(
                     path,
-                    with: .color(railColor(for: index)),
+                    with: .color(Self.railColor),
                     lineWidth: Self.railWidth
                 )
             }
@@ -824,18 +824,8 @@ private struct RedditThreadRails: View {
         min(max(depth, 0), Self.maxIndentLevels)
     }
 
-    private func railColor(for index: Int) -> Color {
-        let colors: [Color] = [
-            Theme.accent.opacity(0.46),
-            Theme.success.opacity(0.38),
-            Theme.accent2_600.opacity(0.34),
-            Theme.love.opacity(0.32),
-            Theme.muted(0.22),
-        ]
-        return colors[index % colors.count]
-    }
-
+    private static let railColor = Theme.divider
     private static let indentStep: CGFloat = NestedReplyRow.indentStep
     private static let maxIndentLevels: Int = NestedReplyRow.maxIndentLevels
-    private static let railWidth: CGFloat = 2
+    private static let railWidth: CGFloat = 1
 }
