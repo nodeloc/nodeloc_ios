@@ -417,10 +417,14 @@ struct ChatView: View {
             }
             .scrollIndicators(.hidden)
             // Center the active chip — chiefly when a notification jumps to a
-            // group that would otherwise sit off-screen to the right.
-            .onChange(of: store.selectedPMGroup) { _, group in
+            // group that would otherwise sit off-screen. Driven by `.task` (not
+            // `.onChange`) so it also fires the first time the bar appears, and
+            // after a short delay so a chip just added for the target group has
+            // been laid out before we scroll to it.
+            .task(id: store.selectedPMGroup) {
+                try? await Task.sleep(for: .milliseconds(150))
                 withAnimation(.easeInOut(duration: 0.3)) {
-                    proxy.scrollTo(group ?? personalChipID, anchor: .center)
+                    proxy.scrollTo(store.selectedPMGroup ?? personalChipID, anchor: .center)
                 }
             }
         }
