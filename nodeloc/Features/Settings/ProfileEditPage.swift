@@ -16,7 +16,6 @@ struct ProfileEditPage: View {
 
     @State private var avatarItem: PhotosPickerItem?
     @State private var cardItem: PhotosPickerItem?
-    @State private var showTitlePicker = false
 
     init(onClose: @escaping () -> Void) {
         self.onClose = onClose
@@ -169,84 +168,86 @@ struct ProfileEditPage: View {
 
     // MARK: Title
 
+    /// Wraps the title choice so it can drive a `SettingsPickerRow`. The empty
+    /// string is the "无" (clear) option.
+    private struct TitleChoice: Identifiable, Equatable {
+        let value: String
+        var id: String { value }
+        var label: String { value.isEmpty ? "无" : value }
+    }
+
+    private var titleChoices: [TitleChoice] {
+        [TitleChoice(value: "")] + store.titleOptions.map { TitleChoice(value: $0) }
+    }
+
+    @ViewBuilder
     private var titleSection: some View {
         SettingsSection(
             title: "头衔",
             footer: store.titleOptions.isEmpty ? "只有可授予头衔的徽章才能设为头衔。" : nil
         ) {
-            Button {
-                showTitlePicker = true
-            } label: {
+            if store.titleOptions.isEmpty {
+                // Nothing to choose: a plain, non-tappable row.
                 HStack {
                     Text("头衔").font(Theme.body(14)).foregroundStyle(Theme.text)
                     Spacer(minLength: 8)
-                    Text(store.title?.isEmpty == false ? store.title! : "无")
-                        .font(Theme.body(13)).foregroundStyle(Theme.muted(0.55)).lineLimit(1)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted(0.3))
+                    Text("无").font(Theme.body(13)).foregroundStyle(Theme.muted(0.4))
                 }
-                .padding(.horizontal, 20).padding(.vertical, 12)
-                .contentShape(Rectangle())
+                .padding(.horizontal, 16).padding(.vertical, 13)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                SettingsPickerRow(
+                    title: "头衔",
+                    options: titleChoices,
+                    label: \.label,
+                    selection: titleBinding
+                )
             }
-            .buttonStyle(.plain)
-            .disabled(store.titleOptions.isEmpty)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.divider).frame(height: 1).padding(.leading, 20) }
         }
-        .confirmationDialog("选择头衔", isPresented: $showTitlePicker, titleVisibility: .visible) {
-            Button("无") { Task { await store.setTitle(nil) } }
-            ForEach(store.titleOptions, id: \.self) { option in
-                Button(option) { Task { await store.setTitle(option) } }
-            }
-            Button("取消", role: .cancel) {}
-        }
+    }
+
+    private var titleBinding: Binding<TitleChoice> {
+        Binding(
+            get: { TitleChoice(value: store.title ?? "") },
+            set: { choice in Task { await store.setTitle(choice.value.isEmpty ? nil : choice.value) } }
+        )
     }
 
     // MARK: Featured badges
 
     @ViewBuilder
     private var badgesSection: some View {
-        if !store.grants.isEmpty {
+        if !favoritableGrants.isEmpty {
             SettingsSection(
                 title: "精选徽章",
                 footer: "最多精选 \(store.maxFavoriteBadges) 个徽章，显示在你的主页。"
             ) {
-                let columns = [GridItem(.adaptive(minimum: 96), spacing: 10)]
-                LazyVGrid(columns: columns, spacing: 10) {
-                    ForEach(favoritableGrants) { grant in
-                        badgeChip(grant)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
+                SettingsMultiSelectRow(
+                    title: "精选徽章",
+                    options: favoritableGrants,
+                    label: badgeName,
+                    isSelected: { store.favoriteBadgeIDs.contains($0.id) },
+                    toggle: { grant in Task { await store.toggleFavorite(grant) } },
+                    summary: favoriteSummary
+                )
             }
         }
     }
 
-    /// Only badges the server says can be favourited, matched to their names.
+    /// Only badges the server says can be favourited.
     private var favoritableGrants: [UserBadgeGrant] {
         store.grants.filter { $0.canFavorite == true }
     }
 
-    private func badgeChip(_ grant: UserBadgeGrant) -> some View {
-        let name = store.badges.first { $0.id == grant.badgeId }?.name ?? "徽章"
-        let isFav = store.favoriteBadgeIDs.contains(grant.id)
-        let atCap = !isFav && store.favoriteBadgeIDs.count >= store.maxFavoriteBadges
-        return Button {
-            Task { await store.toggleFavorite(grant) }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: isFav ? "star.fill" : "star")
-                    .font(.system(size: 12))
-                    .foregroundStyle(isFav ? Theme.accent : Theme.muted(0.4))
-                Text(name).font(Theme.body(12, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .background(isFav ? Theme.accent.opacity(0.12) : Theme.surface, in: Capsule())
-            .opacity(atCap ? 0.4 : 1)
-        }
-        .buttonStyle(.plain)
-        .disabled(atCap)
+    private func badgeName(_ grant: UserBadgeGrant) -> String {
+        store.badges.first { $0.id == grant.badgeId }?.name ?? "徽章"
+    }
+
+    private var favoriteSummary: String {
+        let names = favoritableGrants
+            .filter { store.favoriteBadgeIDs.contains($0.id) }
+            .map(badgeName)
+        return names.isEmpty ? "无" : names.joined(separator: "、")
     }
 
     // MARK: Helpers

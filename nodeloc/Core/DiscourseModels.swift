@@ -376,7 +376,7 @@ struct BadgeDefinition: Decodable, Identifiable {
 }
 
 /// The grant that ties a user to a badge; `id` is what `toggle_favorite` needs.
-struct UserBadgeGrant: Decodable, Identifiable {
+struct UserBadgeGrant: Decodable, Identifiable, Equatable {
     let id: Int
     let badgeId: Int
     let isFavorite: Bool?
