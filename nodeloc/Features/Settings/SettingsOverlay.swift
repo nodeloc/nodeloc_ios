@@ -12,83 +12,68 @@ import SwiftUI
 struct SettingsOverlay: View {
     @Environment(AppState.self) private var app
 
-    var body: some View {
-        VStack(spacing: 0) {
-            OverlayHeader(title: "Settings")
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    accountActionRow(label: "通知", icon: "bell.fill", tint: Theme.accent) {
-                        app.overlay = .notifications
-                    }
-                    accountActionRow(label: "Nodeloc Pro", icon: "sparkle", tint: Theme.accent) {
-                        app.overlay = .pro
-                    }
-                    if app.authed && !app.isGuest {
-                        accountActionRow(label: "退出登录", icon: "rectangle.portrait.and.arrow.right", tint: Theme.danger, danger: true) {
-                            DiscourseLogin.shared.signOut()
-                            app.overlay = nil
-                            app.onboardingDone = false
-                            app.isGuest = false
-                            app.authed = false
-                        }
-                    }
+    /// The preference page pushed over the list, if any.
+    @State private var openGroup: PreferenceGroup?
 
-                    ForEach(SampleData.settings) { row in
-                        HStack {
-                            Text(row.label)
-                                .font(Theme.body(14))
-                                .foregroundStyle(row.danger ? Theme.danger : Theme.text)
-                            Spacer()
-                            Text(row.detail).font(Theme.body(12)).foregroundStyle(Theme.muted(0.4))
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Theme.muted(0.3))
-                        }
-                        .padding(.vertical, 14).padding(.horizontal, 20)
-                        .contentShape(Rectangle())
-                        .onTapGesture { handle(row) }
-                        .overlay(alignment: .bottom) {
-                            Rectangle().fill(Theme.divider).frame(height: 1)
-                        }
-                    }
+    private var isSignedIn: Bool { app.authed && !app.isGuest }
+
+    var body: some View {
+        ZStack {
+            settingsList
+
+            if let openGroup {
+                PreferencePage(group: openGroup) {
+                    withAnimation(.panelSlide) { self.openGroup = nil }
                 }
-                .padding(.top, 4)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(1)
             }
-            .scrollIndicators(.hidden)
         }
         .background(Theme.bg.ignoresSafeArea())
     }
 
-    private func accountActionRow(
-        label: String,
-        icon: String,
-        tint: Color,
-        danger: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 24)
-            Text(label)
-                .font(Theme.body(14))
-                .foregroundStyle(danger ? Theme.danger : Theme.text)
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.3))
-        }
-        .padding(.vertical, 14).padding(.horizontal, 20)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: action)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
+    private var settingsList: some View {
+        VStack(spacing: 0) {
+            OverlayHeader(title: "设置")
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    // Preferences, shown only to a real account: the fields are
+                    // owner-serialized, so there is nothing to edit as a guest.
+                    if isSignedIn {
+                        SettingsSection(title: "偏好设置") {
+                            ForEach(PreferenceGroup.allCases) { group in
+                                SettingsNavRow(title: group.title, icon: group.icon) {
+                                    withAnimation(.panelSlide) { openGroup = group }
+                                }
+                            }
+                        }
+                    }
+
+                    SettingsSection(title: "账号") {
+                        SettingsNavRow(title: "通知", icon: "bell.fill") {
+                            app.overlay = .notifications
+                        }
+                        SettingsNavRow(title: "Nodeloc Pro", icon: "sparkle") {
+                            app.overlay = .pro
+                        }
+                        if isSignedIn {
+                            SettingsNavRow(
+                                title: "退出登录",
+                                icon: "rectangle.portrait.and.arrow.right",
+                                isDestructive: true
+                            ) {
+                                signOut()
+                            }
+                        }
+                    }
+                }
+                .padding(.bottom, 32)
+            }
+            .scrollIndicators(.hidden)
         }
     }
 
-    private func handle(_ row: SettingRow) {
-        guard row.label == "Log out" else { return }
+    private func signOut() {
         DiscourseLogin.shared.signOut()
         app.overlay = nil
         app.onboardingDone = false

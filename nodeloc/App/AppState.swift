@@ -236,13 +236,6 @@ struct Community: Identifiable {
     let desc: String
 }
 
-struct SettingRow: Identifiable {
-    let id = UUID()
-    let label: String
-    let detail: String
-    var danger: Bool = false
-}
-
 // MARK: - Navigation
 
 enum Tab: Hashable { case home, nodes, search, chat, profile }
@@ -415,15 +408,6 @@ enum SampleData {
     static let activity: [Double] = [30, 55, 40, 80, 60, 25, 45]
     static let weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     static let tags = ["#buildinpublic", "#firstascent", "#retro", "#plantcare", "#launchweek", "#gearcheck"]
-
-    static let settings: [SettingRow] = [
-        SettingRow(label: "Account", detail: "rowan.codes"),
-        SettingRow(label: "Notifications", detail: "On"),
-        SettingRow(label: "Privacy & Safety", detail: ""),
-        SettingRow(label: "Appearance", detail: "Light"),
-        SettingRow(label: "Help", detail: ""),
-        SettingRow(label: "Log out", detail: "", danger: true),
-    ]
 
     // Current user
     static let userName = "rowan.codes"

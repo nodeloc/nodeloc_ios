@@ -531,3 +531,107 @@ final class UserPreferencesStore {
         await save({ $0[keyPath: keyPath] = value }, items: [(wireKey, wireValue)])
     }
 }
+
+// MARK: - Bindings
+
+extension UserPreferencesStore {
+    /// A binding for a boolean option that writes through to the server.
+    func toggle(
+        _ keyPath: WritableKeyPath<UserPreferences, Bool?>,
+        _ wireKey: String,
+        default fallback: Bool = false
+    ) -> Binding<Bool> {
+        Binding(
+            get: { self.preferences[keyPath: keyPath] ?? fallback },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0[keyPath: keyPath] = newValue },
+                        items: [(wireKey, newValue ? "true" : "false")]
+                    )
+                }
+            }
+        )
+    }
+
+    /// A binding for an integer-backed enum option.
+    func choice<Option: RawRepresentable>(
+        _ keyPath: WritableKeyPath<UserPreferences, Int?>,
+        _ wireKey: String,
+        default fallback: Option
+    ) -> Binding<Option> where Option.RawValue == Int {
+        Binding(
+            get: {
+                self.preferences[keyPath: keyPath]
+                    .flatMap(Option.init(rawValue:)) ?? fallback
+            },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0[keyPath: keyPath] = newValue.rawValue },
+                        items: [(wireKey, String(newValue.rawValue))]
+                    )
+                }
+            }
+        )
+    }
+
+    /// Colour mode and text size need their own bindings: both also drive the
+    /// local mirror, and text size travels as a name rather than an integer.
+    var colorModeBinding: Binding<InterfaceColorMode> {
+        Binding(
+            get: { self.colorMode },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0.interfaceColorMode = newValue.rawValue },
+                        items: [("interface_color_mode", String(newValue.rawValue))]
+                    )
+                }
+            }
+        )
+    }
+
+    var textSizeBinding: Binding<TextSize> {
+        Binding(
+            get: { self.textSize },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0.textSize = newValue.wireName },
+                        items: [("text_size", newValue.wireName)]
+                    )
+                }
+            }
+        )
+    }
+
+    var titleCountModeBinding: Binding<TitleCountMode> {
+        Binding(
+            get: { self.preferences.resolvedTitleCountMode },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0.titleCountMode = newValue.wireName },
+                        items: [("title_count_mode", newValue.wireName)]
+                    )
+                }
+            }
+        )
+    }
+
+    /// Timezone is a free string (an IANA identifier).
+    var timezoneBinding: Binding<String> {
+        Binding(
+            get: { self.preferences.timezone ?? TimeZone.current.identifier },
+            set: { newValue in
+                Task {
+                    await self.save(
+                        { $0.timezone = newValue },
+                        items: [("timezone", newValue)]
+                    )
+                }
+            }
+        )
+    }
+}
