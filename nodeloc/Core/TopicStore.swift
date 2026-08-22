@@ -547,18 +547,20 @@ final class TopicStore {
     }
 
     /// Posts a reply and reloads the thread. Returns true on success.
-    func submitReply(_ raw: String, topicID: Int) async -> Bool {
+    /// Posts a reply and reloads the thread. Returns the new reply's post number
+    /// on success (so the reader can scroll to it), or nil on failure.
+    func submitReply(_ raw: String, topicID: Int) async -> Int? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard DiscourseAuth.shared.isAuthenticated, !trimmed.isEmpty else { return false }
+        guard DiscourseAuth.shared.isAuthenticated, !trimmed.isEmpty else { return nil }
         isSubmitting = true
         defer { isSubmitting = false }
         do {
-            try await client.reply(topicID: topicID, raw: trimmed)
+            let created = try await client.reply(topicID: topicID, raw: trimmed)
             loadedID = nil
             await load(topicID: topicID)
-            return true
+            return created.postNumber
         } catch {
-            return false
+            return nil
         }
     }
 

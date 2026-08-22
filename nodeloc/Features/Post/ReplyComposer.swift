@@ -121,12 +121,13 @@ struct ReplyComposer: View {
             }
         }
         .onChange(of: text) { _, newValue in
-            // Parent cleared the draft after a successful send → reset.
+            // Parent cleared the draft after a successful send → reset + close.
             if newValue.isEmpty {
                 rich = AttributedString()
                 imageAttachments = []
                 gifAttachments = []
                 selection = AttributedTextSelection()
+                withAnimation(.quicker) { expanded = false }
             }
         }
         .onChange(of: pickerItem) { _, item in

@@ -791,11 +791,13 @@ struct DiscourseClient {
     }
 
     /// Posts a reply to a topic.
-    func reply(topicID: Int, raw: String) async throws {
-        try await post("posts", form: [
+    @discardableResult
+    func reply(topicID: Int, raw: String) async throws -> CreatePostResponse {
+        let data = try await post("posts", form: [
             "raw": raw,
             "topic_id": String(topicID),
         ])
+        return try Self.decode(data)
     }
 
     /// Creates a new topic in a category.

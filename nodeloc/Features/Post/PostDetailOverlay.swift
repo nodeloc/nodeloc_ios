@@ -156,6 +156,10 @@ struct PostDetailOverlay: View {
                 .onChange(of: topic.comments.count) { _, _ in
                     scrollToTargetIfLoaded(proxy)
                 }
+                // Fired after posting a reply: scroll to it once its row exists.
+                .onChange(of: scrollTarget) { _, _ in
+                    scrollToTargetIfLoaded(proxy)
+                }
         }
     }
 
@@ -699,7 +703,10 @@ struct PostDetailOverlay: View {
             onSubmit: {
                 let text = draft
                 Task {
-                    if await topic.submitReply(text, topicID: post.id) { draft = "" }
+                    if let number = await topic.submitReply(text, topicID: post.id) {
+                        draft = ""          // resets + collapses the composer
+                        scrollTarget = number   // scroll to the new reply once it's laid out
+                    }
                 }
             }
         )

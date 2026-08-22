@@ -132,10 +132,12 @@ struct DiscourseSiteSettings: Decodable {
     let lotteryMaxDrawDays: Int?
 }
 
-/// `POST /posts` — the created post, needed for its `topicId`.
+/// `POST /posts` — the created post, needed for its `topicId` and, for replies,
+/// its `postNumber` so the reader can scroll to it.
 struct CreatePostResponse: Decodable {
     let id: Int?
     let topicId: Int?
+    let postNumber: Int?
 }
 
 /// `POST /red-envelopes.json`
