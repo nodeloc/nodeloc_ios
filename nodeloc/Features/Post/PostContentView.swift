@@ -173,24 +173,25 @@ enum PostInlineRenderer {
     ) -> Text {
         let segments = segments(for: inlines, metrics: metrics)
 
-        // `Text` + `Text` is soft-deprecated in favour of string interpolation,
-        // but interpolation can't splice an `Image` into a run, which is exactly
-        // what inline emoji need. Concatenation is the only option here.
+        // Interpolating `Text` values, rather than the `+` operator that iOS 26
+        // deprecates. Interpolation of a `Text` (unlike a bare `Image`) is
+        // supported, so inline emoji still splice into the wrapping run.
         return segments.reduce(Text("")) { accumulated, segment in
             switch segment {
             case .text(let attributed):
-                return accumulated + Text(attributed)
+                return Text("\(accumulated)\(Text(attributed))")
 
             case .emoji(let url, let shortcode):
                 if let image = emoji.image(for: url, pointSize: metrics.bodySize) {
                     // Baseline nudge keeps the glyph optically centred on the line.
-                    return accumulated + Text(Image(uiImage: image)).baselineOffset(-1)
+                    let glyph = Text(Image(uiImage: image)).baselineOffset(-1)
+                    return Text("\(accumulated)\(glyph)")
                 }
                 // Not loaded yet: show the shortcode so the sentence still reads.
                 emoji.loadIfNeeded(url)
                 var fallback = AttributedString(shortcode)
                 fallback.foregroundColor = Theme.muted(0.5)
-                return accumulated + Text(fallback)
+                return Text("\(accumulated)\(Text(fallback))")
             }
         }
     }

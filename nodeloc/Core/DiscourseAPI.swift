@@ -9,7 +9,7 @@
 
 import Foundation
 
-enum DiscourseConfig {
+nonisolated enum DiscourseConfig {
     static let baseURL = URL(string: "https://www.nodeloc.com")!
     /// Custom URL scheme registered for the User API Key redirect.
     static let authRedirect = "nodeloc://auth"
@@ -31,7 +31,10 @@ enum DiscourseConfig {
 /// as the site.
 @Observable
 final class DiscourseAuth {
-    static let shared = DiscourseAuth()
+    // nonisolated so value types (DiscourseClient) can capture the shared
+    // reference in a nonisolated init; its mutable state is still touched only
+    // from the main actor.
+    nonisolated static let shared = DiscourseAuth()
     var userApiKey: String?
     var sessionCookie: String?
     var csrfToken: String?
@@ -57,6 +60,12 @@ struct DiscourseClient {
     var baseURL = DiscourseConfig.baseURL
     var session: URLSession = .shared
     var auth: DiscourseAuth = .shared
+
+    // Explicit nonisolated init so the two caching actors can construct a
+    // client at property-init without hopping to the main actor. Its default
+    // values are all nonisolated (config constants, URLSession.shared, the
+    // Sendable auth reference); the methods stay main-actor-isolated.
+    nonisolated init() {}
 
     private struct MultipartFile {
         let fieldName: String

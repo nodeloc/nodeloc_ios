@@ -43,8 +43,10 @@ private struct NotificationRow: View {
                 .frame(width: 32, height: 32)
                 .background(iconBg, in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                (Text(notification.name).font(Theme.body(13, weight: .semibold))
-                    + Text(" \(notification.text)").font(Theme.body(13)))
+                // Interpolating the two styled runs instead of `+` (deprecated in iOS 26).
+                let namePart = Text(notification.name).font(Theme.body(13, weight: .semibold))
+                let textPart = Text(" \(notification.text)").font(Theme.body(13))
+                Text("\(namePart)\(textPart)")
                     .foregroundStyle(Theme.text)
                 Text(notification.time).font(Theme.body(11)).foregroundStyle(Theme.muted(0.5))
             }

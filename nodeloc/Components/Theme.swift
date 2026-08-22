@@ -10,7 +10,7 @@ import SwiftUI
 
 extension Color {
     /// Create a color from a packed 0xRRGGBB hex value.
-    init(hex: UInt32, alpha: Double = 1) {
+    nonisolated init(hex: UInt32, alpha: Double = 1) {
         let r = Double((hex >> 16) & 0xFF) / 255
         let g = Double((hex >> 8) & 0xFF) / 255
         let b = Double(hex & 0xFF) / 255

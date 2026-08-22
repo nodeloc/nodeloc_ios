@@ -247,7 +247,7 @@ struct NodeDetailOverlay: View {
         .frame(maxWidth: .infinity)
     }
 
-    private static func groupedCount(_ value: Int) -> String {
+    nonisolated private static func groupedCount(_ value: Int) -> String {
         value.formatted(.number.grouping(.automatic))
     }
 
@@ -442,7 +442,8 @@ struct NodeDetailOverlay: View {
 
     // MARK: Banner + summary
 
-    @ViewBuilder
+    // Not a @ViewBuilder: it needs a `let` before returning a single Group,
+    // which the builder disallows.
     private var banner: some View {
         // Runs to the very top, behind the status bar and floating buttons.
         let height = bannerHeight + UIApplication.topSafeAreaInset

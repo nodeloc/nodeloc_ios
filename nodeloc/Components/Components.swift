@@ -576,7 +576,7 @@ struct TitleStyle: Equatable {
         case glitchShadow = "glitch-shadow"
 
         /// Legacy alias kept by the plugin's StyleValidator.
-        init(pluginValue: String?) {
+        nonisolated init(pluginValue: String?) {
             let raw = pluginValue == "color-flow" ? "rainbow-flow" : (pluginValue ?? "none")
             self = Effect(rawValue: raw) ?? .none
         }
@@ -621,7 +621,7 @@ struct TitleStyle: Equatable {
         var isAnimated: Bool { self != .none }
     }
 
-    init?(_ style: CustomBadgeStyle?) {
+    nonisolated init?(_ style: CustomBadgeStyle?) {
         guard let style, let color = Color(cssColor: style.textColor) else { return nil }
         textColor = color
         effect = Effect(pluginValue: style.textEffect)
@@ -686,7 +686,7 @@ struct StyledTitleText: View {
 extension Color {
     /// Parses the CSS color forms the plugin's validator accepts (#rgb, #rgba,
     /// #rrggbb, #rrggbbaa, and a few named colors).
-    init?(cssColor: String?) {
+    nonisolated init?(cssColor: String?) {
         guard var value = cssColor?.trimmingCharacters(in: .whitespaces).lowercased(), !value.isEmpty else {
             return nil
         }
@@ -714,7 +714,13 @@ extension Color {
             "silver": 0xC0C0C0, "gray": 0x808080, "grey": 0x808080, "teal": 0x008080
         ]
         guard let hex = named[value] else { return nil }
-        self = Color(hex: hex)
+        self = Color(
+            .sRGB,
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255,
+            opacity: 1
+        )
     }
 }
 
