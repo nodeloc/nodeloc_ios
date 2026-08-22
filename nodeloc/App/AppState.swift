@@ -167,7 +167,7 @@ struct Chat: Identifiable, Hashable {
     let variant: Int
     let lastMsg: String
     let time: String
-    let unread: Bool
+    var unread: Bool
     var avatarURL: URL? = nil
     var threadUnreadCount: Int = 0
 }

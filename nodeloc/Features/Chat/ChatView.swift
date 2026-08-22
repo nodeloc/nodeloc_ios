@@ -875,6 +875,11 @@ private struct ChatConversationView: View {
         }
         .task(id: taskID) {
             await store.load(chat: chat, initialThread: initialThread, targetMessageID: targetMessageID)
+            // Reading the channel clears its unread on the server and drops it
+            // from the inbox/tab badge.
+            if let latest = store.messages.map(\.id).max() {
+                await MessageCenterStore.shared.markChatChannelRead(channelID: chat.id, messageID: latest)
+            }
         }
     }
 

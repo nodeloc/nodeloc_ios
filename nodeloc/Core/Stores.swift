@@ -2542,6 +2542,17 @@ final class MessageCenterStore {
         unreadPrivateMessages = conversations.filter(\.unread).count
     }
 
+    /// Marks a chat channel read up to its latest message (server) and clears
+    /// its unread locally so the chat badge drops immediately.
+    func markChatChannelRead(channelID: Int, messageID: Int) async {
+        if let index = chats.firstIndex(where: { $0.id == channelID }) {
+            chats[index].unread = false
+            chats[index].threadUnreadCount = 0
+        }
+        unreadChat = chats.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
+        try? await client.markChatChannelRead(channelID: channelID, messageID: messageID)
+    }
+
     func load() async {
         guard DiscourseAuth.shared.isAuthenticated else {
             needsLogin = true

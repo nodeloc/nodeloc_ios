@@ -401,6 +401,33 @@ struct DiscourseClient {
         }
     }
 
+    /// Marks a chat channel read up to `messageID` (the endpoint requires the
+    /// message id). Clears that channel's unread on the server so the tab badge
+    /// stops counting it.
+    @discardableResult
+    func markChatChannelRead(channelID: Int, messageID: Int) async throws -> Data {
+        var components = URLComponents(
+            url: baseURL.appending(path: "chat/api/channels/\(channelID)/read"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [URLQueryItem(name: "message_id", value: String(messageID))]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyAuth(to: &request, includeCSRF: true)
+        do {
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw DiscourseError.badResponse(http.statusCode)
+            }
+            return data
+        } catch let error as DiscourseError {
+            throw error
+        } catch {
+            throw DiscourseError.transport(error)
+        }
+    }
+
     private func chatMessageQuery(
         pageSize: Int,
         fetchFromLastRead: Bool,
