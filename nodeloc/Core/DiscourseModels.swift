@@ -611,6 +611,8 @@ struct UserProfile: Decodable {
     let cardBackgroundUploadUrl: String?
     let location: String?
     let websiteName: String?
+    /// Full URL, as opposed to `websiteName` which is just the display host.
+    let website: String?
     let bioRaw: String?
     let bioExcerpt: String?
     let trustLevel: Int?

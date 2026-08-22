@@ -14,6 +14,13 @@ struct SettingsOverlay: View {
 
     /// The preference page pushed over the list, if any.
     @State private var openGroup: PreferenceGroup?
+    /// The account sub-page pushed over the list, if any.
+    @State private var openAccountPage: AccountPage?
+
+    private enum AccountPage: String, Identifiable {
+        case profile, associatedAccounts, security
+        var id: String { rawValue }
+    }
 
     private var isSignedIn: Bool { app.authed && !app.isGuest }
 
@@ -28,8 +35,25 @@ struct SettingsOverlay: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
                 .zIndex(1)
             }
+
+            if let openAccountPage {
+                accountPage(openAccountPage) {
+                    withAnimation(.panelSlide) { self.openAccountPage = nil }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .zIndex(1)
+            }
         }
         .background(Theme.bg.ignoresSafeArea())
+    }
+
+    @ViewBuilder
+    private func accountPage(_ page: AccountPage, onClose: @escaping () -> Void) -> some View {
+        switch page {
+        case .profile: ProfileEditPage(onClose: onClose)
+        case .associatedAccounts: AssociatedAccountsPage(onClose: onClose)
+        case .security: SecurityPage(onClose: onClose)
+        }
     }
 
     private var settingsList: some View {
@@ -37,9 +61,22 @@ struct SettingsOverlay: View {
             OverlayHeader(title: "设置")
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    // Preferences, shown only to a real account: the fields are
-                    // owner-serialized, so there is nothing to edit as a guest.
+                    // Account editing + preferences, shown only to a real
+                    // account: these fields are owner-serialized, so there is
+                    // nothing to edit as a guest.
                     if isSignedIn {
+                        SettingsSection(title: "账户") {
+                            SettingsNavRow(title: "个人资料", icon: "person.crop.circle") {
+                                withAnimation(.panelSlide) { openAccountPage = .profile }
+                            }
+                            SettingsNavRow(title: "关联账户", icon: "link") {
+                                withAnimation(.panelSlide) { openAccountPage = .associatedAccounts }
+                            }
+                            SettingsNavRow(title: "安全性", icon: "lock.shield") {
+                                withAnimation(.panelSlide) { openAccountPage = .security }
+                            }
+                        }
+
                         SettingsSection(title: "偏好设置") {
                             ForEach(PreferenceGroup.allCases) { group in
                                 SettingsNavRow(title: group.title, icon: group.icon) {

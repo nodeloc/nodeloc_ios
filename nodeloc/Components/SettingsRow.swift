@@ -247,6 +247,30 @@ struct SettingsTextRow: View {
     }
 }
 
+/// A multi-line free-text field, e.g. a bio. Label above, editor below.
+struct SettingsMultilineRow: View {
+    let title: String
+    var placeholder: String = ""
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(Theme.body(14))
+                .foregroundStyle(Theme.text)
+
+            TextField(placeholder, text: $text, axis: .vertical)
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.muted(0.75))
+                .lineLimit(3...8)
+                .textFieldStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) { rowDivider }
+    }
+}
+
 /// Shared hairline, inset to line up with the row's text.
 @ViewBuilder
 private var rowDivider: some View {
