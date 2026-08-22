@@ -10,14 +10,6 @@
 import PhotosUI
 import SwiftUI
 
-/// Carries the measured natural height of the reply text up to the composer.
-private struct EditorHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 struct ReplyComposer: View {
     @Binding var text: String
     let isSubmitting: Bool
@@ -27,19 +19,13 @@ struct ReplyComposer: View {
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
-    /// Editor height is the larger of the measured content height (so it grows
-    /// as you type) and the dragged height (so the handle can pull it taller),
-    /// clamped to [minHeight, maxHeight]. Both change continuously, so neither
-    /// typing nor dragging steps a line at a time.
-    @State private var contentHeight: CGFloat = 0
+    /// The editor auto-grows with content (an invisible sizer `Text` gives the
+    /// ZStack its height) and the drag handle raises the floor via `dragHeight`,
+    /// all clamped to [minHeight, maxHeight]; past the max the TextEditor scrolls.
     @State private var dragHeight: CGFloat = 40
     @State private var dragBase: CGFloat?
     private let minHeight: CGFloat = 40
     private let maxHeight: CGFloat = 320
-
-    private var editorHeight: CGFloat {
-        min(max(minHeight, max(contentHeight, dragHeight)), maxHeight)
-    }
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
     @State private var hasImage = false
@@ -163,7 +149,7 @@ struct ReplyComposer: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        let base = dragBase ?? editorHeight
+                        let base = dragBase ?? dragHeight
                         if dragBase == nil { dragBase = base }
                         let proposed = base - value.translation.height
                         // Pulled down well past the shortest height → collapse
@@ -181,6 +167,16 @@ struct ReplyComposer: View {
 
     private var editor: some View {
         ZStack(alignment: .topLeading) {
+            // Invisible sizer: gives the ZStack the text's natural height, so
+            // the editor grows as you type. The TextEditor overlays and fills it.
+            Text(text.isEmpty ? " " : text)
+                .font(Theme.body(15))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(0)
+                .accessibilityHidden(true)
+
             if text.isEmpty {
                 Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
                     .font(Theme.body(15))
@@ -189,30 +185,16 @@ struct ReplyComposer: View {
                     .padding(.vertical, 8)
                     .allowsHitTesting(false)
             }
+
             TextEditor(text: $text)
                 .font(Theme.body(15))
                 .tint(Theme.accent)
                 .scrollContentBackground(.hidden)
                 .focused($focused)
                 .disabled(!isAuthenticated)
-                .frame(height: editorHeight)
         }
+        .frame(minHeight: max(minHeight, dragHeight), maxHeight: maxHeight)
         .padding(.horizontal, 12)
-        // Measures the text's natural height off-screen to drive auto-grow.
-        .background(alignment: .topLeading) {
-            Text(text.isEmpty ? " " : text)
-                .font(Theme.body(15))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 17)
-                .padding(.vertical, 8)
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: EditorHeightKey.self, value: geo.size.height)
-                    }
-                )
-                .hidden()
-        }
-        .onPreferenceChange(EditorHeightKey.self) { contentHeight = $0 }
     }
 
     // MARK: Toolbar
