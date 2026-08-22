@@ -289,6 +289,105 @@ struct DiscourseUpload: Decodable, Identifiable {
     }
 }
 
+// MARK: - Account settings
+
+/// Response of `PUT /u/:username/preferences/avatar/pick`.
+struct AvatarPickResponse: Decodable {
+    let success: Bool?
+    let avatarTemplate: String?
+}
+
+/// A connected identity provider, owner-serialized on `GET /u/:username.json`.
+struct AssociatedAccount: Decodable, Identifiable {
+    let name: String          // provider, e.g. "github"
+    let description: String?   // "Account: someone@example.com"
+
+    var id: String { name }
+}
+
+/// A signed-in session, owner-serialized as `user_auth_tokens`.
+struct UserAuthToken: Decodable, Identifiable {
+    let id: Int
+    let clientId: String?
+    let deviceName: String?
+    let osName: String?
+    let clientName: String?
+    let seenAt: String?
+    let isActive: Bool?        // the token making this request
+}
+
+/// The owner-only slice of the profile we read for the account and security
+/// screens. Everything is optional: the same endpoint serves other users too,
+/// where these fields are absent.
+struct AccountDetail: Decodable {
+    let user: Payload
+    struct Payload: Decodable {
+        let associatedAccounts: [AssociatedAccount]?
+        let userAuthTokens: [UserAuthToken]?
+        let secondFactorEnabled: Bool?
+    }
+}
+
+/// `POST /u/create_second_factor_totp`. `qr` is a `data:image/png;base64,…`.
+struct TOTPCreateResponse: Decodable {
+    let key: String?
+    let qr: String?
+    let error: String?
+}
+
+/// `PUT /u/second_factors_backup`.
+struct BackupCodesResponse: Decodable {
+    let backupCodes: [String]?
+    let error: String?
+}
+
+/// `POST /u/second_factors`: what's already enabled.
+struct SecondFactorsResponse: Decodable {
+    let totps: [TOTPDevice]?
+    let securityKeys: [SecurityKeyDevice]?
+
+    struct TOTPDevice: Decodable, Identifiable {
+        let id: Int
+        let name: String?
+        let lastUsed: String?
+    }
+    struct SecurityKeyDevice: Decodable, Identifiable {
+        let id: Int
+        let name: String?
+    }
+}
+
+/// `GET /u/trusted-session` and `POST /u/confirm-session`.
+struct SessionTrustResponse: Decodable {
+    let success: String?       // "OK" / "FAILED" on some routes
+    let failed: String?
+    let error: String?
+
+    var isTrusted: Bool { success == "OK" }
+}
+
+/// One entry from `GET /user-badges/:username.json`.
+struct BadgeDefinition: Decodable, Identifiable {
+    let id: Int
+    let name: String
+    let allowTitle: Bool?
+    let imageUrl: String?
+    let description: String?
+}
+
+/// The grant that ties a user to a badge; `id` is what `toggle_favorite` needs.
+struct UserBadgeGrant: Decodable, Identifiable {
+    let id: Int
+    let badgeId: Int
+    let isFavorite: Bool?
+    let canFavorite: Bool?
+}
+
+struct UserBadgesResponse: Decodable {
+    let badges: [BadgeDefinition]?
+    let userBadges: [UserBadgeGrant]?
+}
+
 // MARK: - Topic detail
 
 struct ActionSummary: Decodable { let id: Int; let count: Int? }

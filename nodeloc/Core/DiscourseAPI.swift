@@ -501,6 +501,135 @@ struct DiscourseClient {
         try await formItems("PUT", path: "u/\(username).json", items: items)
     }
 
+    // MARK: Profile
+
+    /// Writes profile fields (name, bio_raw, website, location, title,
+    /// card_background_upload_url, …) through the same `users#update` route as
+    /// preferences.
+    @discardableResult
+    func updateProfile(username: String, items: [(String, String)]) async throws -> Data {
+        try await formItems("PUT", path: "u/\(username).json", items: items)
+    }
+
+    /// Uploads an image tied to the user (avatar / card_background /
+    /// profile_background) and returns its upload record.
+    func uploadUserImage(data: Data, fileName: String, mimeType: String, type: String) async throws -> DiscourseUpload {
+        try await postMultipart(
+            "uploads.json",
+            fields: ["upload_type": type, "synchronous": "true"],
+            file: MultipartFile(fieldName: "file", fileName: fileName, mimeType: mimeType, data: data)
+        )
+    }
+
+    /// Selects which uploaded image becomes the avatar. `type` is
+    /// "uploaded" / "gravatar" / "system".
+    @discardableResult
+    func pickAvatar(username: String, uploadID: Int, type: String = "uploaded") async throws -> Data {
+        try await formItems(
+            "PUT",
+            path: "u/\(username)/preferences/avatar/pick",
+            items: [("upload_id", String(uploadID)), ("type", type)]
+        )
+    }
+
+    /// Owner-scoped profile fetch carrying associated accounts, sessions, and
+    /// second-factor state.
+    func accountDetail(username: String) async throws -> AccountDetail {
+        try await get("u/\(username).json")
+    }
+
+    // MARK: Badges + title
+
+    func userBadges(username: String) async throws -> UserBadgesResponse {
+        try await get("user-badges/\(username).json")
+    }
+
+    /// Sets the title from a badge the user holds. Empty `title` on
+    /// `updateProfile` clears it instead.
+    @discardableResult
+    func setBadgeTitle(username: String, userBadgeID: Int) async throws -> Data {
+        try await formItems(
+            "PUT",
+            path: "u/\(username)/preferences/badge_title",
+            items: [("user_badge_id", String(userBadgeID))]
+        )
+    }
+
+    /// Favouriting a badge is what surfaces it on the profile card. Capped at
+    /// `max_favorite_badges` server-side.
+    @discardableResult
+    func toggleFavoriteBadge(userBadgeID: Int) async throws -> Data {
+        try await formItems("PUT", path: "user_badges/\(userBadgeID)/toggle_favorite", items: [])
+    }
+
+    // MARK: Associated accounts
+
+    @discardableResult
+    func revokeAssociatedAccount(username: String, provider: String) async throws -> Data {
+        try await formItems(
+            "POST",
+            path: "u/\(username)/preferences/revoke-account",
+            items: [("provider_name", provider)]
+        )
+    }
+
+    // MARK: Security
+
+    /// Triggers a password-reset email; Discourse has no in-app password change.
+    @discardableResult
+    func requestPasswordReset(login: String) async throws -> Data {
+        try await formItems("POST", path: "session/forgot_password", items: [("login", login)])
+    }
+
+    /// Whether the session is recently password-confirmed. Sensitive routes
+    /// (2FA, revoking sessions) require it.
+    func trustedSession() async throws -> SessionTrustResponse {
+        try await get("u/trusted-session")
+    }
+
+    @discardableResult
+    func confirmSession(password: String) async throws -> SessionTrustResponse {
+        let data = try await formItems("POST", path: "u/confirm-session", items: [("password", password)])
+        return try Self.decode(data)
+    }
+
+    /// Note: the 2FA routes carry no username segment (`root_path` is `u`).
+    func listSecondFactors() async throws -> SecondFactorsResponse {
+        let data = try await formItems("POST", path: "u/second_factors", items: [])
+        return try Self.decode(data)
+    }
+
+    func createTOTP() async throws -> TOTPCreateResponse {
+        let data = try await formItems("POST", path: "u/create_second_factor_totp", items: [])
+        return try Self.decode(data)
+    }
+
+    @discardableResult
+    func enableTOTP(token: String, name: String) async throws -> Data {
+        try await formItems(
+            "POST",
+            path: "u/enable_second_factor_totp",
+            items: [("second_factor_token", token), ("name", name)]
+        )
+    }
+
+    @discardableResult
+    func disableSecondFactor() async throws -> Data {
+        try await formItems("PUT", path: "u/disable_second_factor", items: [])
+    }
+
+    func generateBackupCodes() async throws -> BackupCodesResponse {
+        let data = try await formItems("PUT", path: "u/second_factors_backup", items: [])
+        return try Self.decode(data)
+    }
+
+    /// Revokes one session, or all others when `tokenID` is nil.
+    @discardableResult
+    func revokeAuthToken(username: String, tokenID: Int?) async throws -> Data {
+        let items = tokenID.map { [("token_id", String($0))] } ?? []
+        return try await formItems("POST", path: "u/\(username)/preferences/revoke-auth-token", items: items)
+    }
+
     /// JSON-bodied POST. The lottery plugin's controller reads a nested `levels`
     /// array, which form encoding can't express.
     @discardableResult
