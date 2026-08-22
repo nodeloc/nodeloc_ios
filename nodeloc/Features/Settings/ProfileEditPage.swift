@@ -29,7 +29,7 @@ struct ProfileEditPage: View {
                     imagesSection
                     textSection
                     titleSection
-                    badgesSection
+                    flairSection
                 }
                 .padding(.bottom, 32)
             }
@@ -213,41 +213,41 @@ struct ProfileEditPage: View {
         )
     }
 
-    // MARK: Featured badges
+    // MARK: 资质 (flair group)
+
+    /// Wraps a flair choice for `SettingsPickerRow`. `id == nil` is the "无" row.
+    private struct FlairChoice: Identifiable, Equatable {
+        let group: UserGroupFlair?
+        var id: Int { group?.id ?? -1 }
+        var label: String { group?.displayName ?? "无" }
+    }
 
     @ViewBuilder
-    private var badgesSection: some View {
-        if !favoritableGrants.isEmpty {
+    private var flairSection: some View {
+        if !store.flairOptions.isEmpty {
             SettingsSection(
-                title: "精选徽章",
-                footer: "最多精选 \(store.maxFavoriteBadges) 个徽章，显示在你的主页。"
+                title: "资质",
+                footer: "资质来自你所在的用户组，会显示在你的头像旁。"
             ) {
-                SettingsMultiSelectRow(
-                    title: "精选徽章",
-                    options: favoritableGrants,
-                    label: badgeName,
-                    isSelected: { store.favoriteBadgeIDs.contains($0.id) },
-                    toggle: { grant in Task { await store.toggleFavorite(grant) } },
-                    summary: favoriteSummary
+                SettingsPickerRow(
+                    title: "资质",
+                    options: flairChoices,
+                    label: \.label,
+                    selection: flairBinding
                 )
             }
         }
     }
 
-    /// Only badges the server says can be favourited.
-    private var favoritableGrants: [UserBadgeGrant] {
-        store.grants.filter { $0.canFavorite == true }
+    private var flairChoices: [FlairChoice] {
+        [FlairChoice(group: nil)] + store.flairOptions.map { FlairChoice(group: $0) }
     }
 
-    private func badgeName(_ grant: UserBadgeGrant) -> String {
-        store.badges.first { $0.id == grant.badgeId }?.name ?? "徽章"
-    }
-
-    private var favoriteSummary: String {
-        let names = favoritableGrants
-            .filter { store.favoriteBadgeIDs.contains($0.id) }
-            .map(badgeName)
-        return names.isEmpty ? "无" : names.joined(separator: "、")
+    private var flairBinding: Binding<FlairChoice> {
+        Binding(
+            get: { FlairChoice(group: store.currentFlairGroup) },
+            set: { choice in Task { await store.setFlairGroup(choice.group?.id) } }
+        )
     }
 
     // MARK: Helpers

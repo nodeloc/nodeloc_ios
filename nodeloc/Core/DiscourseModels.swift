@@ -366,6 +366,20 @@ struct SessionTrustResponse: Decodable {
     var isTrusted: Bool { success == "OK" }
 }
 
+/// A group a user belongs to, with its flair. Only groups whose `flairUrl` is
+/// set can be chosen as the user's 资质 (flair).
+struct UserGroupFlair: Decodable, Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let fullName: String?
+    let flairUrl: String?
+
+    /// Prefer the human-readable full name, falling back to the slug-like name.
+    var displayName: String {
+        (fullName?.isEmpty == false ? fullName : nil) ?? name
+    }
+}
+
 /// One entry from `GET /user-badges/:username.json`.
 struct BadgeDefinition: Decodable, Identifiable {
     let id: Int
@@ -375,17 +389,8 @@ struct BadgeDefinition: Decodable, Identifiable {
     let description: String?
 }
 
-/// The grant that ties a user to a badge; `id` is what `toggle_favorite` needs.
-struct UserBadgeGrant: Decodable, Identifiable, Equatable {
-    let id: Int
-    let badgeId: Int
-    let isFavorite: Bool?
-    let canFavorite: Bool?
-}
-
 struct UserBadgesResponse: Decodable {
     let badges: [BadgeDefinition]?
-    let userBadges: [UserBadgeGrant]?
 }
 
 // MARK: - Topic detail
@@ -614,6 +619,10 @@ struct UserProfile: Decodable {
     /// Full URL, as opposed to `websiteName` which is just the display host.
     let website: String?
     let bioRaw: String?
+    /// The group whose flair (资质) shows on this user's posts, and the groups
+    /// they belong to — the pool the flair can be chosen from.
+    let flairGroupId: Int?
+    let groups: [UserGroupFlair]?
     let bioExcerpt: String?
     let trustLevel: Int?
     let admin: Bool?

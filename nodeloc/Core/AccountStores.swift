@@ -26,10 +26,30 @@ final class ProfileEditStore {
     private(set) var avatarURL: URL?
     private(set) var cardBackgroundURL: URL?
 
-    // Badges + title options.
+    // Title options come from the user's badges.
     private(set) var badges: [BadgeDefinition] = []
-    private(set) var grants: [UserBadgeGrant] = []
-    private(set) var maxFavoriteBadges = 2
+
+    // 资质 (flair): chosen from the user's groups that carry a flair.
+    // `allGroups` is kept too so the current flair still displays even if that
+    // group no longer offers flair (an admin-set flair can be like this).
+    private(set) var flairGroups: [UserGroupFlair] = []
+    private(set) var allGroups: [UserGroupFlair] = []
+    private(set) var flairGroupID: Int?
+
+    /// The group currently supplying the flair, resolved from the full list.
+    var currentFlairGroup: UserGroupFlair? {
+        allGroups.first { $0.id == flairGroupID }
+    }
+
+    /// What the picker offers: flair-capable groups, plus the current one if it
+    /// isn't already among them, so the active choice is always shown.
+    var flairOptions: [UserGroupFlair] {
+        var options = flairGroups
+        if let current = currentFlairGroup, !options.contains(where: { $0.id == current.id }) {
+            options.insert(current, at: 0)
+        }
+        return options
+    }
 
     private(set) var isLoading = false
     private(set) var isSaving = false
@@ -41,13 +61,7 @@ final class ProfileEditStore {
 
     /// Titles the user may pick: the display names of badges that allow a title.
     var titleOptions: [String] {
-        let allowed = Set(badges.filter { $0.allowTitle == true }.map(\.name))
-        return badges.filter { allowed.contains($0.name) }.map(\.name)
-    }
-
-    /// Badges currently featured on the profile card.
-    var favoriteBadgeIDs: Set<Int> {
-        Set(grants.filter { $0.isFavorite == true }.map(\.id))
+        badges.filter { $0.allowTitle == true }.map(\.name)
     }
 
     func load(force: Bool = false) async {
@@ -61,11 +75,7 @@ final class ProfileEditStore {
         }
         if let badges = try? await client.userBadges(username: username) {
             self.badges = badges.badges ?? []
-            self.grants = badges.userBadges ?? []
         }
-        // `max_favorite_badges` isn't in the client site settings the app reads,
-        // so the conservative default of 2 (Discourse's own default) stands.
-        // The server enforces the real cap regardless.
     }
 
     private func apply(_ profile: UserProfile) {
@@ -76,6 +86,17 @@ final class ProfileEditStore {
         title = profile.title
         avatarURL = profile.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 240) }
         cardBackgroundURL = NodeSummaryFactory.resolvedURL(profile.cardBackgroundUploadUrl)
+        flairGroupID = profile.flairGroupId
+        allGroups = profile.groups ?? []
+        // Only groups with a flair can supply one.
+        flairGroups = allGroups.filter { $0.flairUrl?.isEmpty == false }
+    }
+
+    /// Sets 资质 to a group's flair, or clears it. An empty value clears
+    /// `flair_group_id` server-side.
+    func setFlairGroup(_ id: Int?) async {
+        flairGroupID = id
+        await saveFields([("flair_group_id", id.map(String.init) ?? "")])
     }
 
     // MARK: Saving
@@ -150,25 +171,6 @@ final class ProfileEditStore {
     func removeCardBackground() async {
         if await saveFields([("card_background_upload_url", "")]) {
             cardBackgroundURL = nil
-        }
-    }
-
-    // MARK: Featured badges
-
-    func toggleFavorite(_ grant: UserBadgeGrant) async {
-        // Respect the server cap and the badge's own can_favorite flag.
-        let isFav = favoriteBadgeIDs.contains(grant.id)
-        if !isFav, favoriteBadgeIDs.count >= maxFavoriteBadges { return }
-        guard grant.canFavorite == true else { return }
-
-        do {
-            try await client.toggleFavoriteBadge(userBadgeID: grant.id)
-            // Reflect locally by flipping the grant's flag.
-            grants = grants.map {
-                $0.id == grant.id ? UserBadgeGrant(id: $0.id, badgeId: $0.badgeId, isFavorite: !isFav, canFavorite: $0.canFavorite) : $0
-            }
-        } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 

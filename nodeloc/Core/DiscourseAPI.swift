@@ -538,28 +538,12 @@ struct DiscourseClient {
         try await get("u/\(username).json")
     }
 
-    // MARK: Badges + title
+    // MARK: Badges (title options)
 
+    /// Read only, to populate the title picker with the user's title-granting
+    /// badges. The title itself is set through `updateProfile`.
     func userBadges(username: String) async throws -> UserBadgesResponse {
         try await get("user-badges/\(username).json")
-    }
-
-    /// Sets the title from a badge the user holds. Empty `title` on
-    /// `updateProfile` clears it instead.
-    @discardableResult
-    func setBadgeTitle(username: String, userBadgeID: Int) async throws -> Data {
-        try await formItems(
-            "PUT",
-            path: "u/\(username)/preferences/badge_title",
-            items: [("user_badge_id", String(userBadgeID))]
-        )
-    }
-
-    /// Favouriting a badge is what surfaces it on the profile card. Capped at
-    /// `max_favorite_badges` server-side.
-    @discardableResult
-    func toggleFavoriteBadge(userBadgeID: Int) async throws -> Data {
-        try await formItems("PUT", path: "user_badges/\(userBadgeID)/toggle_favorite", items: [])
     }
 
     // MARK: Associated accounts
