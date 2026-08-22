@@ -118,12 +118,17 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         // in the body. A wrong password, an unactivated account, a required
         // second factor, or a social-only account (no password) all come back
         // here as `{ "error": … }`, so the status code alone can't be trusted.
+        // On success it renders the signed-in user, so `user.username` is the
+        // authoritative "logged in" signal — no follow-up request needed.
         let result = try? decode(SessionLoginResponse.self, from: data)
         if let message = result?.error ?? result?.failed {
             throw AuthError.loginFailed(message)
         }
+        guard let username = result?.user?.username else {
+            throw AuthError.loginFailed("登录未完成，请重试。")
+        }
 
-        try await persistWebsiteSession(csrf: csrf)
+        try persistWebsiteSession(csrf: csrf, username: username)
     }
 
     func signup(
@@ -207,25 +212,18 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         return (data, http)
     }
 
-    private func persistWebsiteSession(csrf: String) async throws {
+    private func persistWebsiteSession(csrf: String, username: String) throws {
         guard let cookie = currentCookieHeader() else {
             throw AuthError.loginFailed("Login did not return a website session.")
         }
         DiscourseAuth.shared.userApiKey = nil
         DiscourseAuth.shared.sessionCookie = cookie
         DiscourseAuth.shared.csrfToken = csrf
+        DiscourseAuth.shared.username = username
         Keychain.delete(keychainKey)
         Keychain.set(cookie, for: keychainSession)
         Keychain.set(csrf, for: keychainCSRF)
-
-        guard let current = try? await DiscourseClient().currentUser() else {
-            // The cookie didn't resolve to a signed-in user — treat it as a
-            // failed login rather than entering the app in a half-authed state.
-            signOut()
-            throw AuthError.loginFailed("登录未完成，请重试。")
-        }
-        DiscourseAuth.shared.username = current.currentUser.username
-        Keychain.set(current.currentUser.username, for: keychainUser)
+        Keychain.set(username, for: keychainUser)
     }
 
     private func currentCookieHeader() -> String? {
@@ -418,6 +416,11 @@ private struct CSRFResponse: Decodable {
 private struct SessionLoginResponse: Decodable {
     let error: String?
     let failed: String?
+    let user: LoggedInUser?
+
+    struct LoggedInUser: Decodable {
+        let username: String
+    }
 }
 
 private struct SignupResponse: Decodable {
