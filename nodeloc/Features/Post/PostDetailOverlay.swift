@@ -577,50 +577,17 @@ struct PostDetailOverlay: View {
     }
 
     private func replyComposer(for post: Post) -> some View {
-        HStack(spacing: 10) {
-            PlainField(placeholder: DiscourseAuth.shared.isAuthenticated ? "Add a reply…" : "Log in to reply",
-                       text: $draft)
-                .focused($isReplyFocused)
-                .disabled(!DiscourseAuth.shared.isAuthenticated)
-
-            Button {
+        ReplyComposer(
+            text: $draft,
+            isSubmitting: topic.isSubmitting,
+            isAuthenticated: DiscourseAuth.shared.isAuthenticated,
+            onSubmit: {
                 let text = draft
                 Task {
                     if await topic.submitReply(text, topicID: post.id) { draft = "" }
                 }
-            } label: {
-                ZStack {
-                    if topic.isSubmitting {
-                        ProgressView().tint(Theme.accent)
-                    } else {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                    }
-                }
-                .foregroundStyle(Theme.accent)
-                .frame(width: 42, height: 42)
-                .background(Theme.accent.opacity(0.1), in: Circle())
-                .overlay(Circle().strokeBorder(Theme.accent.opacity(0.55), lineWidth: 1))
             }
-            .buttonStyle(.plain)
-            .disabled(!DiscourseAuth.shared.isAuthenticated
-                      || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      || topic.isSubmitting)
-            .opacity(replyDisabled ? 0.45 : 1)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
-        .background(Theme.bg)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
-        }
-    }
-
-    private var replyDisabled: Bool {
-        !DiscourseAuth.shared.isAuthenticated
-        || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        || topic.isSubmitting
+        )
     }
 
     private var loadMoreTitle: String {

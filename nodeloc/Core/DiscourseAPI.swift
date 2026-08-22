@@ -15,6 +15,10 @@ nonisolated enum DiscourseConfig {
     static let authRedirect = "nodeloc://auth"
     static let appName = "NODELOC iOS"
     static let clientIDDefaultsKey = "nodeloc.client_id"
+    /// Klipy API key for the GIF picker (nodeloc's discourse-gifs runs the Klipy
+    /// provider). It's a public theme setting on the web; paste it here to
+    /// enable the native GIF search. Empty = GIF button disabled.
+    static let klipyAPIKey = ""
 
     static func clientID() -> String {
         if let existing = UserDefaults.standard.string(forKey: clientIDDefaultsKey) {
@@ -813,6 +817,39 @@ struct DiscourseClient {
     }
 
     /// Uploads a composer attachment and returns the Discourse upload token/URL.
+    /// Searches Klipy for GIFs (the provider nodeloc's discourse-gifs uses).
+    /// Hits Klipy directly — it's an external host, not the Discourse backend.
+    func klipySearch(query: String, pos: String? = nil) async throws -> KlipySearchResponse {
+        guard !DiscourseConfig.klipyAPIKey.isEmpty else { throw DiscourseError.badResponse(401) }
+        var components = URLComponents(string: "https://api.klipy.com/v2/search")!
+        components.queryItems = [
+            URLQueryItem(name: "key", value: DiscourseConfig.klipyAPIKey),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "media_filter", value: "gif"),
+            URLQueryItem(name: "limit", value: "24"),
+            URLQueryItem(name: "pos", value: pos ?? "0"),
+        ]
+        var request = URLRequest(url: components.url!)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw DiscourseError.transport(error)
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw DiscourseError.badResponse(http.statusCode)
+        }
+        do {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(KlipySearchResponse.self, from: data)
+        } catch {
+            throw DiscourseError.decoding(error)
+        }
+    }
+
     /// `upload_type` replaces the `type` param, which Discourse deprecated in
     /// 3.4 and drops in 3.5.
     func uploadComposerMedia(data: Data, fileName: String, mimeType: String) async throws -> DiscourseUpload {

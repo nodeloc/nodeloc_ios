@@ -863,6 +863,25 @@ struct CurrentUserGroup: Decodable {
 
 struct CurrentUserResponse: Decodable { let currentUser: CurrentUser }
 
+// MARK: - GIF search (Klipy)
+
+/// Klipy `/v2/search`. `mediaFormats` is keyed by format name (e.g. "gif");
+/// each entry has a URL and `dims` = [width, height]. Decoded with
+/// convertFromSnakeCase, so `media_formats` maps to `mediaFormats`.
+struct KlipySearchResponse: Decodable {
+    let results: [KlipyGif]?
+
+    struct KlipyGif: Decodable {
+        let title: String?
+        let mediaFormats: [String: KlipyFormat]?
+    }
+
+    struct KlipyFormat: Decodable {
+        let url: String?
+        let dims: [Int]?
+    }
+}
+
 // MARK: - Private messages
 
 /// `GET /topics/private-messages/<username>.json`. Same envelope as the topic
