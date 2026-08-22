@@ -871,9 +871,12 @@ private struct NestedReplyRow: View {
     }
 
     fileprivate static let verticalPadding: CGFloat = 12
-    fileprivate static let indentStep: CGFloat = 16
+    // Indent deeper (up to 8 levels) with a tighter step so nested sub-threads
+    // stay visibly nested instead of collapsing onto one level, while still
+    // fitting a phone's width.
+    fileprivate static let indentStep: CGFloat = 13
     fileprivate static let railContentGap: CGFloat = 8
-    fileprivate static let maxIndentLevels: Int = 5
+    fileprivate static let maxIndentLevels: Int = 8
 }
 
 /// Holds the header reveal progress separately from the view so scroll updates
