@@ -103,7 +103,7 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
 
         signOut()
         let csrf = try await fetchCSRFToken()
-        let (_, response) = try await postForm(
+        let (data, _) = try await postForm(
             "session",
             form: [
                 "login": identifier,
@@ -113,9 +113,16 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
             ],
             csrf: csrf
         )
-        guard (200...299).contains(response.statusCode) else {
-            throw AuthError.loginFailed("Login failed. Please check your username and password.")
+
+        // Discourse answers HTTP 200 even when the login fails — the outcome is
+        // in the body. A wrong password, an unactivated account, a required
+        // second factor, or a social-only account (no password) all come back
+        // here as `{ "error": … }`, so the status code alone can't be trusted.
+        let result = try? decode(SessionLoginResponse.self, from: data)
+        if let message = result?.error ?? result?.failed {
+            throw AuthError.loginFailed(message)
         }
+
         try await persistWebsiteSession(csrf: csrf)
     }
 
@@ -211,7 +218,12 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         Keychain.set(cookie, for: keychainSession)
         Keychain.set(csrf, for: keychainCSRF)
 
-        let current = try await DiscourseClient().currentUser()
+        guard let current = try? await DiscourseClient().currentUser() else {
+            // The cookie didn't resolve to a signed-in user — treat it as a
+            // failed login rather than entering the app in a half-authed state.
+            signOut()
+            throw AuthError.loginFailed("登录未完成，请重试。")
+        }
         DiscourseAuth.shared.username = current.currentUser.username
         Keychain.set(current.currentUser.username, for: keychainUser)
     }
@@ -398,6 +410,14 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
 
 private struct CSRFResponse: Decodable {
     let csrf: String
+}
+
+/// `POST /session`. On success the body carries the user; on failure — wrong
+/// password, unactivated, 2FA required, no local password — it carries a
+/// message, both under HTTP 200.
+private struct SessionLoginResponse: Decodable {
+    let error: String?
+    let failed: String?
 }
 
 private struct SignupResponse: Decodable {
