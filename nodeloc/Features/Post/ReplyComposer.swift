@@ -19,11 +19,13 @@ struct ReplyComposer: View {
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
-    /// Draggable editor height, set by the grab handle at the top.
-    @State private var editorHeight: CGFloat = 44
-    @State private var dragBaseHeight: CGFloat?
-    private let minEditorHeight: CGFloat = 44
-    private let maxEditorHeight: CGFloat = 360
+    /// The field auto-grows with content up to `maxLines`, then scrolls (native
+    /// `TextField(axis:)` behaviour). The grab handle nudges that cap so it can
+    /// still be pulled taller, bounded so it never covers the header.
+    @State private var maxLines = 4
+    @State private var dragBaseLines: Int?
+    private let minLines = 3
+    private let lineCap = 14
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
     @State private var hasImage = false
@@ -78,7 +80,7 @@ struct ReplyComposer: View {
         .padding(.top, 10)
     }
 
-    /// Drag up to grow the editor, down to shrink it.
+    /// Drag up to raise the auto-grow cap, down to lower it.
     private var dragHandle: some View {
         Capsule()
             .fill(Theme.divider)
@@ -89,36 +91,29 @@ struct ReplyComposer: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        let base = dragBaseHeight ?? editorHeight
-                        if dragBaseHeight == nil { dragBaseHeight = base }
-                        editorHeight = min(
-                            max(minEditorHeight, base - value.translation.height),
-                            maxEditorHeight
-                        )
+                        let base = dragBaseLines ?? maxLines
+                        if dragBaseLines == nil { dragBaseLines = base }
+                        // ~22pt per line of travel.
+                        let delta = Int((-value.translation.height / 22).rounded())
+                        maxLines = min(max(minLines, base + delta), lineCap)
                     }
-                    .onEnded { _ in dragBaseHeight = nil }
+                    .onEnded { _ in dragBaseLines = nil }
             )
     }
 
     private var editor: some View {
-        ZStack(alignment: .topLeading) {
-            if text.isEmpty {
-                Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
-                    .font(Theme.body(15))
-                    .foregroundStyle(Theme.muted(0.4))
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .allowsHitTesting(false)
-            }
-            TextEditor(text: $text)
-                .font(Theme.body(15))
-                .tint(Theme.accent)
-                .scrollContentBackground(.hidden)
-                .focused($focused)
-                .disabled(!isAuthenticated)
-                .padding(.horizontal, 12)
-                .frame(height: editorHeight)
-        }
+        TextField(
+            isAuthenticated ? "加入对话" : "登录后参与讨论",
+            text: $text,
+            axis: .vertical
+        )
+        .font(Theme.body(15))
+        .tint(Theme.accent)
+        .lineLimit(1...maxLines)
+        .focused($focused)
+        .disabled(!isAuthenticated)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     // MARK: Toolbar
