@@ -12,9 +12,6 @@ struct HomeView: View {
     @State private var lastOffset: CGFloat = 0
     @State private var headerHiddenAmount: CGFloat = 0
     @State private var selectedProfile: UserProfileTarget?
-    /// Negative content offset while over-pulling at the top.
-    @State private var pullDistance: CGFloat = 0
-    @State private var isRefreshing = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -50,28 +47,12 @@ struct HomeView: View {
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
+            .refreshable { await feed.load() }
             .task { await feed.loadIfNeeded() }
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
             } action: { _, newValue in
                 handleScroll(newValue)
-            }
-            // Over-pull past the natural resting position. The scroll view's
-            // resting offset is -contentInsets.top, so measure against that
-            // rather than against 0.
-            .onScrollGeometryChange(for: CGFloat.self) { geo in
-                max(0, -(geo.contentOffset.y + geo.contentInsets.top))
-            } action: { _, newValue in
-                pullDistance = newValue
-            }
-            .onScrollPhaseChange { _, newPhase in
-                // Fire once the drag ends past the threshold.
-                guard !newPhase.isScrolling, pullDistance >= refreshThreshold, !isRefreshing else { return }
-                isRefreshing = true
-                Task {
-                    await feed.load()
-                    isRefreshing = false
-                }
             }
 
             if app.overlay != .post {
@@ -92,16 +73,12 @@ struct HomeView: View {
 
     private let headerHeight: CGFloat = 56
     private let quickRevealThreshold: CGFloat = 14
-    private let refreshThreshold: CGFloat = 72
     private let logoHeight: CGFloat = 30
 
-    /// Spinning (rather than drag-proportional) while actually loading.
-    private var isIndeterminate: Bool {
-        isRefreshing || (feed.posts.isEmpty && feed.isLoading)
-    }
-
+    /// The branded loader replaces the wordmark on the first load; pull-to-
+    /// refresh uses the system spinner.
     private var showsLoader: Bool {
-        isIndeterminate || pullDistance > 4
+        feed.posts.isEmpty && feed.isLoading
     }
 
     /// 1 when the header is fully shown, 0 once it has scrolled away.
@@ -159,7 +136,7 @@ struct HomeView: View {
     private var headerWordmark: some View {
         if showsLoader {
             NodelocLoader(
-                progress: isIndeterminate ? nil : pullDistance / refreshThreshold,
+                progress: nil,
                 height: logoHeight
             )
         } else {
