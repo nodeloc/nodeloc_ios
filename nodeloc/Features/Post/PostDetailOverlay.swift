@@ -559,29 +559,21 @@ struct PostDetailOverlay: View {
             .padding(.horizontal, -20)
     }
 
+    /// Auto-loads the next page of replies when it scrolls into view — no tap.
     private func loadMoreRepliesButton(for post: Post) -> some View {
-        Button {
-            Task { await topic.loadMoreComments(topicID: post.id) }
-        } label: {
-            HStack(spacing: 8) {
-                if topic.isLoadingMore {
-                    ProgressView()
-                        .tint(Theme.accent)
-                } else {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 15, weight: .medium))
-                }
-
-                Text(loadMoreTitle)
-                    .font(Theme.body(13, weight: .semibold))
-            }
-            .foregroundStyle(Theme.accent)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .contentShape(Rectangle())
+        HStack(spacing: 8) {
+            ProgressView()
+                .tint(Theme.accent)
+            Text(loadMoreTitle)
+                .font(Theme.body(12))
+                .foregroundStyle(Theme.muted(0.5))
         }
-        .buttonStyle(.plain)
-        .disabled(topic.isLoadingMore)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
+        .onScrollVisibilityChange(threshold: 0.1) { visible in
+            guard visible else { return }
+            Task { await topic.loadMoreComments(topicID: post.id) }
+        }
     }
 
     private func replyComposer(for post: Post) -> some View {
