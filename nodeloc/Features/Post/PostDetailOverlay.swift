@@ -334,32 +334,9 @@ struct PostDetailOverlay: View {
         .allowsHitTesting(false)
     }
 
+    /// Grouped glass capsule matching the node page's top-right tools.
     private func readerTools(for post: Post) -> some View {
-        ZStack {
-            readerHeaderGlassButton(borderShape: .capsule, action: {}) {
-                readerToolsChrome
-                    .opacity(0)
-            }
-            .allowsHitTesting(false)
-
-            readerToolsContent
-        }
-    }
-
-    private var readerToolsChrome: some View {
-        HStack(spacing: 4) {
-            readerToolIcon("magnifyingglass")
-            readerToolIcon("slider.horizontal.3")
-            readerToolIcon("ellipsis")
-            readerAvatar
-        }
-        .padding(.leading, 7)
-        .padding(.trailing, 6)
-        .frame(height: readerHeaderControlHeight)
-    }
-
-    private var readerToolsContent: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Button {
                 closeOverlay(app)
                 app.tab = .search
@@ -368,28 +345,31 @@ struct PostDetailOverlay: View {
             }
             .buttonStyle(.plain)
 
-            Button {} label: {
-                readerToolIcon("slider.horizontal.3")
-            }
-            .buttonStyle(.plain)
+            Button {} label: { readerToolIcon("slider.horizontal.3") }
+                .buttonStyle(.plain)
 
-            Button {} label: {
-                readerToolIcon("ellipsis")
-            }
-            .buttonStyle(.plain)
+            Button {} label: { readerToolIcon("ellipsis") }
+                .buttonStyle(.plain)
 
             readerAvatar
         }
-        .padding(.leading, 7)
-        .padding(.trailing, 6)
-        .frame(height: readerHeaderControlHeight)
+        .padding(.horizontal, 8)
+        // Same as the node page: `.glass` adds 7pt above/below a 34pt label for
+        // a 48pt capsule, reproduced here so the two headers match exactly.
+        .padding(.vertical, 7)
+        .glassEffect(
+            .regular.tint(Theme.bg.opacity(0.34)).interactive(),
+            in: .capsule
+        )
+        .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
     }
 
     private func readerToolIcon(_ systemImage: String) -> some View {
         Image(systemName: systemImage)
             .font(.system(size: 15, weight: .medium))
             .foregroundStyle(Theme.text)
-            .frame(width: 26, height: 26)
+            .frame(width: 28, height: readerHeaderControlHeight)
+            .contentShape(Rectangle())
     }
 
     private var readerAvatar: some View {
