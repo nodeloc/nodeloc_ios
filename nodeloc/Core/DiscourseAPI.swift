@@ -126,8 +126,11 @@ struct DiscourseClient {
 
     // MARK: Endpoints
 
-    func latest() async throws -> LatestResponse {
-        try await get("latest.json")
+    func latest(page: Int = 0) async throws -> LatestResponse {
+        try await get(
+            "latest.json",
+            query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
+        )
     }
 
     func site() async throws -> SiteResponse {

@@ -16,8 +16,15 @@ final class FeedStore {
     var posts: [Post] = []
     var categoriesByID: [Int: DiscourseCategory] = [:]
     var isLoading = false
+    var isLoadingMore = false
     var errorText: String?
     var usingSampleData = false
+    /// Another page is available (the list carried a `more_topics_url`).
+    private(set) var hasMore = false
+
+    private var page = 0
+    /// Accumulated across pages so later pages' authors still resolve.
+    private var usersByID: [Int: DiscourseUser] = [:]
 
     func loadIfNeeded() async {
         if posts.isEmpty { await load() }
@@ -26,6 +33,7 @@ final class FeedStore {
     func load() async {
         isLoading = true
         errorText = nil
+        page = 0
         do {
             async let latestCall = client.latest()
             async let siteCall: SiteResponse? = await SiteResources.shared.siteResponse()
@@ -36,11 +44,12 @@ final class FeedStore {
                 (site?.categories ?? []).map { ($0.id, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
-            let usersByID = Dictionary(
+            usersByID = Dictionary(
                 (latest.users ?? []).map { ($0.id, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
             posts = latest.topicList.topics.map { map(topic: $0, usersByID: usersByID) }
+            hasMore = latest.topicList.moreTopicsUrl != nil
             usingSampleData = false
         } catch {
             errorText = (error as? DiscourseError)?.errorDescription ?? error.localizedDescription
@@ -48,8 +57,30 @@ final class FeedStore {
                 posts = SampleData.posts
                 usingSampleData = true
             }
+            hasMore = false
         }
         isLoading = false
+    }
+
+    /// Appends the next page. Safe to call repeatedly — no-op while a page is in
+    /// flight, when there's nothing more, or on the sample-data fallback.
+    func loadMore() async {
+        guard hasMore, !isLoadingMore, !isLoading, !usingSampleData else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        do {
+            let latest = try await client.latest(page: page + 1)
+            page += 1
+            for user in latest.users ?? [] { usersByID[user.id] = user }
+            let existingIDs = Set(posts.map(\.id))
+            let newPosts = latest.topicList.topics
+                .filter { !existingIDs.contains($0.id) }
+                .map { map(topic: $0, usersByID: usersByID) }
+            posts.append(contentsOf: newPosts)
+            hasMore = latest.topicList.moreTopicsUrl != nil && !newPosts.isEmpty
+        } catch {
+            // Keep what's shown; the sentinel retries when it reappears.
+        }
     }
 
     private func map(topic: TopicListItem, usersByID: [Int: DiscourseUser]) -> Post {

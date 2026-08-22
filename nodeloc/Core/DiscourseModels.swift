@@ -77,6 +77,8 @@ struct TopicThumbnail: Decodable {
 
 struct TopicList: Decodable {
     let topics: [TopicListItem]
+    /// Present when more pages exist; nil on the last page.
+    let moreTopicsUrl: String?
 }
 
 struct LatestResponse: Decodable {

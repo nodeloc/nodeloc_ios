@@ -33,6 +33,19 @@ struct HomeView: View {
                             }
                         )
                     }
+
+                    if feed.hasMore {
+                        // Auto-loads the next page when scrolled into view.
+                        HStack {
+                            ProgressView().tint(Theme.accent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
+                        .onScrollVisibilityChange(threshold: 0.1) { visible in
+                            guard visible else { return }
+                            Task { await feed.loadMore() }
+                        }
+                    }
                 }
                 .padding(.bottom, 100)
             }
