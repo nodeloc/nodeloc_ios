@@ -10,6 +10,14 @@
 import PhotosUI
 import SwiftUI
 
+/// Carries the measured natural height of the reply text up to the composer.
+private struct EditorHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct ReplyComposer: View {
     @Binding var text: String
     let isSubmitting: Bool
@@ -19,13 +27,19 @@ struct ReplyComposer: View {
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
-    /// The field auto-grows with content up to `maxLines`, then scrolls (native
-    /// `TextField(axis:)` behaviour). The grab handle nudges that cap so it can
-    /// still be pulled taller, bounded so it never covers the header.
-    @State private var maxLines = 4
-    @State private var dragBaseLines: Int?
-    private let minLines = 3
-    private let lineCap = 14
+    /// Editor height is the larger of the measured content height (so it grows
+    /// as you type) and the dragged height (so the handle can pull it taller),
+    /// clamped to [minHeight, maxHeight]. Both change continuously, so neither
+    /// typing nor dragging steps a line at a time.
+    @State private var contentHeight: CGFloat = 0
+    @State private var dragHeight: CGFloat = 40
+    @State private var dragBase: CGFloat?
+    private let minHeight: CGFloat = 40
+    private let maxHeight: CGFloat = 320
+
+    private var editorHeight: CGFloat {
+        min(max(minHeight, max(contentHeight, dragHeight)), maxHeight)
+    }
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
     @State private var hasImage = false
@@ -80,7 +94,7 @@ struct ReplyComposer: View {
         .padding(.top, 10)
     }
 
-    /// Drag up to raise the auto-grow cap, down to lower it.
+    /// Drag up to grow the editor, down to shrink it — continuous, no stepping.
     private var dragHandle: some View {
         Capsule()
             .fill(Theme.divider)
@@ -91,29 +105,48 @@ struct ReplyComposer: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        let base = dragBaseLines ?? maxLines
-                        if dragBaseLines == nil { dragBaseLines = base }
-                        // ~22pt per line of travel.
-                        let delta = Int((-value.translation.height / 22).rounded())
-                        maxLines = min(max(minLines, base + delta), lineCap)
+                        let base = dragBase ?? editorHeight
+                        if dragBase == nil { dragBase = base }
+                        dragHeight = min(max(minHeight, base - value.translation.height), maxHeight)
                     }
-                    .onEnded { _ in dragBaseLines = nil }
+                    .onEnded { _ in dragBase = nil }
             )
     }
 
     private var editor: some View {
-        TextField(
-            isAuthenticated ? "加入对话" : "登录后参与讨论",
-            text: $text,
-            axis: .vertical
-        )
-        .font(Theme.body(15))
-        .tint(Theme.accent)
-        .lineLimit(1...maxLines)
-        .focused($focused)
-        .disabled(!isAuthenticated)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
+                    .font(Theme.body(15))
+                    .foregroundStyle(Theme.muted(0.4))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $text)
+                .font(Theme.body(15))
+                .tint(Theme.accent)
+                .scrollContentBackground(.hidden)
+                .focused($focused)
+                .disabled(!isAuthenticated)
+                .frame(height: editorHeight)
+        }
+        .padding(.horizontal, 12)
+        // Measures the text's natural height off-screen to drive auto-grow.
+        .background(alignment: .topLeading) {
+            Text(text.isEmpty ? " " : text)
+                .font(Theme.body(15))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 17)
+                .padding(.vertical, 8)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: EditorHeightKey.self, value: geo.size.height)
+                    }
+                )
+                .hidden()
+        }
+        .onPreferenceChange(EditorHeightKey.self) { contentHeight = $0 }
     }
 
     // MARK: Toolbar
