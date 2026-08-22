@@ -440,9 +440,25 @@ struct TopicPost: Decodable, Identifiable {
     /// discourse-red-envelope: what *this* reply won. Only serialized for
     /// `post_number > 1`, because replying is what claims the envelope.
     let redEnvelopeClaim: RedEnvelopeClaim?
+    /// Nested-view (`/n/…`) only: direct replies inlined under this post (up to
+    /// a few), and the total direct-reply count so the UI knows more remain.
+    let children: [TopicPost]?
+    let directReplyCount: Int?
 
     /// Like count lives in actions_summary with action id 2.
     var likeCount: Int { actionsSummary?.first { $0.id == 2 }?.count ?? 0 }
+}
+
+/// `GET /n/{slug}/{id}.json?sort=` — Discourse's nested-replies view. The OP is
+/// separate (`op_post`); `roots` are the top-level reply threads, each with its
+/// own inlined `children`. `sort` is server-side (top / new / old).
+struct NestedTopicResponse: Decodable {
+    let opPost: TopicPost?
+    let roots: [TopicPost]?
+    let hasMoreRoots: Bool?
+    let page: Int?
+    let sort: String?
+    let effectiveSort: String?
 }
 
 // MARK: - Poll (poll plugin)

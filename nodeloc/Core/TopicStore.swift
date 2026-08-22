@@ -41,6 +41,15 @@ enum ReplySort: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The value Discourse's nested view expects for `?sort=`.
+    var apiValue: String {
+        switch self {
+        case .oldest: return "old"
+        case .newest: return "new"
+        case .mostLiked: return "top"
+        }
+    }
+
     /// Orders the root posts of each thread.
     var rootComparator: (TopicPost, TopicPost) -> Bool {
         switch self {
@@ -124,24 +133,25 @@ final class TopicStore {
     private(set) var replySort: ReplySort = .oldest
     private(set) var firstPostID: Int?
     private var loadedID: Int?
+    private var topicID: Int?
     private var allPosts: [TopicPost] = []
     private var streamPostIDs: [Int] = []
     private var loadedPostIDs: Set<Int> = []
     private let pageSize = 20
+    // Nested-view (/n/…) reply state: replies come from the server already
+    // sorted, so no client-side reordering.
+    private var nestedRoots: [TopicPost] = []
+    private var nestedPage = 0
+    private(set) var nestedHasMore = false
     /// Parsed bodies keyed by post id + edit version, so scrolling back through
     /// a long topic doesn't re-parse HTML that hasn't changed.
     private let contentCache = ParsedContentCache.shared
 
-    var hasMoreComments: Bool {
-        !remainingPostIDs.isEmpty
-    }
-
-    var remainingCommentCount: Int {
-        remainingPostIDs.count
-    }
+    var hasMoreComments: Bool { nestedHasMore }
 
     func load(topicID: Int) async {
         guard loadedID != topicID else { return }
+        self.topicID = topicID
         isLoading = true
         content = .empty
         comments = []
@@ -151,9 +161,7 @@ final class TopicStore {
         myPollVotes = [:]
         lottery = nil
         redEnvelope = nil
-        allPosts = []
-        streamPostIDs = []
-        loadedPostIDs = []
+        nestedRoots = []
         do {
             let topic = try await client.topic(id: topicID)
             let posts = topic.postStream.posts
@@ -169,20 +177,51 @@ final class TopicStore {
                 lottery = firstPost.lottery
             }
             redEnvelope = topic.redEnvelope
-            allPosts = posts
-            streamPostIDs = topic.postStream.stream ?? posts.map(\.id)
-            loadedPostIDs = Set(posts.map(\.id))
-            totalReplyCount = max(0, (topic.postsCount ?? streamPostIDs.count) - 1)
+            totalReplyCount = max(0, (topic.postsCount ?? 1) - 1)
 
-            // Parse off the main actor before touching any @Observable state.
+            // Parse the OP off the main actor before touching @Observable state.
             await parseContents(for: posts)
             content = posts.first.map { parsedContent(for: $0) } ?? .empty
-            comments = nestedComments(from: orderedPosts())
             loadedID = topicID
         } catch {
-            // Leave content/comments empty; the overlay falls back to the excerpt.
+            // Leave content empty; the overlay falls back to the excerpt.
         }
+        // Replies come from the nested view (server-sorted).
+        await loadNested(reset: true)
         isLoading = false
+    }
+
+    /// Loads (or appends) the nested reply tree for the current `replySort`.
+    private func loadNested(reset: Bool) async {
+        guard let topicID else { return }
+        if reset { nestedPage = 0 } else { nestedPage += 1; isLoadingMore = true }
+        defer { if !reset { isLoadingMore = false } }
+        do {
+            let response = try await client.nestedTopic(
+                id: topicID,
+                sort: replySort.apiValue,
+                page: nestedPage
+            )
+            let roots = response.roots ?? []
+            if reset { nestedRoots = roots } else { nestedRoots.append(contentsOf: roots) }
+            nestedHasMore = response.hasMoreRoots ?? false
+            await parseContents(for: flatten(nestedRoots))
+            comments = buildNestedComments(from: nestedRoots)
+        } catch {
+            if reset { nestedRoots = []; comments = [] }
+        }
+    }
+
+    /// Re-fetches the replies with a new server sort.
+    func applySort(_ sort: ReplySort) {
+        guard sort != replySort else { return }
+        replySort = sort
+        comments = []
+        isLoading = true
+        Task {
+            await loadNested(reset: true)
+            isLoading = false
+        }
     }
 
     // MARK: Plugin actions
@@ -357,26 +396,60 @@ final class TopicStore {
     }
 
     func loadMoreComments(topicID: Int) async {
-        guard loadedID == topicID, !isLoadingMore else { return }
-        let postIDs = Array(remainingPostIDs.prefix(pageSize))
-        guard !postIDs.isEmpty else { return }
+        guard self.topicID == topicID, nestedHasMore, !isLoadingMore else { return }
+        await loadNested(reset: false)
+    }
 
-        isLoadingMore = true
-        defer { isLoadingMore = false }
+    /// DFS-flattens the server nested tree into rows, using each post's own
+    /// `children` (server order — already sorted) instead of inferring nesting.
+    private func buildNestedComments(from roots: [TopicPost]) -> [PostComment] {
+        var result: [PostComment] = []
 
-        do {
-            let response = try await client.topicPosts(topicID: topicID, postIDs: postIDs)
-            let newPosts = response.postStream.posts.filter { !loadedPostIDs.contains($0.id) }
-            allPosts.append(contentsOf: newPosts)
-            loadedPostIDs.formUnion(postIDs)
-            // Parse before building the rows, otherwise `nestedComments` falls
-            // back to the synchronous parser and stalls the main actor for the
-            // whole page of replies.
-            await parseContents(for: newPosts)
-            comments = nestedComments(from: orderedPosts())
-        } catch {
-            // Keep the loaded comments visible; the user can retry from the load-more button.
+        func append(_ post: TopicPost, parent: TopicPost?, depth: Int, isLast: Bool, trails: [Bool], groupID: Int) {
+            let kids = post.children ?? []
+            result.append(
+                PostComment(
+                    id: post.id,
+                    author: post.username,
+                    time: DiscourseFormat.relative(post.createdAt),
+                    content: parsedContent(for: post),
+                    redEnvelopeClaim: post.redEnvelopeClaim,
+                    votes: post.likeCount,
+                    postNumber: post.postNumber ?? 0,
+                    replyToPostNumber: post.replyToPostNumber,
+                    parentAuthor: quotedParentAuthor(for: parent),
+                    parentText: quotedParentText(for: parent),
+                    avatarURL: post.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
+                    nestingDepth: min(depth, 4),
+                    isLastSibling: isLast,
+                    ancestorTrails: trails,
+                    hasChildren: !kids.isEmpty,
+                    groupID: groupID
+                )
+            )
+            guard !kids.isEmpty else { return }
+            let nextTrails = trails + [!isLast]
+            let last = kids.count - 1
+            for (index, kid) in kids.enumerated() {
+                append(kid, parent: post, depth: depth + 1, isLast: index == last, trails: nextTrails, groupID: groupID)
+            }
         }
+
+        let lastRoot = roots.count - 1
+        for (index, root) in roots.enumerated() {
+            append(root, parent: nil, depth: 0, isLast: index == lastRoot, trails: [], groupID: root.postNumber ?? root.id)
+        }
+        return result
+    }
+
+    private func flatten(_ posts: [TopicPost]) -> [TopicPost] {
+        var out: [TopicPost] = []
+        func walk(_ post: TopicPost) {
+            out.append(post)
+            (post.children ?? []).forEach(walk)
+        }
+        posts.forEach(walk)
+        return out
     }
 
     /// Sends a like for the topic's first post (no-op for guests).
@@ -492,13 +565,6 @@ final class TopicStore {
         }
 
         return result
-    }
-
-    /// Changes the reply ordering and rebuilds the visible thread list.
-    func applySort(_ sort: ReplySort) {
-        guard sort != replySort else { return }
-        replySort = sort
-        comments = nestedComments(from: orderedPosts())
     }
 
     private var remainingPostIDs: [Int] {

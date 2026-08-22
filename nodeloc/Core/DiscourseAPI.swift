@@ -218,6 +218,19 @@ struct DiscourseClient {
         try await get("t/\(id).json")
     }
 
+    /// Discourse's nested-replies view with server-side sort ("top"/"new"/"old").
+    /// The slug only affects the canonical URL; the id resolves the topic, so a
+    /// placeholder is fine.
+    func nestedTopic(id: Int, slug: String = "topic", sort: String, page: Int = 0) async throws -> NestedTopicResponse {
+        try await get(
+            "n/\(slug)/\(id).json",
+            query: [
+                URLQueryItem(name: "sort", value: sort),
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+        )
+    }
+
     func topicPosts(topicID: Int, postIDs: [Int]) async throws -> TopicPostsResponse {
         try await get(
             "t/\(topicID)/posts.json",

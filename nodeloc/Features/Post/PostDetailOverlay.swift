@@ -663,10 +663,7 @@ struct PostDetailOverlay: View {
         )
     }
 
-    private var loadMoreTitle: String {
-        let count = min(topic.remainingCommentCount, 20)
-        return count > 0 ? "Load \(count) more replies" : "Load more replies"
-    }
+    private var loadMoreTitle: String { "加载更多回复" }
 
     private func replyCount(for post: Post) -> Int {
         topic.totalReplyCount > 0 ? topic.totalReplyCount : (topic.comments.isEmpty ? post.comments : topic.comments.count)
