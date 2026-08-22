@@ -19,9 +19,22 @@ struct ReplyComposer: View {
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
-    /// Native auto-grow: the field starts at one line and grows to `maxLines`,
-    /// then scrolls. The handle is only for pulling down to collapse.
+    /// Normal state auto-grows natively (1…maxLines). `tall` snaps to the max
+    /// height. While dragging the handle, the height follows the finger
+    /// (`previewHeight`) and snaps on release.
     private let maxLines = 8
+    @State private var tall = false
+    @State private var isDragging = false
+    @State private var previewHeight: CGFloat = 0
+    @State private var renderedHeight: CGFloat = 44
+    private let minHeight: CGFloat = 44
+    private let maxHeight: CGFloat = 320
+
+    /// Explicit height while dragging or snapped tall; nil = native auto-grow.
+    private var appliedHeight: CGFloat? {
+        if isDragging { return previewHeight }
+        return tall ? maxHeight : nil
+    }
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
     @State private var hasImage = false
@@ -57,6 +70,7 @@ struct ReplyComposer: View {
             if !isExpanded {
                 showGiphy = false
                 mode = .plain
+                tall = false
             }
         }
         .onChange(of: pickerItem) { _, item in
@@ -133,7 +147,8 @@ struct ReplyComposer: View {
         .padding(.top, 10)
     }
 
-    /// Pull down past the threshold to collapse back into the resting bar.
+    /// Drag the handle to resize interactively: it follows the finger, then on
+    /// release snaps to the max height (dragged up) or collapses (dragged down).
     private var dragHandle: some View {
         Capsule()
             .fill(Theme.divider)
@@ -142,10 +157,29 @@ struct ReplyComposer: View {
             .frame(height: 20)
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 5)
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        if !isDragging {
+                            isDragging = true
+                            previewHeight = renderedHeight
+                        }
+                        // Follow the finger, allowing a little slack past the
+                        // ends so there's travel before it snaps.
+                        previewHeight = min(
+                            max(minHeight - 30, renderedHeight - value.translation.height),
+                            maxHeight + 20
+                        )
+                    }
                     .onEnded { value in
-                        if value.translation.height > collapseThreshold {
-                            withAnimation(.quicker) { expanded = false }
+                        let travel = value.translation.height
+                        withAnimation(.snappy(duration: 0.28)) {
+                            isDragging = false
+                            if travel > collapseThreshold {
+                                expanded = false
+                                tall = false
+                            } else if travel < -collapseThreshold {
+                                tall = true
+                            }
                         }
                     }
             )
@@ -164,6 +198,11 @@ struct ReplyComposer: View {
         .disabled(!isAuthenticated)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+        .frame(height: appliedHeight, alignment: .top)
+        .clipped()
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+            if !isDragging { renderedHeight = height }
+        }
     }
 
     // MARK: Toolbar
