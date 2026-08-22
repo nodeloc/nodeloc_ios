@@ -656,8 +656,15 @@ private struct NodeTopicRow: View {
     /// post. Nil elsewhere, where a tap anywhere should open the topic.
     var onMediaTap: (() -> Void)?
 
-    /// Measured, not assumed — the card's own width, minus its padding.
-    @State private var mediaWidth: CGFloat = 0
+    /// Seeded to a full-width estimate so the first variant pick is already the
+    /// right size; the geometry reader refines it. Starting at 0 would pick the
+    /// smallest variant, then re-fetch a bigger one once measured.
+    @State private var mediaWidth: CGFloat = 362
+
+    @Environment(\.displayScale) private var displayScale
+
+    /// Fixed size of the small square thumbnail in expand rows.
+    private static let expandThumbSide: CGFloat = 78
 
     /// Card media takes the image's own shape, clamped 16:9 … 4:5.
     private var cardMediaHeight: CGFloat {
@@ -760,13 +767,15 @@ private struct NodeTopicRow: View {
                 // wrap instead of pushing the row wider.
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let imageURL = post.imageURL {
-                    CachedRemoteImage(url: imageURL) { image in
+                if let media = post.media.first {
+                    // A small variant for the square thumbnail — a fraction of
+                    // the full-size image, so the list stays light and crisp.
+                    CachedRemoteImage(url: media.bestURL(forWidth: Self.expandThumbSide, scale: displayScale)) { image in
                         image.resizable().scaledToFill()
                     } placeholder: {
                         Theme.neutral300
                     }
-                    .frame(width: 78, height: 78)
+                    .frame(width: Self.expandThumbSide, height: Self.expandThumbSide)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
             }
@@ -801,11 +810,12 @@ private struct NodeTopicRow: View {
 
             if let videoURL = post.videoURL {
                 FeedVideoTile(url: videoURL, posterURL: post.imageURL, onTap: onMediaTap)
-            } else if let imageURL = post.imageURL {
+            } else if let media = post.media.first {
                 // Reddit-style: the card takes the image's own shape rather
                 // than a fixed height, so portrait photos aren't letterboxed
-                // and panoramas aren't cropped to a sliver.
-                CachedRemoteImage(url: imageURL) { image in
+                // and panoramas aren't cropped to a sliver. A full-width
+                // variant keeps it crisp without pulling the original.
+                CachedRemoteImage(url: media.bestURL(forWidth: max(mediaWidth, 1), scale: displayScale)) { image in
                     image.resizable()
                 } placeholder: {
                     Theme.neutral300

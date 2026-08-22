@@ -412,7 +412,7 @@ private struct FeedMediaCarousel: View {
         ZStack {
             TabView(selection: $selection) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    FeedMediaPage(item: item)
+                    FeedMediaPage(item: item, width: availableWidth)
                         .tag(index)
                         // On the page, not the TabView: a gesture on the
                         // container would fight the paging swipe.
@@ -509,19 +509,20 @@ private struct FeedMediaCarousel: View {
 
 private struct FeedMediaPage: View {
     let item: PostMedia
+    let width: CGFloat
+
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        AsyncImage(url: item.url) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            case .failure:
-                ImagePlaceholder()
-            default:
-                StripePattern()
-            }
+        // CachedRemoteImage (not AsyncImage): it caches and decodes to the
+        // card's pixel size. The URL is the variant sized to the card, so the
+        // source is neither the blurry mid-size default nor the heavy original.
+        CachedRemoteImage(url: item.bestURL(forWidth: width, scale: displayScale)) { image in
+            image
+                .resizable()
+                .scaledToFill()
+        } placeholder: {
+            StripePattern()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()

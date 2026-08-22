@@ -50,8 +50,29 @@ struct PostMedia: Identifiable, Hashable {
     let url: URL
     let width: Int?
     let height: Int?
+    /// The same image at several widths, ascending. Empty when the server gave
+    /// only one URL. Lets each display site fetch a size that matches how big
+    /// it draws, instead of upscaling one middling image everywhere.
+    var variants: [ImageVariant] = []
 
     var id: URL { url }
+
+    /// The smallest variant at least as wide as the target (display points ×
+    /// screen scale), so it's crisp without over-fetching. Falls back to the
+    /// largest variant, then to `url`. This is the standard responsive-image
+    /// choice Reddit/Instagram make from their own multi-resolution sets.
+    func bestURL(forWidth pointWidth: CGFloat, scale: CGFloat) -> URL {
+        guard !variants.isEmpty, pointWidth > 0 else { return url }
+        let targetPx = pointWidth * scale
+        return variants.first { CGFloat($0.width) >= targetPx }?.url
+            ?? variants.last?.url
+            ?? url
+    }
+}
+
+struct ImageVariant: Hashable {
+    let width: Int
+    let url: URL
 }
 
 func postTransitionID(_ id: Int) -> String {

@@ -40,8 +40,11 @@ struct TopicListItem: Decodable, Identifiable {
     let pinned: Bool?
     let excerpt: String?
     let imageUrl: String?
-    let topicImages: [String]?
-    let topicThumbnails: [String]?
+    /// Discourse's responsive image set: the same picture at several widths
+    /// (e.g. 1024/800/600/400/300/200/140 plus the original). Decoded as
+    /// objects — the field is `thumbnails`, not the `topic_thumbnails` an
+    /// earlier `[String]` version looked for, so it had always been nil.
+    let thumbnails: [TopicThumbnail]?
     let posters: [TopicPoster]?
     let tags: [TopicTag]?
     /// First post's video, added by `discourse-community` expressly "for
@@ -54,6 +57,16 @@ struct TopicTag: Decodable, Hashable {
     let id: Int?
     let name: String?
     let slug: String?
+}
+
+/// One resolution in a topic's responsive image set. `width`/`height` are the
+/// actual pixels of this variant; the largest entry is the original upload.
+struct TopicThumbnail: Decodable {
+    let maxWidth: Int?
+    let maxHeight: Int?
+    let width: Int?
+    let height: Int?
+    let url: String?
 }
 
 struct TopicList: Decodable {

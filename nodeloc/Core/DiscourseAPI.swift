@@ -913,25 +913,39 @@ enum DiscourseFormat {
     }
 
     static func mediaItems(for topic: TopicListItem) -> [PostMedia] {
-        let preferred = nonEmpty(topic.topicThumbnails)
-            ?? nonEmpty(topic.topicImages)
-            ?? topic.imageUrl.map { [$0] }
-            ?? []
-        var seen = Set<String>()
-
-        return preferred.compactMap { raw in
-            guard let url = absoluteURL(raw) else { return nil }
-            let key = url.absoluteString
-            guard seen.insert(key).inserted else { return nil }
-            let dimensions = dimensions(from: raw)
-            return PostMedia(url: url, width: dimensions.width, height: dimensions.height)
+        // Prefer the responsive thumbnail set: it carries the topic's
+        // representative image at several widths, so each display site can pick
+        // a size that matches how big it draws.
+        if let media = responsiveMedia(from: topic.thumbnails) {
+            return [media]
         }
+
+        // Fall back to the single image_url when no thumbnail set is present.
+        guard let raw = topic.imageUrl, let url = absoluteURL(raw) else { return [] }
+        let dimensions = dimensions(from: raw)
+        return [PostMedia(url: url, width: dimensions.width, height: dimensions.height)]
     }
 
-    private static func nonEmpty(_ values: [String]?) -> [String]? {
-        guard let values else { return nil }
-        let filtered = values.filter { !$0.isEmpty }
-        return filtered.isEmpty ? nil : filtered
+    /// Builds one `PostMedia` from a thumbnail set: variants ascending by width,
+    /// `url`/dimensions taken from the largest (the original).
+    private static func responsiveMedia(from thumbnails: [TopicThumbnail]?) -> PostMedia? {
+        guard let thumbnails else { return nil }
+        let variants = thumbnails
+            .compactMap { thumb -> ImageVariant? in
+                guard let width = thumb.width, width > 0,
+                      let url = thumb.url.flatMap(absoluteURL) else { return nil }
+                return ImageVariant(width: width, url: url)
+            }
+            .sorted { $0.width < $1.width }
+
+        guard let largest = variants.last else { return nil }
+        let original = thumbnails.max { ($0.width ?? 0) < ($1.width ?? 0) }
+        return PostMedia(
+            url: largest.url,
+            width: original?.width,
+            height: original?.height,
+            variants: variants
+        )
     }
 
     private static func absoluteURL(_ raw: String) -> URL? {
