@@ -33,6 +33,14 @@ enum ReplySort: String, CaseIterable, Identifiable {
         }
     }
 
+    var detail: String {
+        switch self {
+        case .oldest: return "按发布时间从早到晚"
+        case .newest: return "最新的回复在前"
+        case .mostLiked: return "点赞最多的在前"
+        }
+    }
+
     /// Orders the root posts of each thread.
     var rootComparator: (TopicPost, TopicPost) -> Bool {
         switch self {

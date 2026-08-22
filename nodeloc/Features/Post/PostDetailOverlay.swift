@@ -346,10 +346,10 @@ struct PostDetailOverlay: View {
             }
             .buttonStyle(.plain)
 
-            Button {} label: { readerToolIcon("slider.horizontal.3") }
+            Button { showSortDialog = true } label: { readerToolIcon("slider.horizontal.3") }
                 .buttonStyle(.plain)
 
-            Button { showSortDialog = true } label: { readerToolIcon("ellipsis") }
+            Button {} label: { readerToolIcon("ellipsis") }
                 .buttonStyle(.plain)
 
             readerAvatar
@@ -363,14 +363,57 @@ struct PostDetailOverlay: View {
             in: .capsule
         )
         .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
-        .confirmationDialog("回复排序", isPresented: $showSortDialog, titleVisibility: .visible) {
-            ForEach(ReplySort.allCases) { sort in
-                Button(topic.replySort == sort ? "✓ \(sort.label)" : sort.label) {
-                    topic.applySort(sort)
+        .sheet(isPresented: $showSortDialog) { replySortSheet }
+    }
+
+    /// Reply sort picker, styled like the node list's "话题排序依据" sheet.
+    private var replySortSheet: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ForEach(ReplySort.allCases) { option in
+                    Button {
+                        showSortDialog = false
+                        topic.applySort(option)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: option.icon)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(topic.replySort == option ? Theme.accent : Theme.muted(0.55))
+                                .frame(width: 26)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.label)
+                                    .font(Theme.body(15, weight: .semibold))
+                                    .foregroundStyle(Theme.text)
+                                Text(option.detail)
+                                    .font(Theme.body(11))
+                                    .foregroundStyle(Theme.muted(0.5))
+                            }
+
+                            Spacer(minLength: 0)
+
+                            if topic.replySort == option {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 13)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(topic.replySort == option ? Theme.accent.opacity(0.07) : .clear)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
+                Spacer(minLength: 0)
             }
-            Button("取消", role: .cancel) {}
+            .padding(.top, 6)
+            .background(Theme.bg)
+            .navigationTitle("回复排序依据")
+            .navigationBarTitleDisplayMode(.inline)
         }
+        .standardSheet([.medium])
     }
 
     private func readerToolIcon(_ systemImage: String) -> some View {
