@@ -447,18 +447,28 @@ struct PostImageView: View {
     let image: PostImage
     let onTap: () -> Void
 
+    private var resolvedURL: URL? { PostInlineRenderer.resolvedLink(image.src) }
+    private var isGIF: Bool { resolvedURL?.pathExtension.lowercased() == "gif" }
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
 
-        CachedRemoteImage(url: PostInlineRenderer.resolvedLink(image.src)) { loaded in
-            loaded
-                .resizable()
-                .scaledToFit()
-        } placeholder: {
-            Theme.hover.overlay {
-                Image(systemName: "photo")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.4))
+        Group {
+            if isGIF, let url = resolvedURL {
+                // GIFs must animate — CachedRemoteImage decodes a single frame.
+                AnimatedGIFView(url: url)
+            } else {
+                CachedRemoteImage(url: resolvedURL) { loaded in
+                    loaded
+                        .resizable()
+                        .scaledToFit()
+                } placeholder: {
+                    Theme.hover.overlay {
+                        Image(systemName: "photo")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(Theme.muted(0.4))
+                    }
+                }
             }
         }
         .aspectRatio(image.aspectRatio, contentMode: .fit)
@@ -468,6 +478,111 @@ struct PostImageView: View {
         .contentShape(shape)
         .onTapGesture(perform: onTap)
         .accessibilityLabel(image.alt ?? "图片")
+    }
+}
+
+// MARK: - Animated GIF
+
+/// Displays an animated GIF (a `UIImageView` auto-animates a multi-frame
+/// `UIImage`). Frames are downsampled and cached off the main actor.
+private struct AnimatedGIFView: View {
+    let url: URL
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                GIFImageView(image: image)
+            } else {
+                Theme.hover.overlay {
+                    Image(systemName: "photo")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Theme.muted(0.4))
+                }
+            }
+        }
+        .task(id: url) { image = await AnimatedGIFStore.shared.load(url) }
+    }
+}
+
+private struct GIFImageView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        view.image = image
+        view.startAnimating()
+    }
+}
+
+@MainActor
+final class AnimatedGIFStore {
+    static let shared = AnimatedGIFStore()
+    private let cache = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+
+    private init() { cache.countLimit = 24 }
+
+    func load(_ url: URL) async -> UIImage? {
+        let key = url.absoluteString
+        if let cached = cache.object(forKey: key as NSString) { return cached }
+        if let existing = inFlight[key] { return await existing.value }
+
+        let task = Task<UIImage?, Never> {
+            guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+            return await Task.detached { Self.animatedImage(from: data, maxPixel: 900) }.value
+        }
+        inFlight[key] = task
+        let image = await task.value
+        inFlight[key] = nil
+        if let image { cache.setObject(image, forKey: key as NSString) }
+        return image
+    }
+
+    /// Builds an animated `UIImage` from GIF data, downsampling each frame.
+    nonisolated static func animatedImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return UIImage(data: data)
+        }
+        let count = CGImageSourceGetCount(source)
+        guard count > 1 else { return UIImage(data: data) }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+
+        var frames: [UIImage] = []
+        var duration: Double = 0
+        for index in 0..<count {
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else { continue }
+            frames.append(UIImage(cgImage: cg))
+            duration += frameDelay(source, index)
+        }
+        guard !frames.isEmpty else { return UIImage(data: data) }
+        return UIImage.animatedImage(with: frames, duration: duration)
+    }
+
+    private nonisolated static func frameDelay(_ source: CGImageSource, _ index: Int) -> Double {
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+        let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+        let unclamped = gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double
+        let clamped = gif?[kCGImagePropertyGIFDelayTime] as? Double
+        let delay = unclamped ?? clamped ?? 0.1
+        // Browsers clamp very short delays to ~0.1s.
+        return delay < 0.02 ? 0.1 : delay
     }
 }
 
