@@ -237,7 +237,7 @@ struct ChatConversationMessage: Identifiable, Hashable {
     }
 }
 
-enum NotificationKind { case like, comment, message, success, star }
+enum NotificationKind { case like, comment, message, success, star, system }
 
 struct AppNotification: Identifiable {
     let id: Int

@@ -2743,7 +2743,10 @@ final class MessageCenterStore {
         switch notification.notificationType {
         case 5:
             kind = .like
-        case 6, 7, 16:
+        case 16:
+            // group_message_summary — a system notice about a group inbox.
+            kind = .system
+        case 6, 7:
             kind = .message
         case 1, 2, 3, 9:
             kind = .comment
@@ -2753,7 +2756,9 @@ final class MessageCenterStore {
             kind = .star
         }
 
-        let name = notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC"
+        let name = kind == .system
+            ? "系统通知"
+            : (notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC")
         return AppNotification(
             id: notification.id,
             kind: kind,
@@ -2766,6 +2771,13 @@ final class MessageCenterStore {
     }
 
     private func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
+        if kind == .system {
+            let group = notification.data?.groupName ?? "群组"
+            if let count = notification.data?.inboxCount {
+                return "您的 \(group) 收件箱有 \(count) 条消息"
+            }
+            return "您的 \(group) 收件箱有新消息"
+        }
         if kind == .message {
             if let title = notification.data?.topicTitle { return title }
             return "给你发了一条私信"
@@ -2817,12 +2829,15 @@ final class NotificationsStore {
         let kind: NotificationKind
         switch notification.notificationType {
         case 5: kind = .like
-        case 6, 7, 16: kind = .message
+        case 16: kind = .system
+        case 6, 7: kind = .message
         case 1, 2, 3, 9: kind = .comment
         case 12: kind = .star
         default: kind = .star
         }
-        let name = notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC"
+        let name = kind == .system
+            ? "系统通知"
+            : (notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC")
         return AppNotification(
             id: notification.id,
             kind: kind,
@@ -2835,6 +2850,13 @@ final class NotificationsStore {
     }
 
     private func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
+        if kind == .system {
+            let group = notification.data?.groupName ?? "群组"
+            if let count = notification.data?.inboxCount {
+                return "您的 \(group) 收件箱有 \(count) 条消息"
+            }
+            return "您的 \(group) 收件箱有新消息"
+        }
         if let title = notification.data?.topicTitle {
             switch kind {
             case .like: return "liked your post in \(title)"

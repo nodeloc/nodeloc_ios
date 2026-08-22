@@ -78,6 +78,7 @@ private struct NotificationRow: View {
         case .message: return "envelope.fill"
         case .success: return "checkmark"
         case .star: return "star.fill"
+        case .system: return "bell.fill"
         }
     }
     private var iconWeight: Font.Weight {
@@ -90,6 +91,7 @@ private struct NotificationRow: View {
         case .message: return Theme.text
         case .success: return Theme.success
         case .star: return Theme.accent2_600
+        case .system: return Theme.accent700
         }
     }
     private var iconBg: Color {
@@ -99,6 +101,7 @@ private struct NotificationRow: View {
         case .message: return Theme.surface.blended(with: Theme.text, fraction: 0.08)
         case .success: return Theme.surface.blended(with: Theme.success, fraction: 0.15)
         case .star: return Theme.surface.blended(with: Theme.accent2_500, fraction: 0.18)
+        case .system: return Theme.surface.blended(with: Theme.accent, fraction: 0.15)
         }
     }
 }

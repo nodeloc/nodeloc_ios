@@ -897,6 +897,8 @@ struct NotificationData: Decodable {
     let badgeId: Int?
     let badgeSlug: String?
     let groupName: String?
+    /// group_message_summary: how many messages are in the group inbox.
+    let inboxCount: Int?
     let chatChannelId: Int?
     let chatMessageId: Int?
 }
