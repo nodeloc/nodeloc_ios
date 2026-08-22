@@ -442,7 +442,8 @@ struct TopicPost: Decodable, Identifiable {
     let redEnvelopeClaim: RedEnvelopeClaim?
     /// Nested-view (`/n/…`) only: direct replies inlined under this post (up to
     /// a few), and the total direct-reply count so the UI knows more remain.
-    let children: [TopicPost]?
+    /// `var` so more can be appended from the children endpoint.
+    var children: [TopicPost]?
     let directReplyCount: Int?
 
     /// Like count lives in actions_summary with action id 2.
@@ -459,6 +460,14 @@ struct NestedTopicResponse: Decodable {
     let page: Int?
     let sort: String?
     let effectiveSort: String?
+}
+
+/// `GET /n/{slug}/{id}/children/{postNumber}.json` — more direct replies under
+/// one post. `hasMore` is 0/1 on the wire.
+struct NestedChildrenResponse: Decodable {
+    let children: [TopicPost]?
+    let hasMore: Int?
+    let page: Int?
 }
 
 // MARK: - Poll (poll plugin)

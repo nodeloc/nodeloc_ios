@@ -105,6 +105,11 @@ struct PostComment: Identifiable {
     /// its "nest group". Comments render grouped by this, with a gap between
     /// groups.
     let groupID: Int
+    /// When true this row isn't a reply but a "load N more replies" affordance
+    /// under `loadMoreParent`.
+    let isLoadMore: Bool
+    let loadMoreParent: Int
+    let loadMoreRemaining: Int
 
     init(
         id: Int,
@@ -122,7 +127,10 @@ struct PostComment: Identifiable {
         isLastSibling: Bool = true,
         ancestorTrails: [Bool] = [],
         hasChildren: Bool = false,
-        groupID: Int = 0
+        groupID: Int = 0,
+        isLoadMore: Bool = false,
+        loadMoreParent: Int = 0,
+        loadMoreRemaining: Int = 0
     ) {
         self.id = id
         self.author = author
@@ -140,6 +148,9 @@ struct PostComment: Identifiable {
         self.ancestorTrails = ancestorTrails
         self.hasChildren = hasChildren
         self.groupID = groupID
+        self.isLoadMore = isLoadMore
+        self.loadMoreParent = loadMoreParent
+        self.loadMoreRemaining = loadMoreRemaining
     }
 
     /// Convenience for sample data and previews, where the body is a literal

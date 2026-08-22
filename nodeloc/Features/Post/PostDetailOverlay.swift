@@ -551,22 +551,26 @@ struct PostDetailOverlay: View {
                             groupSeparator
                         }
 
-                        NestedReplyRow(
-                            comment: comment,
-                            isCollapsed: collapsedCommentIDs.contains(comment.id),
-                            onToggleCollapse: { toggleCollapse(comment) },
-                            onOpenAuthor: { openProfile($0) },
-                            onImageTap: { image in
-                                // Page through just this reply's images.
-                                let images = comment.content.images
-                                viewerImages = images
-                                viewerIndex = images.firstIndex { $0.src == image.src } ?? 0
-                            }
-                        )
-                        // Scroll anchor for notification deep links (/t/…/<post>).
-                        .id(comment.postNumber)
-                        // Credit read time to this reply while it's on screen.
-                        .onScrollVisibilityChange(threshold: 0.5) { reader.setVisible(comment.postNumber, $0) }
+                        if comment.isLoadMore {
+                            loadMoreChildrenRow(comment)
+                        } else {
+                            NestedReplyRow(
+                                comment: comment,
+                                isCollapsed: collapsedCommentIDs.contains(comment.id),
+                                onToggleCollapse: { toggleCollapse(comment) },
+                                onOpenAuthor: { openProfile($0) },
+                                onImageTap: { image in
+                                    // Page through just this reply's images.
+                                    let images = comment.content.images
+                                    viewerImages = images
+                                    viewerIndex = images.firstIndex { $0.src == image.src } ?? 0
+                                }
+                            )
+                            // Scroll anchor for notification deep links (/t/…/<post>).
+                            .id(comment.postNumber)
+                            // Credit read time to this reply while it's on screen.
+                            .onScrollVisibilityChange(threshold: 0.5) { reader.setVisible(comment.postNumber, $0) }
+                        }
                     }
 
                     if topic.hasMoreComments {
@@ -575,6 +579,32 @@ struct PostDetailOverlay: View {
                 }
             }
         }
+    }
+
+    /// A "view N more replies" affordance under a nested post, indented to match
+    /// where those replies will appear.
+    private func loadMoreChildrenRow(_ comment: PostComment) -> some View {
+        Button {
+            Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
+        } label: {
+            HStack(spacing: 6) {
+                if topic.isLoadingChildren(comment.loadMoreParent) {
+                    ProgressView().tint(Theme.accent)
+                } else {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                Text("查看 \(comment.loadMoreRemaining) 条回复")
+                    .font(Theme.body(13, weight: .semibold))
+            }
+            .foregroundStyle(Theme.accent)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .padding(.leading, CGFloat(min(comment.nestingDepth, 5)) * 16 + 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(topic.isLoadingChildren(comment.loadMoreParent))
     }
 
     // MARK: Skeleton

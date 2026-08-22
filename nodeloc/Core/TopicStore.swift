@@ -143,6 +143,10 @@ final class TopicStore {
     private var nestedRoots: [TopicPost] = []
     private var nestedPage = 0
     private(set) var nestedHasMore = false
+    /// Next children page to fetch per parent post number, and which parents
+    /// have a fetch in flight (drives the per-node "load more" spinner).
+    private var childPages: [Int: Int] = [:]
+    private(set) var loadingChildren: Set<Int> = []
     /// Parsed bodies keyed by post id + edit version, so scrolling back through
     /// a long topic doesn't re-parse HTML that hasn't changed.
     private let contentCache = ParsedContentCache.shared
@@ -194,7 +198,14 @@ final class TopicStore {
     /// Loads (or appends) the nested reply tree for the current `replySort`.
     private func loadNested(reset: Bool) async {
         guard let topicID else { return }
-        if reset { nestedPage = 0 } else { nestedPage += 1; isLoadingMore = true }
+        if reset {
+            nestedPage = 0
+            childPages = [:]
+            loadingChildren = []
+        } else {
+            nestedPage += 1
+            isLoadingMore = true
+        }
         defer { if !reset { isLoadingMore = false } }
         do {
             let response = try await client.nestedTopic(
@@ -210,6 +221,56 @@ final class TopicStore {
         } catch {
             if reset { nestedRoots = []; comments = [] }
         }
+    }
+
+    func isLoadingChildren(_ postNumber: Int) -> Bool {
+        loadingChildren.contains(postNumber)
+    }
+
+    /// Fetches the next page of direct replies under one post and splices them
+    /// into that node, then rebuilds the thread rows.
+    func loadMoreChildren(parentPostNumber: Int) async {
+        guard let topicID, !loadingChildren.contains(parentPostNumber) else { return }
+        loadingChildren.insert(parentPostNumber)
+        defer { loadingChildren.remove(parentPostNumber) }
+
+        let page = childPages[parentPostNumber] ?? 0
+        do {
+            let response = try await client.nestedChildren(
+                topicID: topicID,
+                postNumber: parentPostNumber,
+                sort: replySort.apiValue,
+                page: page
+            )
+            childPages[parentPostNumber] = page + 1
+            let fetched = response.children ?? []
+            guard !fetched.isEmpty else { return }
+            appendChildren(fetched, toParent: parentPostNumber, in: &nestedRoots)
+            await parseContents(for: flatten(fetched))
+            comments = buildNestedComments(from: nestedRoots)
+        } catch {
+            // Leave the affordance in place so the user can retry.
+        }
+    }
+
+    /// Appends children under the post with `parentNumber`, deduping by id so a
+    /// page that overlaps the inlined preview doesn't double up.
+    @discardableResult
+    private func appendChildren(_ newKids: [TopicPost], toParent parentNumber: Int, in posts: inout [TopicPost]) -> Bool {
+        for index in posts.indices {
+            if posts[index].postNumber == parentNumber {
+                let existing = Set((posts[index].children ?? []).map(\.id))
+                posts[index].children = (posts[index].children ?? []) + newKids.filter { !existing.contains($0.id) }
+                return true
+            }
+            if var kids = posts[index].children {
+                if appendChildren(newKids, toParent: parentNumber, in: &kids) {
+                    posts[index].children = kids
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Re-fetches the replies with a new server sort.
@@ -427,11 +488,30 @@ final class TopicStore {
                     groupID: groupID
                 )
             )
-            guard !kids.isEmpty else { return }
             let nextTrails = trails + [!isLast]
             let last = kids.count - 1
             for (index, kid) in kids.enumerated() {
                 append(kid, parent: post, depth: depth + 1, isLast: index == last, trails: nextTrails, groupID: groupID)
+            }
+
+            // More direct replies exist than are loaded → a "load more" row.
+            let remaining = (post.directReplyCount ?? 0) - kids.count
+            if remaining > 0, let parentNumber = post.postNumber {
+                result.append(
+                    PostComment(
+                        id: -post.id,
+                        author: "",
+                        time: "",
+                        content: .empty,
+                        votes: 0,
+                        nestingDepth: min(depth + 1, 4),
+                        ancestorTrails: nextTrails,
+                        groupID: groupID,
+                        isLoadMore: true,
+                        loadMoreParent: parentNumber,
+                        loadMoreRemaining: remaining
+                    )
+                )
             }
         }
 

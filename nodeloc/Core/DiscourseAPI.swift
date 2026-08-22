@@ -231,6 +231,17 @@ struct DiscourseClient {
         )
     }
 
+    /// More direct replies under one post in the nested view.
+    func nestedChildren(topicID: Int, postNumber: Int, slug: String = "topic", sort: String, page: Int = 0) async throws -> NestedChildrenResponse {
+        try await get(
+            "n/\(slug)/\(topicID)/children/\(postNumber).json",
+            query: [
+                URLQueryItem(name: "sort", value: sort),
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+        )
+    }
+
     func topicPosts(topicID: Int, postIDs: [Int]) async throws -> TopicPostsResponse {
         try await get(
             "t/\(topicID)/posts.json",
