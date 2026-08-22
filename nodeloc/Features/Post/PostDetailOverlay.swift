@@ -593,33 +593,31 @@ struct PostDetailOverlay: View {
             ? CGFloat(depth) * NestedReplyRow.indentStep + NestedReplyRow.railContentGap
             : 0
 
-        return ZStack(alignment: .topLeading) {
-            // Same rails as the replies, so the row lines up beside the vertical
-            // thread line at its level.
+        return Button {
+            Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
+        } label: {
+            HStack(spacing: 5) {
+                Text("另外 \(comment.loadMoreRemaining) 个回复")
+                    .font(Theme.body(13, weight: .semibold))
+                if topic.isLoadingChildren(comment.loadMoreParent) {
+                    ProgressView().controlSize(.mini).tint(Theme.muted(0.5))
+                } else {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .bold))
+                }
+            }
+            .foregroundStyle(Theme.muted(0.55))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 9)
+            .padding(.leading, leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(topic.isLoadingChildren(comment.loadMoreParent))
+        // Same rails as the replies so it lines up beside the level's thread line.
+        .background(alignment: .leading) {
             RedditThreadRails(depth: depth)
                 .frame(width: leading)
-
-            Button {
-                Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
-            } label: {
-                HStack(spacing: 5) {
-                    Text("另外 \(comment.loadMoreRemaining) 个回复")
-                        .font(Theme.body(13, weight: .semibold))
-                    if topic.isLoadingChildren(comment.loadMoreParent) {
-                        ProgressView().controlSize(.mini).tint(Theme.muted(0.5))
-                    } else {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                }
-                .foregroundStyle(Theme.muted(0.55))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 9)
-                .padding(.leading, leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(topic.isLoadingChildren(comment.loadMoreParent))
         }
     }
 
@@ -758,42 +756,43 @@ private struct NestedReplyRow: View {
     var onImageTap: ((PostImage) -> Void)?
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        VStack(alignment: .leading, spacing: 8) {
+            replyHeader
+
+            if isCollapsed {
+                Text("Replies hidden")
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.muted(0.42))
+            } else {
+                PostContentView(
+                    content: comment.content,
+                    metrics: .reply,
+                    onImageTap: onImageTap
+                )
+
+                // The red envelope plugin auto-claims on reply, so this is
+                // the outcome of posting rather than an action to take.
+                if let claim = comment.redEnvelopeClaim, let points = claim.points {
+                    Label("领取了 \(points) 能量", systemImage: "yensign.circle.fill")
+                        .font(Theme.body(11, weight: .semibold))
+                        .foregroundStyle(Theme.danger)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Theme.danger.opacity(0.1), in: Capsule())
+                }
+
+                actionBar
+            }
+        }
+        .padding(.leading, contentLeading)
+        .padding(.vertical, Self.verticalPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Rails as a background so the Canvas gets the row's exact height
+        // (in a ZStack the greedy Canvas could collapse and draw nothing).
+        .background(alignment: .leading) {
             RedditThreadRails(depth: railDepth)
                 .frame(width: contentLeading)
-
-            VStack(alignment: .leading, spacing: 8) {
-                replyHeader
-
-                if isCollapsed {
-                    Text("Replies hidden")
-                        .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.42))
-                } else {
-                    PostContentView(
-                        content: comment.content,
-                        metrics: .reply,
-                        onImageTap: onImageTap
-                    )
-
-                    // The red envelope plugin auto-claims on reply, so this is
-                    // the outcome of posting rather than an action to take.
-                    if let claim = comment.redEnvelopeClaim, let points = claim.points {
-                        Label("领取了 \(points) 能量", systemImage: "yensign.circle.fill")
-                            .font(Theme.body(11, weight: .semibold))
-                            .foregroundStyle(Theme.danger)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Theme.danger.opacity(0.1), in: Capsule())
-                    }
-
-                    actionBar
-                }
-            }
-            .padding(.leading, contentLeading)
-            .padding(.vertical, Self.verticalPadding)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         // The indent grows with nesting depth. Without clipping, a deep reply
         // is wider than the screen and the ScrollView adopts that width,
         // dragging every sibling — banner, images, other replies — with it.
