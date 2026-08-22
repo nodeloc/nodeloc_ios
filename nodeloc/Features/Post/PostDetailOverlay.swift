@@ -32,6 +32,7 @@ struct PostDetailOverlay: View {
     /// the topic's unread dot clears.
     @State private var reader = TopicReadTracker()
     @State private var skeletonPulse = false
+    @State private var showSortDialog = false
     @FocusState private var isReplyFocused: Bool
 
     var body: some View {
@@ -348,7 +349,7 @@ struct PostDetailOverlay: View {
             Button {} label: { readerToolIcon("slider.horizontal.3") }
                 .buttonStyle(.plain)
 
-            Button {} label: { readerToolIcon("ellipsis") }
+            Button { showSortDialog = true } label: { readerToolIcon("ellipsis") }
                 .buttonStyle(.plain)
 
             readerAvatar
@@ -362,6 +363,14 @@ struct PostDetailOverlay: View {
             in: .capsule
         )
         .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+        .confirmationDialog("回复排序", isPresented: $showSortDialog, titleVisibility: .visible) {
+            ForEach(ReplySort.allCases) { sort in
+                Button(topic.replySort == sort ? "✓ \(sort.label)" : sort.label) {
+                    topic.applySort(sort)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        }
     }
 
     private func readerToolIcon(_ systemImage: String) -> some View {

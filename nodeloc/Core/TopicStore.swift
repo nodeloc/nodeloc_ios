@@ -8,6 +8,47 @@
 import Foundation
 import UIKit
 
+/// How the top-level reply threads are ordered — mirrors Discourse's post
+/// stream orderings (chronological by default, plus newest and most-liked).
+enum ReplySort: String, CaseIterable, Identifiable {
+    case oldest
+    case newest
+    case mostLiked
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .oldest: return "最早回复"
+        case .newest: return "最新回复"
+        case .mostLiked: return "最多点赞"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .oldest: return "arrow.up"
+        case .newest: return "arrow.down"
+        case .mostLiked: return "heart"
+        }
+    }
+
+    /// Orders the root posts of each thread.
+    var rootComparator: (TopicPost, TopicPost) -> Bool {
+        switch self {
+        case .oldest:
+            return { ($0.postNumber ?? 0) < ($1.postNumber ?? 0) }
+        case .newest:
+            return { ($0.postNumber ?? 0) > ($1.postNumber ?? 0) }
+        case .mostLiked:
+            return { lhs, rhs in
+                if lhs.likeCount != rhs.likeCount { return lhs.likeCount > rhs.likeCount }
+                return (lhs.postNumber ?? 0) < (rhs.postNumber ?? 0)
+            }
+        }
+    }
+}
+
 /// Tracks which posts the reader sees and for how long, then reports it to
 /// Discourse (POST /topics/timings). That marks the posts read, accrues the
 /// user's read time and posts-read count, and clears the topic's unread dot —
@@ -71,6 +112,8 @@ final class TopicStore {
     var myPollVotes: [String: [String]] = [:]
     var lottery: PostLottery?
     var redEnvelope: TopicRedEnvelope?
+    /// How top-level reply threads are ordered.
+    private(set) var replySort: ReplySort = .oldest
     private(set) var firstPostID: Int?
     private var loadedID: Int?
     private var allPosts: [TopicPost] = []
@@ -372,7 +415,9 @@ final class TopicStore {
             }
         }
 
-        rootReplies.sort { ($0.postNumber ?? 0) < ($1.postNumber ?? 0) }
+        // Top-level threads follow the chosen sort; replies within a thread
+        // always stay chronological so a conversation reads top to bottom.
+        rootReplies.sort(by: replySort.rootComparator)
         for parentNumber in childrenByParent.keys {
             childrenByParent[parentNumber]?.sort { ($0.postNumber ?? 0) < ($1.postNumber ?? 0) }
         }
@@ -439,6 +484,13 @@ final class TopicStore {
         }
 
         return result
+    }
+
+    /// Changes the reply ordering and rebuilds the visible thread list.
+    func applySort(_ sort: ReplySort) {
+        guard sort != replySort else { return }
+        replySort = sort
+        comments = nestedComments(from: orderedPosts())
     }
 
     private var remainingPostIDs: [Int] {
