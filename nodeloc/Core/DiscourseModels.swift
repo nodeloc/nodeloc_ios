@@ -839,9 +839,44 @@ struct CurrentUser: Decodable {
     /// Account preferences. Modelled by `UserPreferences`, which also carries
     /// discourse-community's `community_view_mode`.
     let userOption: UserPreferences?
+    /// Unread counts for the inbox tab badge. `unreadNotifications` excludes
+    /// PMs; `newPersonalMessagesNotificationsCount` is the unread-PM count.
+    let unreadNotifications: Int?
+    let newPersonalMessagesNotificationsCount: Int?
 }
 
 struct CurrentUserResponse: Decodable { let currentUser: CurrentUser }
+
+// MARK: - Private messages
+
+/// `GET /topics/private-messages/<username>.json`. Same envelope as the topic
+/// lists, but the topics carry PM-only fields: read state and participants.
+struct PrivateMessagesResponse: Decodable {
+    let users: [DiscourseUser]?
+    let topicList: PrivateMessageList
+
+    struct PrivateMessageList: Decodable {
+        let topics: [PrivateMessageTopic]
+    }
+}
+
+struct PrivateMessageTopic: Decodable, Identifiable {
+    let id: Int
+    let title: String?
+    let fancyTitle: String?
+    let slug: String?
+    let lastPostedAt: String?
+    let bumpedAt: String?
+    let excerpt: String?
+    /// Unread = `lastReadPostNumber < highestPostNumber` (a nil last-read on a
+    /// PM you were just added to also counts as unread).
+    let highestPostNumber: Int?
+    let lastReadPostNumber: Int?
+    /// Everyone on the thread; the counterpart is whoever isn't the current
+    /// user. Users (avatars, names) are resolved from the top-level `users`.
+    let participants: [TopicPoster]?
+    let posters: [TopicPoster]?
+}
 
 // MARK: - Notifications
 

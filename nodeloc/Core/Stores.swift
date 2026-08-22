@@ -2487,11 +2487,16 @@ enum NotificationRouting {
 @MainActor
 @Observable
 final class MessageCenterStore {
+    /// Shared so the bottom tab's unread badge and the inbox read the same
+    /// counts without each fetching their own.
+    static let shared = MessageCenterStore()
+
     private let client = DiscourseClient()
-    private let privateMessageNotificationTypes: Set<Int> = [6, 7, 16]
 
     var notifications: [AppNotification] = []
-    var privateMessages: [AppNotification] = []
+    /// Real private-message conversations (from /topics/private-messages),
+    /// not the PM-typed notifications the old code derived.
+    var conversations: [PMConversation] = []
     var chats: [Chat] = []
     var threads: [ChatThreadListItem] = []
     var chatSearchResults: [ChatSearchResult] = []
@@ -2500,16 +2505,35 @@ final class MessageCenterStore {
     var needsLogin = false
     var errorText: String?
     var chatSearchErrorText: String?
+
+    // Unread counts for the tab badge. Notifications and PMs come from the
+    // current-user payload; chat is summed from the loaded channels.
+    var unreadNotifications = 0
+    var unreadPrivateMessages = 0
+    var unreadChat = 0
+    /// What the bottom Message tab badges.
+    var unreadTotal: Int { unreadNotifications + unreadPrivateMessages + unreadChat }
+
     private var loaded = false
     private var chatSearchRequestID: UUID?
+
+    /// Forces the next `load()` to hit the network — used when re-entering the
+    /// inbox so counts and lists reflect anything read elsewhere.
+    func reload() async {
+        loaded = false
+        await load()
+    }
 
     func load() async {
         guard DiscourseAuth.shared.isAuthenticated else {
             needsLogin = true
             notifications = []
-            privateMessages = []
+            conversations = []
             chats = []
             threads = []
+            unreadNotifications = 0
+            unreadPrivateMessages = 0
+            unreadChat = 0
             return
         }
         needsLogin = false
@@ -2519,19 +2543,34 @@ final class MessageCenterStore {
         errorText = nil
         defer { isLoading = false }
 
+        // Unread counts (notifications + PMs) ride along on the current user.
+        if let current = try? await client.currentUser().currentUser {
+            unreadNotifications = current.unreadNotifications ?? 0
+            unreadPrivateMessages = current.newPersonalMessagesNotificationsCount ?? 0
+        }
+
         do {
             let response = try await client.notifications()
             notifications = response.notifications.map(map(notification:))
-            privateMessages = response.notifications
-                .filter { privateMessageNotificationTypes.contains($0.notificationType) }
-                .map(map(notification:))
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        if let username = DiscourseAuth.shared.username {
+            do {
+                let response = try await client.privateMessages(username: username)
+                conversations = Self.conversations(from: response, client: client)
+            } catch {
+                if errorText == nil {
+                    errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
         }
 
         do {
             let response = try await client.chatChannels()
             chats = ChatListMapper.chats(from: response)
+            unreadChat = chats.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
         } catch {
             if errorText == nil {
                 errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -2548,6 +2587,50 @@ final class MessageCenterStore {
         }
 
         loaded = true
+    }
+
+    /// Maps a PM list into conversation rows: the counterpart is whoever on the
+    /// thread isn't the current user, its avatar resolved from the top-level
+    /// `users`, and unread is last-read trailing the highest post.
+    private static func conversations(
+        from response: PrivateMessagesResponse,
+        client: DiscourseClient
+    ) -> [PMConversation] {
+        let usersByID = Dictionary(
+            (response.users ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let me = DiscourseAuth.shared.username
+
+        return response.topicList.topics.map { topic in
+            // Prefer a participant who isn't me; fall back to the first.
+            let participantIDs = (topic.participants ?? []).compactMap(\.userId)
+            let counterpartID = participantIDs.first { usersByID[$0]?.username != me }
+                ?? participantIDs.first
+            let counterpart = counterpartID.flatMap { usersByID[$0] }
+
+            let name = counterpart?.name?.isEmpty == false
+                ? (counterpart?.name ?? "")
+                : (counterpart?.username ?? "私信")
+            let avatarURL = counterpart?.avatarTemplate.flatMap {
+                client.avatarURL(template: $0, size: 120)
+            }
+
+            let highest = topic.highestPostNumber ?? 0
+            let lastRead = topic.lastReadPostNumber ?? 0
+            let unread = lastRead < highest
+
+            return PMConversation(
+                id: topic.id,
+                title: topic.fancyTitle ?? topic.title ?? name,
+                counterpart: name,
+                avatarURL: avatarURL,
+                letter: String(name.prefix(1)).uppercased(),
+                variant: topic.id % 5,
+                time: DiscourseFormat.relative(topic.lastPostedAt ?? topic.bumpedAt),
+                unread: unread
+            )
+        }
     }
 
     func searchChatMessages(query: String) async {

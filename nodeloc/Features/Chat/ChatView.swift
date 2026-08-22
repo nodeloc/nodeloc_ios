@@ -9,11 +9,13 @@ import UniformTypeIdentifiers
 
 private enum MessagePane: CaseIterable {
     case notifications
+    case privateMessages
     case chat
 
     var title: String {
         switch self {
         case .notifications: return "通知"
+        case .privateMessages: return "私信"
         case .chat: return "聊天"
         }
     }
@@ -88,7 +90,7 @@ private enum ChatRoute: Hashable {
 
 struct ChatView: View {
     @Environment(AppState.self) private var app
-    @State private var store = MessageCenterStore()
+    @State private var store = MessageCenterStore.shared
     @State private var selection: MessagePane = .notifications
     @State private var chatFilter: ChatInboxFilter = .messages
     @State private var chatSearchText = ""
@@ -200,6 +202,14 @@ struct ChatView: View {
         .padding(.bottom, 18)
     }
 
+    private func count(for pane: MessagePane) -> Int {
+        switch pane {
+        case .notifications: return store.unreadNotifications
+        case .privateMessages: return store.unreadPrivateMessages
+        case .chat: return store.unreadChat
+        }
+    }
+
     private var messageTabs: some View {
         HStack(spacing: 0) {
             ForEach(MessagePane.allCases, id: \.self) { pane in
@@ -209,9 +219,19 @@ struct ChatView: View {
                     }
                 } label: {
                     VStack(spacing: 10) {
-                        Text(pane.title)
-                            .font(Theme.body(18, weight: selection == pane ? .semibold : .medium))
-                            .foregroundStyle(selection == pane ? Theme.text : Theme.muted(0.5))
+                        HStack(spacing: 6) {
+                            Text(pane.title)
+                                .font(Theme.body(18, weight: selection == pane ? .semibold : .medium))
+                                .foregroundStyle(selection == pane ? Theme.text : Theme.muted(0.5))
+                            if count(for: pane) > 0 {
+                                Text("\(count(for: pane))")
+                                    .font(Theme.body(11, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(minWidth: 18, minHeight: 18)
+                                    .padding(.horizontal, 3)
+                                    .background(Theme.accent, in: Capsule())
+                            }
+                        }
                         Rectangle()
                             .fill(selection == pane ? Theme.accent : Color.clear)
                             .frame(width: 56, height: 3)
@@ -247,6 +267,8 @@ struct ChatView: View {
                 switch selection {
                 case .notifications:
                     notificationList(store.notifications, emptyTitle: "暂无通知", emptyIcon: "bell")
+                case .privateMessages:
+                    privateMessageList
                 case .chat:
                     chatFilteredContent
                 }
@@ -321,6 +343,23 @@ struct ChatView: View {
 
             if !store.isLoading && items.isEmpty {
                 emptyState(title: emptyTitle, icon: emptyIcon)
+            }
+        }
+    }
+
+    private var privateMessageList: some View {
+        Group {
+            ForEach(store.conversations) { conversation in
+                Button {
+                    app.openTopic(id: conversation.id)
+                } label: {
+                    PMConversationRow(conversation: conversation)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if !store.isLoading && store.conversations.isEmpty {
+                emptyState(title: "暂无私信", icon: "envelope")
             }
         }
     }
@@ -623,7 +662,7 @@ private struct MessageNotificationRow: View {
     private var icon: String {
         switch notification.kind {
         case .like: return "heart.fill"
-        case .comment: return "bubble.left"
+        case .comment: return "arrowshape.turn.up.left.fill"
         case .message: return "envelope.fill"
         case .success: return "checkmark"
         case .star: return "star.fill"
@@ -651,6 +690,53 @@ private struct MessageNotificationRow: View {
         case .message: return Theme.surface.blended(with: Theme.text, fraction: 0.08)
         case .success: return Theme.surface.blended(with: Theme.success, fraction: 0.15)
         case .star: return Theme.surface.blended(with: Theme.accent2_500, fraction: 0.18)
+        }
+    }
+}
+
+private struct PMConversationRow: View {
+    let conversation: PMConversation
+
+    var body: some View {
+        HStack(spacing: 13) {
+            RemoteAvatar(
+                url: conversation.avatarURL,
+                letter: conversation.letter,
+                variant: conversation.variant,
+                size: 42
+            )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(conversation.counterpart)
+                        .font(Theme.body(15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(conversation.time)
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.muted(0.5))
+                        .lineLimit(1)
+                }
+
+                Text(conversation.title)
+                    .font(Theme.body(14))
+                    .foregroundStyle(Theme.text.opacity(0.68))
+                    .lineLimit(2)
+            }
+
+            if conversation.unread {
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: 8, height: 8)
+            }
+        }
+        .padding(.vertical, 13)
+        .padding(.horizontal, 20)
+        .contentShape(Rectangle())
+        .background(conversation.unread ? Theme.accent.opacity(0.05) : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.divider).frame(height: 1)
         }
     }
 }

@@ -302,6 +302,10 @@ struct DiscourseClient {
         try await get("notifications.json")
     }
 
+    func privateMessages(username: String) async throws -> PrivateMessagesResponse {
+        try await get("topics/private-messages/\(username).json")
+    }
+
     func chatChannels() async throws -> ChatChannelsResponse {
         do {
             return try await get("chat/api/me/channels.json")

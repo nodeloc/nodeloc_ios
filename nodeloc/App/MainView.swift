@@ -12,6 +12,8 @@ struct MainView: View {
     @Namespace private var postTransitionNamespace
     @State private var lastContentTab: Tab = .home
     @State private var profileTabAvatar = ProfileTabAvatarStore()
+    /// Drives the Message tab's unread badge; shared with the inbox.
+    @State private var inbox = MessageCenterStore.shared
 
     var body: some View {
         @Bindable var app = app
@@ -56,6 +58,7 @@ struct MainView: View {
                         Image(systemName: "bubble.left.and.bubble.right")
                         Text("Message")
                     }
+                    .badge(inbox.unreadTotal)
 
                     SwiftUI.Tab(value: Tab.profile) {
                         tabContent {
@@ -112,6 +115,11 @@ struct MainView: View {
         }
         .task(id: profileTabAvatarTaskID) {
             await profileTabAvatar.load(isSignedIn: app.authed && !app.isGuest)
+        }
+        .task(id: app.authed) {
+            // Populate the Message tab's unread badge without waiting for the
+            // user to open the inbox.
+            await inbox.load()
         }
         .onChange(of: app.tab) { oldValue, newValue in
             if newValue == .search {

@@ -74,7 +74,7 @@ private struct NotificationRow: View {
     private var icon: String {
         switch notification.kind {
         case .like: return "heart.fill"
-        case .comment: return "bubble.left"
+        case .comment: return "arrowshape.turn.up.left.fill"
         case .message: return "envelope.fill"
         case .success: return "checkmark"
         case .star: return "star.fill"

@@ -252,6 +252,18 @@ struct AppNotification: Identifiable {
     var url: URL? = nil
 }
 
+struct PMConversation: Identifiable {
+    /// The PM topic id — tapping opens it as a native post detail.
+    let id: Int
+    let title: String
+    let counterpart: String
+    let avatarURL: URL?
+    let letter: String
+    let variant: Int
+    let time: String
+    let unread: Bool
+}
+
 struct Community: Identifiable {
     let id: Int
     let name: String
