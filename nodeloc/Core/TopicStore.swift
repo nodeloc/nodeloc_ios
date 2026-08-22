@@ -215,7 +215,7 @@ final class TopicStore {
             )
             let roots = response.roots ?? []
             if reset { nestedRoots = roots } else { nestedRoots.append(contentsOf: roots) }
-            nestedHasMore = response.hasMoreRoots ?? false
+            nestedHasMore = response.hasMoreRoots?.value ?? false
             await parseContents(for: flatten(nestedRoots))
             comments = buildNestedComments(from: nestedRoots)
         } catch {

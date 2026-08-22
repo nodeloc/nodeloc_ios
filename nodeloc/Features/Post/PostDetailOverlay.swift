@@ -587,19 +587,19 @@ struct PostDetailOverlay: View {
         Button {
             Task { await topic.loadMoreChildren(parentPostNumber: comment.loadMoreParent) }
         } label: {
-            HStack(spacing: 6) {
-                if topic.isLoadingChildren(comment.loadMoreParent) {
-                    ProgressView().tint(Theme.accent)
-                } else {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                Text("查看 \(comment.loadMoreRemaining) 条回复")
+            HStack(spacing: 5) {
+                Text("另外 \(comment.loadMoreRemaining) 个回复")
                     .font(Theme.body(13, weight: .semibold))
+                if topic.isLoadingChildren(comment.loadMoreParent) {
+                    ProgressView().controlSize(.mini).tint(Theme.muted(0.5))
+                } else {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .bold))
+                }
             }
-            .foregroundStyle(Theme.accent)
+            .foregroundStyle(Theme.muted(0.55))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 8)
+            .padding(.vertical, 9)
             .padding(.leading, CGFloat(min(comment.nestingDepth, 5)) * 16 + 8)
             .contentShape(Rectangle())
         }

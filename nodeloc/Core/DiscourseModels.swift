@@ -456,18 +456,34 @@ struct TopicPost: Decodable, Identifiable {
 struct NestedTopicResponse: Decodable {
     let opPost: TopicPost?
     let roots: [TopicPost]?
-    let hasMoreRoots: Bool?
+    let hasMoreRoots: FlexibleBool?
     let page: Int?
     let sort: String?
     let effectiveSort: String?
 }
 
 /// `GET /n/{slug}/{id}/children/{postNumber}.json` — more direct replies under
-/// one post. `hasMore` is 0/1 on the wire.
+/// one post.
 struct NestedChildrenResponse: Decodable {
     let children: [TopicPost]?
-    let hasMore: Int?
+    let hasMore: FlexibleBool?
     let page: Int?
+}
+
+/// The nested endpoints return `has_more` / `has_more_roots` as either a JSON
+/// bool or 0/1 depending on the path, so decode both.
+struct FlexibleBool: Decodable {
+    let value: Bool
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let int = try? container.decode(Int.self) {
+            value = int != 0
+        } else {
+            value = false
+        }
+    }
 }
 
 // MARK: - Poll (poll plugin)
