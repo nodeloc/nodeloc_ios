@@ -29,6 +29,7 @@ struct PostDetailOverlay: View {
     /// Reports read progress (posts seen + time) so the server records it and
     /// the topic's unread dot clears.
     @State private var reader = TopicReadTracker()
+    @State private var skeletonPulse = false
     @FocusState private var isReplyFocused: Bool
 
     var body: some View {
@@ -189,12 +190,16 @@ struct PostDetailOverlay: View {
                 }
 
                 if topic.content.isEmpty {
-                    // Falls back to the list excerpt until the body arrives.
-                    Text(post.excerpt)
-                        .font(Theme.body(16))
-                        .lineSpacing(6)
-                        .foregroundStyle(Theme.text.opacity(0.88))
-                        .fixedSize(horizontal: false, vertical: true)
+                    if topic.isLoading {
+                        postBodySkeleton
+                    } else {
+                        // Falls back to the list excerpt if the body never loads.
+                        Text(post.excerpt)
+                            .font(Theme.body(16))
+                            .lineSpacing(6)
+                            .foregroundStyle(Theme.text.opacity(0.88))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else {
                     PostContentView(
                         content: topic.content,
@@ -234,18 +239,6 @@ struct PostDetailOverlay: View {
                         }
                     )
                     .padding(.top, 18)
-                }
-
-                if topic.isLoading && topic.content.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .tint(Theme.accent)
-                        Text("Loading full post")
-                            .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.42))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 16)
                 }
 
                 // No cover image here. `post.imageURL` is the feed thumbnail —
@@ -505,10 +498,7 @@ struct PostDetailOverlay: View {
 
             LazyVStack(spacing: 0) {
                 if topic.isLoading && topic.comments.isEmpty {
-                    ProgressView()
-                        .tint(Theme.accent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 28)
+                    ForEach(0..<3, id: \.self) { _ in replySkeleton }
                 } else if topic.comments.isEmpty {
                     Text("No replies yet.")
                         .font(Theme.body(13))
@@ -548,6 +538,52 @@ struct PostDetailOverlay: View {
                 }
             }
         }
+    }
+
+    // MARK: Skeleton
+
+    /// Placeholder lines for the post body while it loads.
+    private var postBodySkeleton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            skeletonLine(widthFraction: 1)
+            skeletonLine(widthFraction: 0.95)
+            skeletonLine(widthFraction: 1)
+            skeletonLine(widthFraction: 0.6)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.neutral300)
+                .frame(height: 180)
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(SkeletonPulse(active: skeletonPulse))
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                skeletonPulse = true
+            }
+        }
+    }
+
+    /// One placeholder reply row (avatar + a couple of lines).
+    private var replySkeleton: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle().fill(Theme.neutral300).frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 8) {
+                skeletonLine(widthFraction: 0.35)
+                skeletonLine(widthFraction: 0.9)
+                skeletonLine(widthFraction: 0.7)
+            }
+        }
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(SkeletonPulse(active: skeletonPulse))
+    }
+
+    private func skeletonLine(widthFraction: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(Theme.neutral300)
+            .frame(height: 13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .scaleEffect(x: widthFraction, anchor: .leading)
     }
 
     /// The short blank band between nest groups.
@@ -755,6 +791,14 @@ private struct NestedReplyRow: View {
     fileprivate static let indentStep: CGFloat = 16
     fileprivate static let railContentGap: CGFloat = 8
     fileprivate static let maxIndentLevels: Int = 5
+}
+
+/// Gentle opacity pulse for skeleton placeholders.
+private struct SkeletonPulse: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        content.opacity(active ? 0.55 : 1)
+    }
 }
 
 private struct RedditThreadRails: View {
