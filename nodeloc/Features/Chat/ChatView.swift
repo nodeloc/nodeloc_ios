@@ -399,21 +399,34 @@ struct ChatView: View {
 
     /// 个人 + one chip per group with a message inbox.
     private var pmFilterBar: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                pmFilterChip(title: "个人", isSelected: store.selectedPMGroup == nil) {
-                    Task { await store.selectPMGroup(nil) }
-                }
-                ForEach(store.messageGroups, id: \.self) { group in
-                    pmFilterChip(title: group, isSelected: store.selectedPMGroup == group) {
-                        Task { await store.selectPMGroup(group) }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    pmFilterChip(title: "个人", isSelected: store.selectedPMGroup == nil) {
+                        Task { await store.selectPMGroup(nil) }
+                    }
+                    .id(personalChipID)
+                    ForEach(store.messageGroups, id: \.self) { group in
+                        pmFilterChip(title: group, isSelected: store.selectedPMGroup == group) {
+                            Task { await store.selectPMGroup(group) }
+                        }
+                        .id(group)
                     }
                 }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
+            .scrollIndicators(.hidden)
+            // Center the active chip — chiefly when a notification jumps to a
+            // group that would otherwise sit off-screen to the right.
+            .onChange(of: store.selectedPMGroup) { _, group in
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    proxy.scrollTo(group ?? personalChipID, anchor: .center)
+                }
+            }
         }
-        .scrollIndicators(.hidden)
     }
+
+    private var personalChipID: String { "__personal__" }
 
     private func pmFilterChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button {
