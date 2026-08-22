@@ -50,6 +50,10 @@ struct ReplyComposer: View {
     @State private var isSearchingGifs = false
     @State private var gifSearchTask: Task<Void, Never>?
 
+    /// Collapsed = just the tappable "加入对话" bar; expanded = full editor.
+    @State private var expanded = false
+    private let collapseThreshold: CGFloat = 60
+
     private enum Mode { case plain, formatting }
 
     private var canSubmit: Bool {
@@ -58,6 +62,65 @@ struct ReplyComposer: View {
     }
 
     var body: some View {
+        Group {
+            if expanded {
+                expandedComposer
+            } else {
+                collapsedBar
+            }
+        }
+        .background(Theme.bg)
+        .onChange(of: expanded) { _, isExpanded in
+            focused = isExpanded
+            if !isExpanded {
+                showGiphy = false
+                mode = .plain
+                dragHeight = minHeight
+            }
+        }
+        .onChange(of: pickerItem) { _, item in
+            guard let item else { return }
+            Task { await uploadImage(item) }
+        }
+    }
+
+    /// The resting bar: tap to open the editor. Shows the in-progress draft when
+    /// there is one, so collapsing doesn't hide what you typed.
+    private var collapsedBar: some View {
+        Button {
+            if isAuthenticated { withAnimation(.quicker) { expanded = true } }
+        } label: {
+            HStack {
+                Text(collapsedText)
+                    .font(Theme.body(15))
+                    .foregroundStyle(text.isEmpty ? Theme.muted(0.45) : Theme.text)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 44)
+            .frame(maxWidth: .infinity)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Theme.divider, lineWidth: 1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isAuthenticated)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.divider).frame(height: 1)
+        }
+    }
+
+    private var collapsedText: String {
+        if !text.isEmpty { return text }
+        return isAuthenticated ? "加入对话" : "登录后参与讨论"
+    }
+
+    private var expandedComposer: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.divider).frame(height: 1)
 
@@ -73,11 +136,6 @@ struct ReplyComposer: View {
                 giphyPanel
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-        }
-        .background(Theme.bg)
-        .onChange(of: pickerItem) { _, item in
-            guard let item else { return }
-            Task { await uploadImage(item) }
         }
     }
 
@@ -107,7 +165,15 @@ struct ReplyComposer: View {
                     .onChanged { value in
                         let base = dragBase ?? editorHeight
                         if dragBase == nil { dragBase = base }
-                        dragHeight = min(max(minHeight, base - value.translation.height), maxHeight)
+                        let proposed = base - value.translation.height
+                        // Pulled down well past the shortest height → collapse
+                        // into the resting bar (dismisses the keyboard).
+                        if proposed < minHeight - collapseThreshold {
+                            dragBase = nil
+                            withAnimation(.quicker) { expanded = false }
+                            return
+                        }
+                        dragHeight = min(max(minHeight, proposed), maxHeight)
                     }
                     .onEnded { _ in dragBase = nil }
             )
