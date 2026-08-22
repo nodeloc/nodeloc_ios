@@ -18,7 +18,7 @@ nonisolated enum DiscourseConfig {
     /// Klipy API key for the GIF picker (nodeloc's discourse-gifs runs the Klipy
     /// provider). It's a public theme setting on the web; paste it here to
     /// enable the native GIF search. Empty = GIF button disabled.
-    static let klipyAPIKey = ""
+    static let klipyAPIKey = "EzZHqISrqNDXf1Jy8TdgG9WQzM1gqPlUYHoQrkZhL0X8WZIM8KL3XTSYatDZ83Bt"
 
     static func clientID() -> String {
         if let existing = UserDefaults.standard.string(forKey: clientIDDefaultsKey) {

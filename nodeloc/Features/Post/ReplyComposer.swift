@@ -19,6 +19,11 @@ struct ReplyComposer: View {
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
+    /// Draggable editor height, set by the grab handle at the top.
+    @State private var editorHeight: CGFloat = 44
+    @State private var dragBaseHeight: CGFloat?
+    private let minEditorHeight: CGFloat = 44
+    private let maxEditorHeight: CGFloat = 360
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploadingImage = false
     @State private var hasImage = false
@@ -40,20 +45,11 @@ struct ReplyComposer: View {
         VStack(spacing: 0) {
             Rectangle().fill(Theme.divider).frame(height: 1)
 
+            dragHandle
+
             hintLine
 
-            TextField(
-                isAuthenticated ? "加入对话" : "登录后参与讨论",
-                text: $text,
-                axis: .vertical
-            )
-            .font(Theme.body(15))
-            .tint(Theme.accent)
-            .lineLimit(1...6)
-            .focused($focused)
-            .disabled(!isAuthenticated)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            editor
 
             toolbar
 
@@ -80,6 +76,49 @@ struct ReplyComposer: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.top, 10)
+    }
+
+    /// Drag up to grow the editor, down to shrink it.
+    private var dragHandle: some View {
+        Capsule()
+            .fill(Theme.divider)
+            .frame(width: 40, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 20)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let base = dragBaseHeight ?? editorHeight
+                        if dragBaseHeight == nil { dragBaseHeight = base }
+                        editorHeight = min(
+                            max(minEditorHeight, base - value.translation.height),
+                            maxEditorHeight
+                        )
+                    }
+                    .onEnded { _ in dragBaseHeight = nil }
+            )
+    }
+
+    private var editor: some View {
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
+                    .font(Theme.body(15))
+                    .foregroundStyle(Theme.muted(0.4))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $text)
+                .font(Theme.body(15))
+                .tint(Theme.accent)
+                .scrollContentBackground(.hidden)
+                .focused($focused)
+                .disabled(!isAuthenticated)
+                .padding(.horizontal, 12)
+                .frame(height: editorHeight)
+        }
     }
 
     // MARK: Toolbar
