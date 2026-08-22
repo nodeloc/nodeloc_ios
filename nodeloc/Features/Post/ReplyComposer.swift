@@ -59,7 +59,11 @@ struct ReplyComposer: View {
     // Rich text is the source of truth while composing.
     @State private var rich = AttributedString()
     @State private var selection = AttributedTextSelection()
-    @State private var attachments: [Attachment] = []
+    /// Editable images (tap to open the editor), like the topic composer.
+    @State private var imageAttachments: [ComposeImageAttachment] = []
+    @State private var editingImageID: UUID?
+    /// Non-editable GIFs from Klipy.
+    @State private var gifAttachments: [GifAttachment] = []
 
     @FocusState private var focused: Bool
     @State private var mode: Mode = .plain
@@ -86,7 +90,8 @@ struct ReplyComposer: View {
     private enum Mode { case plain, formatting }
 
     private var plainText: String { String(rich.characters) }
-    private var hasImage: Bool { attachments.contains { !$0.isGif } }
+    private var hasImage: Bool { !imageAttachments.isEmpty }
+    private var hasAttachments: Bool { !imageAttachments.isEmpty || !gifAttachments.isEmpty }
 
     private var currentHeight: CGFloat {
         if isDragging { return previewHeight }
@@ -95,8 +100,7 @@ struct ReplyComposer: View {
 
     private var canSubmit: Bool {
         isAuthenticated && !isSubmitting
-            && (!plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || !attachments.isEmpty)
+            && (!plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments)
     }
 
     var body: some View {
@@ -120,13 +124,19 @@ struct ReplyComposer: View {
             // Parent cleared the draft after a successful send → reset.
             if newValue.isEmpty {
                 rich = AttributedString()
-                attachments = []
+                imageAttachments = []
+                gifAttachments = []
                 selection = AttributedTextSelection()
             }
         }
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
-            Task { await uploadImage(item) }
+            Task { await ingestPickedImage(item) }
+        }
+        .fullScreenCover(item: editingImageBinding) { target in
+            ImageEditorView(attachment: target.attachment) { edits, data in
+                applyEdit(edits, exportedData: data, to: target.attachment.id)
+            }
         }
     }
 
@@ -163,7 +173,8 @@ struct ReplyComposer: View {
 
     private var collapsedText: String {
         if !plainText.isEmpty { return plainText }
-        if !attachments.isEmpty { return "已添加 \(attachments.count) 个附件" }
+        let count = imageAttachments.count + gifAttachments.count
+        if count > 0 { return "已添加 \(count) 个附件" }
         return isAuthenticated ? "加入对话" : "登录后参与讨论"
     }
 
@@ -175,7 +186,15 @@ struct ReplyComposer: View {
             dragHandle
             hintLine
             editor
-            if !attachments.isEmpty { attachmentRow }
+            if !imageAttachments.isEmpty {
+                ComposeAttachmentStrip(
+                    attachments: imageAttachments,
+                    onTap: { editingImageID = $0.id },
+                    onDelete: { removeImage($0.id) },
+                    onRetry: { retryUpload($0.id) }
+                )
+            }
+            if !gifAttachments.isEmpty { gifAttachmentRow }
             toolbar
             if showGiphy {
                 giphyPanel
@@ -266,33 +285,42 @@ struct ReplyComposer: View {
 
     // MARK: Attachments
 
-    private var attachmentRow: some View {
+    private var gifAttachmentRow: some View {
         ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                ForEach(attachments) { attachment in
+            HStack(spacing: 12) {
+                ForEach(gifAttachments) { gif in
                     ZStack(alignment: .topTrailing) {
-                        CachedRemoteImage(url: attachment.previewURL) { image in
+                        CachedRemoteImage(url: gif.previewURL) { image in
                             image.resizable().scaledToFill()
                         } placeholder: {
                             Rectangle().fill(Theme.neutral300)
                         }
-                        .frame(width: 72, height: 72)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .frame(width: 96, height: 96)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Theme.divider, lineWidth: 1)
+                        }
 
                         Button {
-                            attachments.removeAll { $0.id == attachment.id }
+                            gifAttachments.removeAll { $0.id == gif.id }
                         } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 18))
-                                .foregroundStyle(.white, .black.opacity(0.5))
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 24, height: 24)
+                                .background(Color.black.opacity(0.72), in: Circle())
+                                .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1.5))
                         }
                         .buttonStyle(.plain)
-                        .padding(4)
+                        .offset(x: 8, y: -8)
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
+            .padding(.trailing, 10)
+            .padding(.bottom, 2)
         }
         .scrollIndicators(.hidden)
     }
@@ -439,8 +467,13 @@ struct ReplyComposer: View {
             out += wrapEmphasis(piece, mask: run.emphasis ?? 0)
         }
         var result = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        for attachment in attachments {
-            result += (result.isEmpty ? "" : "\n\n") + attachment.markdown
+        for attachment in imageAttachments {
+            if let markdown = attachment.markdown {
+                result += (result.isEmpty ? "" : "\n\n") + markdown
+            }
+        }
+        for gif in gifAttachments {
+            result += (result.isEmpty ? "" : "\n\n") + gif.markdown
         }
         return result
     }
@@ -518,21 +551,83 @@ struct ReplyComposer: View {
         .padding(.bottom, 8)
     }
 
-    // MARK: Media
+    // MARK: Image (editable, mirrors the topic composer)
 
-    private func uploadImage(_ item: PhotosPickerItem) async {
+    private func ingestPickedImage(_ item: PhotosPickerItem) async {
         isUploadingImage = true
         defer { isUploadingImage = false; pickerItem = nil }
-        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-        let isPNG = data.starts(with: [0x89, 0x50, 0x4E, 0x47])
-        let ext = isPNG ? "png" : "jpg"
-        let mime = isPNG ? "image/png" : "image/jpeg"
-        guard let upload = try? await DiscourseClient().uploadComposerMedia(
-            data: data,
-            fileName: "image-\(UUID().uuidString).\(ext)",
-            mimeType: mime
-        ), let raw = upload.url, let url = URL(string: raw) else { return }
-        attachments.append(Attachment(previewURL: url, markdown: "![image](\(raw))", isGif: false))
+        guard let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty,
+              let size = await ImageEditRenderer.pixelSize(of: data) else { return }
+
+        let type = item.supportedContentTypes.first { $0.conforms(to: .image) } ?? .jpeg
+        let ext = type.preferredFilenameExtension ?? "jpg"
+        let attachment = ComposeImageAttachment(
+            originalData: data,
+            pixelSize: size,
+            fileName: "nodeloc-image-\(UUID().uuidString).\(ext)",
+            mimeType: type.preferredMIMEType ?? "image/jpeg"
+        )
+        imageAttachments.append(attachment)
+        await uploadImageAttachment(id: attachment.id)
+    }
+
+    /// Uploads the attachment's current bytes (original, or the composite after
+    /// an edit) and threads the result through its upload state.
+    private func uploadImageAttachment(id: UUID) async {
+        guard let index = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
+        let attachment = imageAttachments[index]
+        let payload = attachment.uploadedData ?? attachment.originalData
+        let previousURL = attachment.upload.composerURLString
+        imageAttachments[index].upload = .uploading
+
+        do {
+            let upload = try await DiscourseClient().uploadComposerMedia(
+                data: payload,
+                fileName: attachment.fileName,
+                mimeType: attachment.mimeType
+            )
+            guard let url = upload.composerURLString else { throw DiscourseError.badResponse(0) }
+            guard let current = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
+            imageAttachments[current].upload = .ready(url)
+        } catch {
+            guard let current = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
+            if let previousURL {
+                imageAttachments[current].upload = .ready(previousURL)
+            } else {
+                imageAttachments[current].upload = .failed("上传失败，点按重试")
+            }
+        }
+    }
+
+    private func removeImage(_ id: UUID) {
+        imageAttachments.removeAll { $0.id == id }
+        ComposeThumbnailCache.shared.removeAll(forAttachment: id)
+    }
+
+    private func retryUpload(_ id: UUID) {
+        Task { await uploadImageAttachment(id: id) }
+    }
+
+    /// Commits an edit: stores the new stack, swaps in the composite, re-uploads.
+    private func applyEdit(_ edits: ImageEditStack, exportedData: Data?, to id: UUID) {
+        guard let index = imageAttachments.firstIndex(where: { $0.id == id }) else { return }
+        imageAttachments[index].edits = edits
+        imageAttachments[index].editsRevision += 1
+        ComposeThumbnailCache.shared.removeAll(forAttachment: id)
+        guard let exportedData else { return }
+        imageAttachments[index].uploadedData = exportedData
+        Task { await uploadImageAttachment(id: id) }
+    }
+
+    private var editingImageBinding: Binding<ComposeEditorTarget?> {
+        Binding {
+            guard let id = editingImageID,
+                  let attachment = imageAttachments.first(where: { $0.id == id })
+            else { return nil }
+            return ComposeEditorTarget(attachment: attachment)
+        } set: { target in
+            editingImageID = target?.attachment.id
+        }
     }
 
     private func scheduleGifSearch() {
@@ -557,11 +652,10 @@ struct ReplyComposer: View {
     }
 
     private func insertGif(_ gif: GifItem) {
-        attachments.append(
-            Attachment(
+        gifAttachments.append(
+            GifAttachment(
                 previewURL: gif.url,
-                markdown: "![\(gif.title)|\(gif.width)x\(gif.height)](\(gif.url.absoluteString))",
-                isGif: true
+                markdown: "![\(gif.title)|\(gif.width)x\(gif.height)](\(gif.url.absoluteString))"
             )
         )
         withAnimation(.quicker) { showGiphy = false }
@@ -569,11 +663,10 @@ struct ReplyComposer: View {
 
     // MARK: Models
 
-    struct Attachment: Identifiable {
+    struct GifAttachment: Identifiable {
         let id = UUID()
         let previewURL: URL
         let markdown: String
-        let isGif: Bool
     }
 
     struct GifItem: Identifiable {
