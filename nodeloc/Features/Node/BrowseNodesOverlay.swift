@@ -17,6 +17,7 @@ struct BrowseNodesOverlay: View {
     @State private var showsSearch = false
     @State private var showsGroupList = false
     @State private var selectedNode: SidebarNodeSummary?
+    @State private var skeletonPulse = false
     let showsCloseButton: Bool
     private let headerIconFrame: CGFloat = 34
     private let headerContentHeight: CGFloat = 56
@@ -36,13 +37,13 @@ struct BrowseNodesOverlay: View {
 
                         if showsGroupList {
                             groupListContent
+                        } else if !store.hasContent && store.isLoading {
+                            nodeSkeleton
+                                .padding(.top, 18)
+                                .padding(.bottom, 110)
                         } else {
                             VStack(alignment: .leading, spacing: 28) {
                                 topicChipsSection
-
-                                if store.isLoading {
-                                    loadingRow("正在加载节点")
-                                }
 
                                 categoryPreviewSections
 
@@ -588,6 +589,73 @@ struct BrowseNodesOverlay: View {
 
     private func displayName(for node: SidebarNodeSummary) -> String {
         node.name.isEmpty ? node.slug : node.name
+    }
+
+    // MARK: Skeleton
+
+    /// Placeholder blocks shown only on a cold first load (no cache yet).
+    private var nodeSkeleton: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            // Topic chips row.
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(0..<6, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Theme.neutral300)
+                            .frame(width: 96, height: 32)
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .scrollIndicators(.hidden)
+            .disabled(true)
+
+            ForEach(0..<3, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 14) {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Theme.neutral300)
+                        .frame(width: 150, height: 22)
+                        .padding(.horizontal, 16)
+
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 14) {
+                            ForEach(0..<3, id: \.self) { _ in skeletonCard }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    .scrollIndicators(.hidden)
+                    .disabled(true)
+                }
+            }
+        }
+        .opacity(skeletonPulse ? 0.55 : 1)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                skeletonPulse = true
+            }
+        }
+    }
+
+    private var skeletonCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Circle().fill(Theme.neutral300).frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 6) {
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 120, height: 14)
+                    RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 74, height: 12)
+                }
+                Spacer(minLength: 0)
+            }
+            RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(height: 12)
+            RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 190, height: 12)
+        }
+        .padding(14)
+        .frame(width: 300, height: 120, alignment: .top)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Theme.divider, lineWidth: 1.2)
+        }
     }
 
     private func loadingRow(_ text: String) -> some View {

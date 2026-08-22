@@ -28,7 +28,7 @@ struct SidebarFeedSummary: Identifiable {
     let nodeCount: Int?
 }
 
-struct SidebarNodeSummary: Identifiable {
+struct SidebarNodeSummary: Identifiable, Codable {
     let id: Int
     let name: String
     let slug: String
@@ -41,7 +41,7 @@ struct SidebarNodeSummary: Identifiable {
     let url: String?
 }
 
-struct NodeGroupSummary: Identifiable {
+struct NodeGroupSummary: Identifiable, Codable {
     let id: Int
     let name: String
     let colorHex: String
@@ -1021,15 +1021,30 @@ final class NodeBrowseStore {
     var isLoadingGroup = false
     var errorText: String?
     private var loaded = false
+    private var hydratedFromCache = false
+
+    /// True once there's real data to show (from cache or the network), so the
+    /// view knows to skip the skeleton.
+    var hasContent: Bool { !groups.isEmpty }
 
     func load() async {
-        guard !loaded else { return }
-        isLoading = true
-        errorText = nil
-        defer {
-            isLoading = false
-            loaded = true
+        // Node data barely changes, so show the last cached copy instantly and
+        // refresh it quietly behind the scenes — the skeleton only appears on a
+        // truly cold first launch.
+        if !hydratedFromCache {
+            hydratedFromCache = true
+            if let snapshot = NodeBrowseCache.load(), !snapshot.groups.isEmpty {
+                recommended = snapshot.recommended
+                groups = snapshot.groups
+                groupPreviews = snapshot.groupPreviews
+            }
         }
+
+        guard !loaded else { return }
+        let hadData = !groups.isEmpty
+        if !hadData { isLoading = true }
+        errorText = nil
+        defer { isLoading = false }
 
         do {
             let response = try await client.sidebarNodes()
@@ -1045,9 +1060,17 @@ final class NodeBrowseStore {
                     }
                     return lhs.totalCount > rhs.totalCount
                 }
+            // Overwrite (not guard) so cached previews get refreshed too.
             for group in groups.prefix(6) {
-                await loadGroupPreview(group)
+                if let response = try? await client.nodeBrowse(parentCategoryID: group.id, perPage: 4) {
+                    groupPreviews[group.id] = (response.communities ?? response.recommended ?? [])
+                        .map(NodeSummaryFactory.node)
+                }
             }
+            loaded = true
+            NodeBrowseCache.save(
+                .init(recommended: recommended, groups: groups, groupPreviews: groupPreviews)
+            )
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if recommended.isEmpty { recommended = SidebarStore.fallbackNodes }
@@ -1091,6 +1114,31 @@ final class NodeBrowseStore {
     func clearGroup() {
         selectedGroup = nil
         groupNodes = []
+    }
+}
+
+/// A tiny on-disk cache for the node directory, which changes rarely. Stored as
+/// one JSON blob in the caches directory (no database, per the app's design).
+private enum NodeBrowseCache {
+    struct Snapshot: Codable {
+        let recommended: [SidebarNodeSummary]
+        let groups: [NodeGroupSummary]
+        let groupPreviews: [Int: [SidebarNodeSummary]]
+    }
+
+    private static var fileURL: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("node-browse.json")
+    }
+
+    static func load() -> Snapshot? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(Snapshot.self, from: data)
+    }
+
+    static func save(_ snapshot: Snapshot) {
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        try? data.write(to: fileURL, options: .atomic)
     }
 }
 
