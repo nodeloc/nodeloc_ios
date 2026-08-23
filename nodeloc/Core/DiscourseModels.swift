@@ -1020,6 +1020,12 @@ struct NotificationsResponse: Decodable {
     let notifications: [DiscourseNotification]
 }
 
+/// GET /u/check_username.json — signup username availability.
+struct UsernameCheckResponse: Decodable {
+    let available: Bool?
+    let suggestion: String?
+}
+
 // MARK: - Chat (discourse-chat plugin)
 
 struct ChatUser: Decodable {

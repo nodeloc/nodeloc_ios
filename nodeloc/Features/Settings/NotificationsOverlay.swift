@@ -19,6 +19,15 @@ struct NotificationsOverlay: View {
                 LazyVStack(spacing: 0) {
                     if store.isLoading && store.items.isEmpty {
                         ProgressView().tint(Theme.accent).padding(.top, 40)
+                    } else if store.items.isEmpty {
+                        EmptyStateView(
+                            icon: "bell",
+                            message: DiscourseAuth.shared.isAuthenticated
+                                ? "暂无通知"
+                                : "登录后查看你的通知"
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
                     }
                     ForEach(store.items) { notification in
                         NotificationRow(notification: notification)

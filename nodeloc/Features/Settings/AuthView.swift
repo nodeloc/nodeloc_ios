@@ -21,6 +21,10 @@ struct AuthView: View {
     @State private var displayName = ""
     @State private var email = ""
     @State private var password = ""
+    /// The server asked for a 2FA code; the login form shows the OTP field.
+    @State private var needsSecondFactor = false
+    @State private var otpCode = ""
+    @State private var usingBackupCode = false
     @State private var isBusy = false
     @State private var errorText: String?
     @State private var noticeText: String?
@@ -217,6 +221,22 @@ struct AuthView: View {
                         }
 
                         AuthInputField("Password", text: $password, secure: true)
+
+                        if app.authMode == .login, needsSecondFactor {
+                            AuthInputField(usingBackupCode ? "备用码" : "两步验证码", text: $otpCode)
+                            HStack {
+                                Text("此账号已开启两步验证")
+                                    .font(Theme.body(13))
+                                    .foregroundStyle(Theme.muted(0.6))
+                                Spacer(minLength: 8)
+                                Button(usingBackupCode ? "使用验证器" : "使用备用码") {
+                                    usingBackupCode.toggle()
+                                    otpCode = ""
+                                }
+                                .font(Theme.body(13, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                            }
+                        }
                     }
 
                     if app.authMode == .login {
@@ -370,6 +390,7 @@ struct AuthView: View {
         case .login:
             return !loginIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!needsSecondFactor || !otpCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .signup:
             return !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -385,7 +406,13 @@ struct AuthView: View {
             do {
                 switch app.authMode {
                 case .login:
-                    try await DiscourseLogin.shared.login(identifier: loginIdentifier, password: password)
+                    let token = otpCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                    try await DiscourseLogin.shared.login(
+                        identifier: loginIdentifier,
+                        password: password,
+                        secondFactorToken: needsSecondFactor && !token.isEmpty ? token : nil,
+                        secondFactorMethod: usingBackupCode ? 2 : 1
+                    )
                     completeAuth()
                 case .signup:
                     let result = try await DiscourseLogin.shared.signup(
@@ -401,6 +428,8 @@ struct AuthView: View {
                         stage = .activation(message)
                     }
                 }
+            } catch AuthError.secondFactorRequired {
+                needsSecondFactor = true
             } catch AuthError.signupNeedsActivation(let message) {
                 stage = .activation(message)
             } catch AuthError.cancelled {
@@ -461,7 +490,7 @@ private struct AuthWordmark: View {
     }
 }
 
-private struct AuthMark: View {
+struct AuthMark: View {
     var body: some View {
         ZStack {
             Circle()
@@ -560,7 +589,7 @@ private struct AuthHeroCharacter: View {
     }
 }
 
-private struct AuthInputField: View {
+struct AuthInputField: View {
     let placeholder: String
     @Binding var text: String
     var secure = false
@@ -610,7 +639,7 @@ private struct AuthInputField: View {
     }
 }
 
-private struct AuthPrimaryPillStyle: ButtonStyle {
+struct AuthPrimaryPillStyle: ButtonStyle {
     var disabled = false
 
     func makeBody(configuration: Configuration) -> some View {

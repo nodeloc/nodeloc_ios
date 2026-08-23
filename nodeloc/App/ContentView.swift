@@ -15,6 +15,8 @@ struct ContentView: View {
     private var preferences = UserPreferencesStore.shared
     /// Resolved from `app.routedNodeSlug`; a link only carries the slug.
     @State private var resolvedNode: SidebarNodeSummary?
+    /// Watched for the deep link a tapped push banner carries.
+    private var push = PushNotificationService.shared
 
     var body: some View {
         ZStack {
@@ -33,6 +35,8 @@ struct ContentView: View {
         }
         .foregroundStyle(Theme.text)
         .tint(Theme.accent)
+        // Friendly failure notices for actions that have no other surface.
+        .overlay(alignment: .top) { ToastHost() }
         // Theme's colours are already light/dark pairs, so overriding the
         // scheme here is all "深色/浅色" needs. `.auto` passes nil and follows
         // the system.
@@ -83,6 +87,12 @@ struct ContentView: View {
                 app.authed = true
                 app.onboardingDone = true
             }
+        }
+        // A tapped push banner routes exactly like a tapped in-app link.
+        .task(id: push.routedURL) {
+            guard let url = push.routedURL else { return }
+            push.routedURL = nil
+            LinkRouter.open(url, app: app, browser: browser)
         }
         .task {
             // Trim the image cache once per launch, at low priority so it never

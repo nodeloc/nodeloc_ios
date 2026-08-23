@@ -1684,6 +1684,23 @@ final class SearchHistoryStore {
     }
 }
 
+/// One user row in search results.
+struct SearchUserResult: Identifiable {
+    let id: Int
+    let username: String
+    let displayName: String?
+    let avatarURL: URL?
+}
+
+/// One node row in search results.
+struct SearchNodeResult: Identifiable {
+    let id: Int
+    let slug: String
+    let name: String
+    let desc: String
+    let logoURL: URL?
+}
+
 @MainActor
 @Observable
 final class SearchStore {
@@ -1691,9 +1708,14 @@ final class SearchStore {
 
     var communities: [Community] = []
     var results: [Post] = []
+    var userResults: [SearchUserResult] = []
+    var nodeResults: [SearchNodeResult] = []
+    var appResults: [DirectoryApp] = []
     var isSearching = false
     private var loadedCategories = false
     private var categoriesByID: [Int: DiscourseCategory] = [:]
+    /// The apps directory, fetched once and filtered locally per query.
+    private var appsDirectory: [DirectoryApp]?
 
     func loadCategories() async {
         guard !loadedCategories else { return }
@@ -1703,7 +1725,6 @@ final class SearchStore {
         let site = await siteCall
 
         guard let listed = response?.categoryList.categories, !listed.isEmpty else {
-            if communities.isEmpty { communities = SampleData.communities }
             return
         }
         categoriesByID = Dictionary(
@@ -1729,10 +1750,17 @@ final class SearchStore {
 
     func search(_ query: String) async {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard term.count >= 2 else { results = []; return }
+        guard term.count >= 2 else {
+            results = []
+            userResults = []
+            nodeResults = []
+            appResults = []
+            return
+        }
         isSearching = true
         do {
             await loadCategories()
+            async let appsCall = matchingApps(term)
             let response = try await client.search(term)
             if let categories = response.categories {
                 categoriesByID.merge(
@@ -1740,6 +1768,27 @@ final class SearchStore {
                     uniquingKeysWith: { first, _ in first }
                 )
             }
+
+            userResults = (response.users ?? []).map { user in
+                SearchUserResult(
+                    id: user.id,
+                    username: user.username,
+                    displayName: user.name?.isEmpty == false ? user.name : nil,
+                    avatarURL: user.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 96) }
+                )
+            }
+            nodeResults = (response.categories ?? []).map { category in
+                SearchNodeResult(
+                    id: category.id,
+                    slug: category.slug,
+                    name: category.name,
+                    desc: DiscourseFormat.plainText(category.descriptionExcerpt ?? category.description),
+                    logoURL: category.uploadedLogo?.url.flatMap {
+                        URL(string: $0, relativeTo: DiscourseConfig.baseURL)?.absoluteURL
+                    }
+                )
+            }
+            appResults = await appsCall
             results = (response.topics ?? []).map { topic in
                 let category = topic.categoryId.flatMap { categoriesByID[$0] }
                 let media = DiscourseFormat.mediaItems(for: topic)
@@ -1760,8 +1809,24 @@ final class SearchStore {
             }
         } catch {
             results = []
+            userResults = []
+            nodeResults = []
         }
         isSearching = false
+    }
+
+    /// Apps whose name/slug/description contains the term. The discourse-apps
+    /// plugin has no search endpoint, so this filters the (small) directory.
+    private func matchingApps(_ term: String) async -> [DirectoryApp] {
+        if appsDirectory == nil {
+            appsDirectory = (try? await client.appsDirectory()) ?? []
+        }
+        let lowered = term.lowercased()
+        return (appsDirectory ?? []).filter { app in
+            app.name.lowercased().contains(lowered)
+                || app.slug.lowercased().contains(lowered)
+                || (app.description?.lowercased().contains(lowered) ?? false)
+        }
     }
 
     private func compactCount(_ value: Int?) -> String {
@@ -2532,6 +2597,75 @@ enum NotificationRouting {
     }
 }
 
+/// Formats a Discourse notification for display. Shared by the inbox rows,
+/// the notifications overlay, and the push banners so they all describe a
+/// notification with the same words.
+enum NotificationFormatter {
+    static func kind(forType type: Int) -> NotificationKind {
+        switch type {
+        case 5:
+            return .like
+        case 16:
+            // group_message_summary — a system notice about a group inbox.
+            return .system
+        case 6, 7:
+            return .message
+        case 1, 2, 3, 9:
+            return .comment
+        case 12:
+            return .star
+        default:
+            return .star
+        }
+    }
+
+    static func displayName(for notification: DiscourseNotification, kind: NotificationKind) -> String {
+        kind == .system
+            ? "系统通知"
+            : (notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC")
+    }
+
+    static func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
+        if kind == .system {
+            let group = notification.data?.groupName ?? "群组"
+            if let count = notification.data?.inboxCount {
+                return "您的 \(group) 收件箱有 \(count) 条消息"
+            }
+            return "您的 \(group) 收件箱有新消息"
+        }
+        if kind == .message {
+            if let title = notification.data?.topicTitle { return title }
+            return "给你发了一条私信"
+        }
+        if let title = notification.data?.topicTitle {
+            switch kind {
+            case .like:
+                return "点赞了你在 \(title) 的内容"
+            case .comment:
+                return "回复了 \(title)"
+            default:
+                return title
+            }
+        }
+        if let badge = notification.data?.badgeName { return "授予你 \(badge) 徽章" }
+        return "发来一条通知"
+    }
+
+    /// One `AppNotification` row from the raw payload.
+    static func appNotification(from notification: DiscourseNotification) -> AppNotification {
+        let kind = kind(forType: notification.notificationType)
+        return AppNotification(
+            id: notification.id,
+            kind: kind,
+            name: displayName(for: notification, kind: kind),
+            text: text(for: notification, kind: kind),
+            time: DiscourseFormat.relative(notification.createdAt),
+            unread: !notification.read,
+            url: NotificationRouting.url(for: notification)
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class MessageCenterStore {
@@ -2669,7 +2803,7 @@ final class MessageCenterStore {
 
         do {
             let response = try await client.notifications()
-            notifications = response.notifications.map(map(notification:))
+            notifications = response.notifications.map(NotificationFormatter.appNotification(from:))
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -2786,63 +2920,6 @@ final class MessageCenterStore {
         isSearchingChat = false
     }
 
-    private func map(notification: DiscourseNotification) -> AppNotification {
-        let kind: NotificationKind
-        switch notification.notificationType {
-        case 5:
-            kind = .like
-        case 16:
-            // group_message_summary — a system notice about a group inbox.
-            kind = .system
-        case 6, 7:
-            kind = .message
-        case 1, 2, 3, 9:
-            kind = .comment
-        case 12:
-            kind = .star
-        default:
-            kind = .star
-        }
-
-        let name = kind == .system
-            ? "系统通知"
-            : (notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC")
-        return AppNotification(
-            id: notification.id,
-            kind: kind,
-            name: name,
-            text: text(for: notification, kind: kind),
-            time: DiscourseFormat.relative(notification.createdAt),
-            unread: !notification.read,
-            url: NotificationRouting.url(for: notification)
-        )
-    }
-
-    private func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
-        if kind == .system {
-            let group = notification.data?.groupName ?? "群组"
-            if let count = notification.data?.inboxCount {
-                return "您的 \(group) 收件箱有 \(count) 条消息"
-            }
-            return "您的 \(group) 收件箱有新消息"
-        }
-        if kind == .message {
-            if let title = notification.data?.topicTitle { return title }
-            return "给你发了一条私信"
-        }
-        if let title = notification.data?.topicTitle {
-            switch kind {
-            case .like:
-                return "点赞了你在 \(title) 的内容"
-            case .comment:
-                return "回复了 \(title)"
-            default:
-                return title
-            }
-        }
-        if let badge = notification.data?.badgeName { return "授予你 \(badge) 徽章" }
-        return "发来一条通知"
-    }
 }
 
 // MARK: - Notifications
@@ -2858,64 +2935,22 @@ final class NotificationsStore {
 
     func load() async {
         guard DiscourseAuth.shared.isAuthenticated else {
-            if items.isEmpty { items = SampleData.notifications }
+            items = []
             return
         }
         guard !loaded else { return }
         isLoading = true
         do {
             let response = try await client.notifications()
-            items = response.notifications.map(map(notification:))
+            items = response.notifications.map(NotificationFormatter.appNotification(from:))
             loaded = true
         } catch {
-            if items.isEmpty { items = SampleData.notifications }
+            // Keep whatever is shown; the overlay's empty state covers a
+            // first load that produced nothing.
         }
         isLoading = false
     }
 
-    private func map(notification: DiscourseNotification) -> AppNotification {
-        let kind: NotificationKind
-        switch notification.notificationType {
-        case 5: kind = .like
-        case 16: kind = .system
-        case 6, 7: kind = .message
-        case 1, 2, 3, 9: kind = .comment
-        case 12: kind = .star
-        default: kind = .star
-        }
-        let name = kind == .system
-            ? "系统通知"
-            : (notification.data?.displayUsername ?? notification.data?.username ?? "NODELOC")
-        return AppNotification(
-            id: notification.id,
-            kind: kind,
-            name: name,
-            text: text(for: notification, kind: kind),
-            time: DiscourseFormat.relative(notification.createdAt),
-            unread: !notification.read,
-            url: NotificationRouting.url(for: notification)
-        )
-    }
-
-    private func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
-        if kind == .system {
-            let group = notification.data?.groupName ?? "群组"
-            if let count = notification.data?.inboxCount {
-                return "您的 \(group) 收件箱有 \(count) 条消息"
-            }
-            return "您的 \(group) 收件箱有新消息"
-        }
-        if let title = notification.data?.topicTitle {
-            switch kind {
-            case .like: return "liked your post in \(title)"
-            case .comment: return "replied in \(title)"
-            case .message: return "sent you a private message in \(title)"
-            default: return title
-            }
-        }
-        if let badge = notification.data?.badgeName { return "granted you '\(badge)'" }
-        return "sent you a notification"
-    }
 }
 
 // MARK: - Public profile
@@ -3252,6 +3287,9 @@ final class PublicProfileStore {
 @Observable
 final class ChatConversationStore {
     private let client = DiscourseClient()
+    /// Live updates for the open channel, MessageBus long-poll.
+    private let bus = MessageBusClient()
+    private var liveChannelID: Int?
 
     var messages: [ChatConversationMessage] = []
     var channelThreads: [ChatThreadListItem] = []
@@ -3283,6 +3321,7 @@ final class ChatConversationStore {
         let channelTargetMessageID = initialThread == nil ? targetMessageID : nil
 
         if loadedChannelID == chat.id && loadedChannelTargetMessageID == channelTargetMessageID {
+            startLiveUpdates(chat)
             if let initialThread, selectedThread?.id != initialThread.id {
                 await openThread(initialThread, targetMessageID: targetMessageID)
             }
@@ -3291,13 +3330,34 @@ final class ChatConversationStore {
 
         loadedChannelID = chat.id
         loadedChannelTargetMessageID = channelTargetMessageID
-        isLoading = true
         errorText = nil
+
+        // Cache first, messenger-style: the stored snapshot renders instantly
+        // and the network fetch below only reconciles. Skipped when jumping to
+        // a specific message, which the snapshot may not contain.
+        var showedCache = false
+        if channelTargetMessageID == nil,
+           let cached = await ChatDiskCache.shared.load(channelID: chat.id),
+           let response = Self.decodeSnapshot(cached) {
+            messages = ChatMessageMapper.messages(from: response)
+            channelInitialScrollMessageID = messages.last?.id
+            channelInitialScrollIsUnread = false
+            showedCache = !messages.isEmpty
+        }
+
+        isLoading = !showedCache
         defer { isLoading = false }
 
         do {
-            let response = try await client.chatMessages(channelID: chat.id, targetMessageID: channelTargetMessageID)
+            let (response, raw) = try await client.chatMessagesWithRaw(
+                channelID: chat.id,
+                targetMessageID: channelTargetMessageID
+            )
+            guard loadedChannelID == chat.id else { return }
             messages = ChatMessageMapper.messages(from: response)
+            if channelTargetMessageID == nil {
+                await ChatDiskCache.shared.store(raw, channelID: chat.id)
+            }
             let target = initialScrollTarget(
                 for: messages,
                 targetMessageID: channelTargetMessageID ?? response.meta?.targetMessageId,
@@ -3307,11 +3367,17 @@ final class ChatConversationStore {
             channelInitialScrollMessageID = target.messageID
             channelInitialScrollIsUnread = target.isUnread
         } catch {
-            loadedChannelID = nil
-            loadedChannelTargetMessageID = nil
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            return
+            // With a cached copy on screen, fail quietly — the live loop or
+            // the next open reconciles.
+            if !showedCache {
+                loadedChannelID = nil
+                loadedChannelTargetMessageID = nil
+                errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                return
+            }
         }
+
+        startLiveUpdates(chat)
 
         do {
             let response = try await client.chatThreads(channelID: chat.id)
@@ -3373,14 +3439,72 @@ final class ChatConversationStore {
 
     func send(_ text: String, chat: Chat) async {
         await send(text, channelID: chat.id, threadID: nil)
-        await refreshChannel(chat)
+        // A light reconcile, not the old full channel reload: the latest page
+        // replaces the list in place, so the conversation doesn't blink.
+        await refreshLatest(channelID: chat.id)
     }
 
     func sendToSelectedThread(_ text: String) async {
         guard let selectedThread else { return }
         await send(text, channelID: selectedThread.channelID, threadID: selectedThread.id)
-        loadedThreadID = nil
-        await openThread(selectedThread)
+        await refreshLatest(channelID: selectedThread.channelID)
+    }
+
+    // MARK: Live updates
+
+    /// Long-polls MessageBus for the open channel; any event (sent / edited /
+    /// deleted) triggers a quiet refetch through the existing mappers.
+    private func startLiveUpdates(_ chat: Chat) {
+        guard liveChannelID != chat.id else { return }
+        liveChannelID = chat.id
+        bus.subscribe(channels: ["/chat/\(chat.id)"]) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.refreshLatest(channelID: chat.id) }
+        }
+    }
+
+    func stopLiveUpdates() {
+        bus.stop()
+        liveChannelID = nil
+    }
+
+    /// Refetches the newest page without spinners or scroll resets, updates
+    /// the snapshot cache, and lands on the newest message when one arrived.
+    private func refreshLatest(channelID: Int) async {
+        do {
+            let (response, raw) = try await client.chatMessagesWithRaw(channelID: channelID)
+            // The user may have switched channels while this was in flight.
+            guard loadedChannelID == channelID else { return }
+            let previousLast = messages.last?.id
+            messages = ChatMessageMapper.messages(from: response)
+            await ChatDiskCache.shared.store(raw, channelID: channelID)
+            if let last = messages.last?.id, last != previousLast {
+                channelInitialScrollMessageID = last
+                channelInitialScrollIsUnread = false
+            }
+
+            if let selectedThread {
+                let threadResponse = try await client.chatThreadMessages(
+                    channelID: selectedThread.channelID,
+                    threadID: selectedThread.id
+                )
+                let previousThreadLast = threadMessages.last?.id
+                threadMessages = ChatMessageMapper.messages(from: threadResponse)
+                if let last = threadMessages.last?.id, last != previousThreadLast {
+                    threadInitialScrollMessageID = last
+                    threadInitialScrollIsUnread = false
+                }
+            }
+        } catch {
+            // The next bus event or open retries; nothing on screen is lost.
+        }
+    }
+
+    /// Decodes a cached snapshot with the same strategy as the live client.
+    private static func decodeSnapshot(_ data: Data) -> ChatMessagesResponse? {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(ChatMessagesResponse.self, from: data)
     }
 
     private func send(_ text: String, channelID: Int, threadID: Int?) async {
@@ -3396,12 +3520,6 @@ final class ChatConversationStore {
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
-    }
-
-    private func refreshChannel(_ chat: Chat) async {
-        loadedChannelID = nil
-        loadedChannelTargetMessageID = nil
-        await load(chat: chat)
     }
 
     private func initialScrollTarget(
@@ -3450,26 +3568,27 @@ final class ProfileStore {
 
     private let client = DiscourseClient()
 
-    var username = SampleData.userName
-    var displayName = SampleData.userName
-    var initial = SampleData.userInitial
+    // Neutral placeholders until the real profile loads — never demo values.
+    var username = ""
+    var displayName = ""
+    var initial = "?"
     var avatarURL: URL?
     var backgroundURL: URL?
     var title: String?
-    var bio = "自由、平等、友好、开放、有趣的互联网交流社区。"
-    var joined = "2024年3月加入"
-    var lastSeen = "最近活跃"
+    var bio = ""
+    var joined = ""
+    var lastSeen = ""
     var location: String?
     var website: String?
-    var roles: [String] = ["MEMBER"]
-    var badges: [String] = ["First Like", "Welcome", "Reader"]
+    var roles: [String] = []
+    var badges: [String] = []
     var stats: [(value: String, label: String)] = [
-        (SampleData.userKarma, "声望"),
-        (SampleData.userPosts, "主题"),
-        (SampleData.userComments, "回复"),
-        ("3", "徽章")
+        ("--", "能量"),
+        ("--", "声望"),
+        ("--", "主题"),
+        ("--", "回复"),
+        ("--", "账户年龄")
     ]
-    var topCategories: [Community] = ProfileStore.defaultCommunities
     /// Recently visited nodes, sourced the same way as the sidebar.
     var recentNodes: [SidebarNodeSummary] = []
     /// Account age like "1 年" / "11 个月", shown in the primary stat row.
@@ -3548,9 +3667,9 @@ final class ProfileStore {
         }
 
         guard let username = DiscourseAuth.shared.username else {
-            seed(username: SampleData.userName)
-            joined = "2024年3月加入"
-            lastSeen = "最近活跃"
+            // Authenticated but the username hasn't arrived yet: neutral
+            // placeholders until the next load has it.
+            seed(username: "")
             loaded = false
             loadedUsername = nil
             return
@@ -3689,7 +3808,6 @@ final class ProfileStore {
         pointsHistory = []
         pointsTotal = nil
         pointsLoaded = false
-        topCategories = Self.defaultCommunities
         recentNodes = []
         isGuest = true
         errorText = nil
@@ -3704,22 +3822,22 @@ final class ProfileStore {
         isGuest = false
         self.username = username
         displayName = username
-        initial = String(username.prefix(1)).uppercased()
+        initial = username.isEmpty ? "?" : String(username.prefix(1)).uppercased()
         avatarURL = nil
         backgroundURL = nil
         title = nil
-        bio = "自由、平等、友好、开放、有趣的互联网交流社区。"
-        joined = "2024年3月加入"
-        lastSeen = "最近活跃"
+        bio = ""
+        joined = ""
+        lastSeen = ""
         location = nil
         website = nil
-        roles = ["MEMBER"]
-        badges = ["First Like", "Welcome", "Reader"]
+        roles = []
+        badges = []
         stats = [
             ("--", "能量"),
-            (SampleData.userKarma, "声望"),
-            (SampleData.userPosts, "主题"),
-            (SampleData.userComments, "回复"),
+            ("--", "声望"),
+            ("--", "主题"),
+            ("--", "回复"),
             ("--", "账户年龄")
         ]
         coreStats = nil
@@ -3729,7 +3847,6 @@ final class ProfileStore {
         summaryStats = []
         badgeDetails = []
         accountAge = ""
-        topCategories = Self.defaultCommunities
         errorText = nil
     }
 
@@ -3800,22 +3917,6 @@ final class ProfileStore {
             }
         }
 
-        if let categories = s.topCategories, !categories.isEmpty {
-            topCategories = categories.prefix(6).map(mapCategory)
-        }
-    }
-
-    private func mapCategory(_ category: SummaryCategory) -> Community {
-        let name = category.name ?? "节点"
-        let topics = category.topicCount ?? 0
-        return Community(
-            id: category.id,
-            name: name,
-            letter: String(name.prefix(1)),
-            variant: abs(name.hashValue) % 2,
-            members: "\(compactCount(topics)) 主题",
-            desc: category.slug ?? ""
-        )
     }
 
     private func formattedAge(_ value: String?) -> String {
@@ -3898,11 +3999,4 @@ final class ProfileStore {
         return URL(string: raw)
     }
 
-    private static let defaultCommunities: [Community] = [
-        Community(id: 5, name: "互联网服务", letter: "互", variant: 0, members: "13.1k", desc: "VPS / 域名 / 云计算"),
-        Community(id: 7, name: "科技与创作", letter: "科", variant: 1, members: "2.5k", desc: "编程、运维和创作"),
-        Community(id: 8, name: "数码与硬件", letter: "数", variant: 0, members: "3.5k", desc: "设备、硬件与折腾"),
-        Community(id: 9, name: "生活与兴趣", letter: "生", variant: 1, members: "854", desc: "日常分享与兴趣圈"),
-        Community(id: 10, name: "活动与互动", letter: "活", variant: 0, members: "33", desc: "抽奖、活动和互动")
-    ]
 }

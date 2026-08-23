@@ -12,6 +12,14 @@ struct HomeView: View {
     @State private var lastOffset: CGFloat = 0
     @State private var headerHiddenAmount: CGFloat = 0
     @State private var selectedProfile: UserProfileTarget?
+    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
+    @State private var pull = PullToRefresh()
+    /// Same store as the node pages, so one choice drives every list.
+    private var readingMode = NodeReadingModeStore.shared
+
+    init(postTransitionNamespace: Namespace.ID) {
+        self.postTransitionNamespace = postTransitionNamespace
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -19,41 +27,70 @@ struct HomeView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear.frame(height: headerHeight)
-                    ForEach(feed.posts) { post in
-                        PostCard(
-                            post: post,
-                            postTransitionNamespace: postTransitionNamespace,
-                            onOpenAuthor: { target in
-                                withAnimation(.panelSlide) {
-                                    selectedProfile = target
-                                }
-                            }
-                        )
+
+                    // Keeps the refresh loader in its own gap instead of over
+                    // the first card while the reload runs.
+                    if pull.isRefreshing {
+                        Color.clear.frame(height: 44)
                     }
 
-                    if feed.hasMore {
-                        // Auto-loads the next page when scrolled into view.
-                        HStack {
-                            ProgressView().tint(Theme.accent)
+                    if showsLoader {
+                        feedSkeleton
+                    } else if feed.posts.isEmpty {
+                        // Load failed or nothing came back: say so instead of
+                        // an unexplained blank screen.
+                        feedUnavailable
+                    } else {
+                        ForEach(feed.posts) { post in
+                            switch readingMode.mode {
+                            case .card:
+                                PostCard(
+                                    post: post,
+                                    postTransitionNamespace: postTransitionNamespace,
+                                    onOpenAuthor: { target in
+                                        withAnimation(.panelSlide) {
+                                            selectedProfile = target
+                                        }
+                                    }
+                                )
+                            case .compact, .expand:
+                                // The node pages' rows, so the two lists match.
+                                NodeTopicRow(
+                                    post: post,
+                                    mode: readingMode.mode,
+                                    onTap: { openPost(post) }
+                                )
+                            }
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .onScrollVisibilityChange(threshold: 0.1) { visible in
-                            guard visible else { return }
-                            Task { await feed.loadMore() }
+
+                        if feed.hasMore {
+                            // Auto-loads the next page when scrolled into view.
+                            HStack {
+                                ProgressView().tint(Theme.accent)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .onScrollVisibilityChange(threshold: 0.1) { visible in
+                                guard visible else { return }
+                                Task { await feed.loadMore() }
+                            }
                         }
                     }
                 }
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
-            .refreshable { await feed.load() }
             .task { await feed.loadIfNeeded() }
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
             } action: { _, newValue in
                 handleScroll(newValue)
+                pull.scrolled(to: newValue) { await feed.load() }
             }
+
+            NodelocRefreshIndicator(pull: pull)
+                .frame(maxWidth: .infinity)
+                .padding(.top, headerHeight + 12)
 
             if app.overlay != .post {
                 persistentHeaderButtons
@@ -132,20 +169,15 @@ struct HomeView: View {
 
     // MARK: Header
 
-    @ViewBuilder
+    /// Always the plain wordmark: the skeleton (first load) and the pull
+    /// indicator (refresh) are the loading signals — a third one up here made
+    /// the screen show two loaders at once.
     private var headerWordmark: some View {
-        if showsLoader {
-            NodelocLoader(
-                progress: nil,
-                height: logoHeight
-            )
-        } else {
-            Image("NodelocWordmark")
-                .resizable()
-                .scaledToFit()
-                .frame(height: logoHeight)
-                .accessibilityLabel("NodeLoc")
-        }
+        Image("NodelocWordmark")
+            .resizable()
+            .scaledToFit()
+            .frame(height: logoHeight)
+            .accessibilityLabel("NodeLoc")
     }
 
     private var persistentHeaderButtons: some View {
@@ -154,33 +186,152 @@ struct HomeView: View {
 
             Spacer()
 
-            // Doubles as the loading indicator: idle it's the plain wordmark,
-            // while pulling/refreshing it animates. Scrolls up out of the way
-            // with the header, while the glass buttons stay pinned.
+            // Scrolls up out of the way with the header, while the glass
+            // buttons stay pinned.
             headerWordmark
                 .opacity(logoRevealProgress)
                 .offset(y: -(1 - logoRevealProgress) * headerHeight * 0.6)
 
             Spacer()
 
-            Button {
-                withAnimation(.overlayPush) {
-                    app.overlay = .compose
+            // Guests get 登录 where compose would be — posting needs an account.
+            if app.isGuest {
+                GuestLoginButton()
+            } else {
+                Button {
+                    withAnimation(.overlayPush) {
+                        app.overlay = .compose
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .frame(width: 34, height: 34)
                 }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 34, height: 34)
+                .buttonStyle(.glass(.regular.tint(Theme.accent.opacity(0.14))))
+                .buttonBorderShape(.circle)
+                .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.accent.opacity(0.14))))
-            .buttonBorderShape(.circle)
-            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
     }
 
+    private func openPost(_ post: Post) {
+        app.markTopicOpened(id: post.id)
+        app.selectedPost = post
+        withAnimation(.expandCollapse) {
+            app.overlay = .post
+        }
+    }
+
+    /// Friendly failure/empty state with a retry, shown when the first load
+    /// produced nothing (usually no network).
+    private var feedUnavailable: some View {
+        VStack(spacing: 12) {
+            Image(systemName: feed.errorText == nil ? "tray" : "wifi.exclamationmark")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(Theme.muted(0.35))
+            Text(feed.errorText ?? "暂时没有内容")
+                .font(Theme.body(14))
+                .foregroundStyle(Theme.muted(0.55))
+                .multilineTextAlignment(.center)
+            Button("重试") {
+                Task { await feed.load() }
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 130)
+        .padding(.horizontal, 32)
+    }
+
+    // MARK: Skeleton
+
+    /// First-load placeholders, shaped like the rows the current mode renders.
+    /// One pulse on the container keeps every row in phase.
+    private var feedSkeleton: some View {
+        VStack(spacing: 0) {
+            switch readingMode.mode {
+            case .card:
+                ForEach(0..<3, id: \.self) { _ in cardSkeleton }
+            case .compact:
+                ForEach(0..<10, id: \.self) { _ in compactSkeleton }
+            case .expand:
+                ForEach(0..<5, id: \.self) { _ in expandSkeleton }
+            }
+        }
+        .skeletonPulsing()
+    }
+
+    /// Mirrors PostCard: author line, title, media block, action pills.
+    private var cardSkeleton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle().fill(Theme.neutral300).frame(width: 26, height: 26)
+                SkeletonLine(widthFraction: 0.35)
+            }
+            SkeletonLine(widthFraction: 0.9, height: 16)
+            SkeletonLine(widthFraction: 0.55, height: 16)
+            RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+                .fill(Theme.neutral300)
+                .frame(height: 200)
+            HStack(spacing: 8) {
+                Capsule().fill(Theme.neutral300).frame(width: 90, height: 30)
+                Capsule().fill(Theme.neutral300).frame(width: 64, height: 30)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.divider).frame(height: 1)
+        }
+    }
+
+    /// Mirrors NodeTopicRow's compact row: avatar plus two short lines.
+    private var compactSkeleton: some View {
+        HStack(spacing: 10) {
+            Circle().fill(Theme.neutral300).frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 6) {
+                SkeletonLine(widthFraction: 0.85)
+                SkeletonLine(widthFraction: 0.4, height: 10)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.divider).frame(height: 1).padding(.leading, 56)
+        }
+    }
+
+    /// Mirrors NodeTopicRow's expand row: author line, title next to a square
+    /// thumbnail, then the action pills.
+    private var expandSkeleton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle().fill(Theme.neutral300).frame(width: 24, height: 24)
+                SkeletonLine(widthFraction: 0.3)
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SkeletonLine(widthFraction: 1, height: 15)
+                    SkeletonLine(widthFraction: 0.7, height: 15)
+                }
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Theme.neutral300)
+                    .frame(width: 78, height: 78)
+            }
+            HStack(spacing: 8) {
+                Capsule().fill(Theme.neutral300).frame(width: 80, height: 28)
+                Capsule().fill(Theme.neutral300).frame(width: 56, height: 28)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.divider).frame(height: 1)
+        }
+    }
 }
 
 // MARK: - Post card

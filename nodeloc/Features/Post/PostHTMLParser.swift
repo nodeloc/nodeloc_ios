@@ -233,12 +233,67 @@ nonisolated enum PostHTMLParser {
         return attributes
     }
 
+    // MARK: Recursion guard
+
+    /// Nesting deeper than this degrades to plain text. Both block and inline
+    /// assembly recurse one stack frame per tag level, and a pathological post
+    /// (hundreds of nested tags) otherwise overflows the cooperative thread's
+    /// 512 KB stack — the "one specific post kills the app" crash that
+    /// surfaced in ___chkstk_darwin. Real content tops out well under this.
+    private static let maxNestingDepth = 40
+    @TaskLocal private static var nestingDepth = 0
+
+    /// Over-depth fallback: consumes the subtree keeping only its text.
+    private static func flattenedText(
+        _ tokens: [HTMLToken],
+        index: inout Int,
+        closing: String?
+    ) -> String {
+        var open = 1
+        var text = ""
+        while index < tokens.count {
+            switch tokens[index] {
+            case .text(let value):
+                text += value
+            case .tag(let tag):
+                if let closing, tag.name == closing {
+                    if tag.isClosing {
+                        open -= 1
+                        if open == 0 {
+                            index += 1
+                            return text
+                        }
+                    } else if !tag.isSelfClosing {
+                        open += 1
+                    }
+                }
+            }
+            index += 1
+        }
+        return text
+    }
+
     // MARK: Block assembly
 
     /// Consumes tokens until `until`'s closing tag (or the end) and returns the
     /// blocks found. Inline runs between block elements are collected into
     /// implicit paragraphs so bare text isn't lost.
     private static func parseBlocks(
+        _ tokens: [HTMLToken],
+        index: inout Int,
+        until closing: String?
+    ) -> [PostBlock] {
+        guard nestingDepth < maxNestingDepth else {
+            let text = flattenedText(tokens, index: &index, closing: closing)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [.paragraph([.text(trimmed)])]
+        }
+        return $nestingDepth.withValue(nestingDepth + 1) {
+            parseBlocksBody(tokens, index: &index, until: closing)
+        }
+    }
+
+    private static func parseBlocksBody(
         _ tokens: [HTMLToken],
         index: inout Int,
         until closing: String?
@@ -785,6 +840,19 @@ nonisolated enum PostHTMLParser {
     // MARK: Inline assembly
 
     private static func parseInlinesUntil(
+        _ tokens: [HTMLToken],
+        index: inout Int,
+        closing: String
+    ) -> [PostInline] {
+        guard nestingDepth < maxNestingDepth else {
+            return [.text(flattenedText(tokens, index: &index, closing: closing))]
+        }
+        return $nestingDepth.withValue(nestingDepth + 1) {
+            parseInlinesUntilBody(tokens, index: &index, closing: closing)
+        }
+    }
+
+    private static func parseInlinesUntilBody(
         _ tokens: [HTMLToken],
         index: inout Int,
         closing: String

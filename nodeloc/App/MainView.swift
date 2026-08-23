@@ -11,7 +11,13 @@ struct MainView: View {
     @Environment(AppState.self) private var app
     @Namespace private var postTransitionNamespace
     @State private var lastContentTab: Tab = .home
-    @State private var profileTabAvatar = ProfileTabAvatarStore()
+    /// Focus handle for the system search field in the tab bar.
+    @FocusState private var searchFieldFocused: Bool
+    /// Presentation state of the system search UI (field expanded, scope row
+    /// and cancel visible). Distinct from focus: search can stay presented
+    /// with the keyboard down.
+    @State private var searchPresented = false
+    @State private var profileTabAvatar = ProfileTabAvatarStore.shared
     /// Drives the Message tab's unread badge; shared with the inbox.
     @State private var inbox = MessageCenterStore.shared
 
@@ -89,6 +95,37 @@ struct MainView: View {
                 }
                 .tint(Theme.accent)
                 .tabBarMinimizeBehavior(.onScrollDown)
+                // Telegram-style search: the tab bar itself morphs into the
+                // search field. Selecting the search pill activates search;
+                // cancelling deselects it and restores the previous tab — all
+                // system-managed, so there is no custom close button to fight
+                // the pill for the bottom-right corner.
+                .searchable(text: $app.searchQuery, isPresented: $searchPresented, prompt: "搜索")
+                // The system scope row, shown at the top whenever search is
+                // presented (the default only reveals it once text is typed).
+                .searchScopes($app.searchScope, activation: .onSearchPresentation) {
+                    ForEach(SearchScope.allCases, id: \.self) { scope in
+                        Text(scope.rawValue).tag(scope)
+                    }
+                }
+                .onSubmit(of: .search) {
+                    SearchHistoryStore.shared.record(app.searchQuery)
+                }
+                .tabViewSearchActivation(.searchTabSelection)
+                .searchFocused($searchFieldFocused)
+                // A tapped suggestion fills the query without presenting
+                // search; present it so the scope row and cancel appear —
+                // then retract the keyboard once the presentation settles,
+                // since the results are already on screen.
+                .onChange(of: app.searchActivationRequested) { _, requested in
+                    guard requested else { return }
+                    app.searchActivationRequested = false
+                    searchPresented = true
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(450))
+                        searchFieldFocused = false
+                    }
+                }
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .overlay {
                     if sidebarOpen {
@@ -131,20 +168,27 @@ struct MainView: View {
             }
         }
         .onChange(of: app.tab) { oldValue, newValue in
-            if newValue == .search {
-                // Selecting Search while its overlay is already up means the
-                // tap landed on the tab bar rather than the close button — the
-                // two share the bottom-right corner. Bounce the selection back
-                // without reopening, or the overlay the user is dismissing
-                // immediately returns.
-                guard app.overlay != .search else {
-                    app.tab = oldValue == .search ? lastContentTab : oldValue
-                    return
+            // The search tab is a real tab; selecting it just shows the search
+            // screen. The only special case left: while the node-scoped search
+            // *overlay* is up, its close button shares the bottom-right corner
+            // with the tab bar's search pill, and the UIKit pill wins that hit
+            // test. That tap was aimed at the X — bounce the selection and
+            // close the overlay.
+            if newValue == .search, app.overlay == .search {
+                app.tab = oldValue == .search ? lastContentTab : oldValue
+                withAnimation(.overlayPush) {
+                    app.overlay = nil
                 }
-                openSearchOverlay(restoring: oldValue)
                 return
             }
-            lastContentTab = newValue
+            if newValue == .search {
+                // Selecting the pill focuses the field, but that doesn't
+                // reliably flow back into the isPresented binding — and the
+                // scope row keys off presentation. Assert it ourselves.
+                searchPresented = true
+            } else {
+                lastContentTab = newValue
+            }
             if app.overlay == .browseNodes {
                 app.overlay = nil
             }
@@ -154,21 +198,6 @@ struct MainView: View {
     private var profileTabAvatarTaskID: String {
         "\(app.authed)-\(app.isGuest)-\(DiscourseAuth.shared.username ?? "")"
     }
-
-    /// Opens the search overlay and moves the tab selection off `.search`.
-    ///
-    /// The selection must not stay on `.search`: that tab's own content is a
-    /// full `SearchView` in screen mode, so leaving it selected means closing
-    /// the overlay simply reveals a near-identical search screen underneath and
-    /// the close button looks like it did nothing.
-    private func openSearchOverlay(restoring tab: Tab) {
-        let restoredTab = tab == .search ? lastContentTab : tab
-        app.tab = restoredTab
-        withAnimation(.panelSlide) {
-            app.overlay = .search
-        }
-    }
-
 
     private func openSidebar() {
         guard app.overlay == nil else { return }
@@ -243,6 +272,11 @@ struct MainView: View {
                 // Consumed on open, so returning to search later starts blank
                 // rather than still scoped to a node the user has left.
                 .onDisappear { app.searchInitialQuery = "" }
+            case .auth:
+                AuthFlowOverlay()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(120)
             default:
                 Group {
                     switch overlay {
@@ -257,6 +291,7 @@ struct MainView: View {
                     case .pro: ProOverlay()
                     case .appsDirectory: AppsDirectoryOverlay()
                     case .appDetail: AppDetailOverlay()
+                    case .auth: EmptyView()
                     }
                 }
                 .transition(transition(for: overlay))
@@ -284,7 +319,7 @@ struct MainView: View {
             return .move(edge: .leading)
         case .post:
             return .redditPost
-        case .compose, .search, .browseNodes, .createNode, .appsDirectory:
+        case .compose, .search, .browseNodes, .createNode, .appsDirectory, .auth:
             return .move(edge: .bottom).combined(with: .opacity)
         case .notifications, .settings, .pro, .appDetail:
             return .opacity
@@ -338,7 +373,12 @@ private func paddedCircularAvatar(from source: UIImage, scale: CGFloat) -> UIIma
 
 @MainActor
 @Observable
-private final class ProfileTabAvatarStore {
+final class ProfileTabAvatarStore {
+    /// Shared so other screens (the post detail's header avatar) can show the
+    /// current user without fetching /session/current again.
+    static let shared = ProfileTabAvatarStore()
+    private init() {}
+
     private let client = DiscourseClient()
     private var loadedUsername: String?
 

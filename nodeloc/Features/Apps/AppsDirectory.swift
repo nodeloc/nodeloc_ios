@@ -27,7 +27,7 @@ struct AppsDirectoryOverlay: View {
 
             ScrollView {
                 if store.isLoading && store.apps.isEmpty {
-                    NodelocLoader(progress: nil)
+                    NodelocLoader()
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 60)
                 } else if store.visibleApps.isEmpty {

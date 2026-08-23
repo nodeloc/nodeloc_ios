@@ -310,7 +310,7 @@ struct Community: Identifiable {
 // MARK: - Navigation
 
 enum Tab: Hashable { case home, nodes, search, chat, profile }
-enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, pro, appsDirectory, appDetail
+enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, pro, appsDirectory, appDetail, auth
     var id: Int { hashValue }
 }
 enum AuthMode { case login, signup }
@@ -332,7 +332,11 @@ final class AppState {
     // Main
     var tab: Tab = .home
     var overlay: Overlay?
-    var selectedPost: Post = SampleData.posts[0]
+    /// Blank placeholder until a real post is opened — never sample content.
+    var selectedPost = Post(
+        id: 0, node: "", avatarLetter: "N", variant: 0, time: "",
+        title: "", excerpt: "", baseVotes: 0, comments: 0, hasImage: false
+    )
     /// App chosen from the directory, shown by the app detail overlay.
     var selectedApp: DirectoryApp?
     var likedPosts: Set<Int> = []
@@ -349,6 +353,17 @@ final class AppState {
     /// Text the search overlay opens with, e.g. "#slug " to scope to one node.
     /// Cleared by the search view once read.
     var searchInitialQuery = ""
+    /// The search tab's query. Lives here because the field is the system one
+    /// in the tab bar (`.searchable` on the TabView, in MainView), while the
+    /// results render in SearchView — two views that never meet otherwise.
+    var searchQuery = ""
+    /// The search tab's scope row (全部/节点/帖子/…), rendered by the system
+    /// at the top while search is presented.
+    var searchScope: SearchScope = .all
+    /// One-shot ask to present/focus the system search field, e.g. after a
+    /// tapped history term fills `searchQuery` — without presentation the
+    /// scope row stays hidden. MainView consumes it.
+    var searchActivationRequested = false
 
     // MARK: Derived
 

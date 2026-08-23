@@ -31,7 +31,6 @@ struct PostDetailOverlay: View {
     /// Reports read progress (posts seen + time) so the server records it and
     /// the topic's unread dot clears.
     @State private var reader = TopicReadTracker()
-    @State private var skeletonPulse = false
     @State private var showSortDialog = false
     /// The user being replied to (drives the composer's "回复xxx" header). Its
     /// post number becomes `reply_to_post_number` on submit.
@@ -39,6 +38,11 @@ struct PostDetailOverlay: View {
     @State private var replyTargetNumber: Int?
     /// A reply the ellipsis (…) sheet is open for.
     @State private var moreSheetComment: PostComment?
+    /// The header ellipsis (…) sheet — actions on the topic itself.
+    @State private var showTopicMoreSheet = false
+    /// The 注册/登录 gate a guest gets from the header avatar (and from
+    /// actions that need an account).
+    @State private var showGuestGate = false
     /// The post id the 打赏 sheet is giving to.
     @State private var rewardTarget: Int?
     /// Rewards to show in the per-user 打赏 detail sheet.
@@ -151,6 +155,14 @@ struct PostDetailOverlay: View {
         .sheet(item: $moreSheetComment) { comment in
             replyMoreSheet(comment, post: post)
         }
+        // Ellipsis (…) menu on the topic, from the floating header.
+        .sheet(isPresented: $showTopicMoreSheet) {
+            topicMoreSheet(post)
+        }
+        // 注册/登录 bottom gate for guests.
+        .sheet(isPresented: $showGuestGate) {
+            guestGateSheet
+        }
         // 打赏 amount picker.
         .sheet(isPresented: Binding(
             get: { rewardTarget != nil },
@@ -188,7 +200,7 @@ struct PostDetailOverlay: View {
 
                 Button {
                     moreSheetComment = nil
-                    Task { try? await topic.bookmark(postID: comment.id) }
+                    Task { await bookmarkWithToast(postID: comment.id) }
                 } label: {
                     moreSheetRow("保存书签", systemImage: "bookmark")
                 }
@@ -209,6 +221,127 @@ struct PostDetailOverlay: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .standardSheet([.medium])
+    }
+
+    /// The header ellipsis (…) sheet: 更多操作 on the topic itself.
+    private func topicMoreSheet(_ post: Post) -> some View {
+        let topicURL = DiscourseConfig.baseURL.appending(path: "t/\(post.id)")
+        return NavigationStack {
+            VStack(spacing: 0) {
+                Button {
+                    showTopicMoreSheet = false
+                    UIPasteboard.general.url = topicURL
+                } label: {
+                    moreSheetRow("复制链接", systemImage: "link")
+                }
+                .buttonStyle(.plain)
+
+                ShareLink(item: topicURL) {
+                    moreSheetRow("分享", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    guard requireAccountFromMoreSheet() else { return }
+                    if let firstPostID = topic.firstPostID {
+                        Task { await bookmarkWithToast(postID: firstPostID) }
+                    }
+                } label: {
+                    moreSheetRow("保存书签", systemImage: "bookmark")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    guard requireAccountFromMoreSheet() else { return }
+                    startRepost(for: post)
+                } label: {
+                    moreSheetRow("转发", systemImage: "arrow.2.squarepath")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showTopicMoreSheet = false
+                    BrowserState.shared.open(topicURL)
+                } label: {
+                    moreSheetRow("举报", systemImage: "flag", tint: Theme.danger)
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 6)
+            .background(Theme.bg)
+            .navigationTitle("更多操作")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .standardSheet([.medium])
+    }
+
+    /// Bookmarks with a visible outcome either way — silently swallowing the
+    /// failure left the button looking broken.
+    private func bookmarkWithToast(postID: Int) async {
+        do {
+            try await topic.bookmark(postID: postID)
+            ToastCenter.shared.show("已保存书签")
+        } catch {
+            ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// Closes the more sheet; when no account is signed in, swaps it for the
+    /// 注册/登录 gate and reports false. The swap waits a beat because
+    /// presenting a sheet while another dismisses drops it.
+    private func requireAccountFromMoreSheet() -> Bool {
+        showTopicMoreSheet = false
+        guard !isSignedIn else { return true }
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            showGuestGate = true
+        }
+        return false
+    }
+
+    /// Bottom gate for guests: sign up or log in to continue.
+    private var guestGateSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("注册后可发帖、回复、点赞并加入感兴趣的节点。")
+                    .font(Theme.body(13))
+                    .foregroundStyle(Theme.muted(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 10)
+                    .padding(.bottom, 4)
+
+                Button {
+                    showGuestGate = false
+                    goToAuth(.signup)
+                } label: {
+                    moreSheetRow("注册", systemImage: "person.crop.circle.badge.plus")
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    showGuestGate = false
+                    goToAuth(.login)
+                } label: {
+                    moreSheetRow("登录", systemImage: "person.crop.circle.badge.checkmark")
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 6)
+            .background(Theme.bg)
+            .navigationTitle("注册或登录以继续")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .standardSheet([.height(280)])
+    }
+
+    /// Leaves guest mode for the auth screen, opened on the chosen pane.
+    private func goToAuth(_ mode: AuthMode) {
+        presentAuth(app, mode: mode)
     }
 
     private func moreSheetRow(_ title: String, systemImage: String, tint: Color? = nil) -> some View {
@@ -265,7 +398,11 @@ struct PostDetailOverlay: View {
 
     private func scrollBody(for post: Post) -> some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 0) {
+            // Lazy, not eager: the device froze in ScrollView's content
+            // measurement walking the whole eager stack (an alignment-query
+            // blowup deep in SwiftUI). A lazy stack only measures what's
+            // materialized, which caps that pass regardless of content.
+            LazyVStack(alignment: .leading, spacing: 0) {
                 Color.clear.frame(height: readerTopInset)
 
                 authorLine(for: post)
@@ -442,7 +579,7 @@ struct PostDetailOverlay: View {
             Button { showSortDialog = true } label: { readerToolIcon("slider.horizontal.3") }
                 .buttonStyle(.plain)
 
-            Button {} label: { readerToolIcon("ellipsis") }
+            Button { showTopicMoreSheet = true } label: { readerToolIcon("ellipsis") }
                 .buttonStyle(.plain)
 
             readerAvatar
@@ -517,21 +654,47 @@ struct PostDetailOverlay: View {
             .contentShape(Rectangle())
     }
 
+    /// The signed-in user's avatar (or a generic guest one). Tapping opens the
+    /// own profile; guests get the 注册/登录 gate instead.
     private var readerAvatar: some View {
-        RemoteAvatar(
-            url: nil,
-            letter: SampleData.userInitial,
-            variant: 0,
-            size: 26
-        )
-        .overlay(alignment: .bottomLeading) {
-            Circle()
-                .fill(Theme.success)
-                .frame(width: 7, height: 7)
-                .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 1.5))
-                .offset(x: 1, y: -1)
+        let me = ProfileTabAvatarStore.shared
+        return Button {
+            if isSignedIn {
+                guard !me.username.isEmpty else { return }
+                openProfile(UserProfileTarget(
+                    username: me.username,
+                    displayName: me.displayName,
+                    avatarURL: me.avatarURL
+                ))
+            } else {
+                showGuestGate = true
+            }
+        } label: {
+            if isSignedIn {
+                RemoteAvatar(
+                    url: me.avatarURL,
+                    letter: me.initial,
+                    variant: me.variant,
+                    size: 26
+                )
+                .overlay(alignment: .bottomLeading) {
+                    Circle()
+                        .fill(Theme.success)
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 1.5))
+                        .offset(x: 1, y: -1)
+                }
+            } else {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Theme.muted(0.4))
+                    .frame(width: 26, height: 26)
+            }
         }
+        .buttonStyle(.plain)
     }
+
+    private var isSignedIn: Bool { app.authed && !app.isGuest }
 
     private func authorLine(for post: Post) -> some View {
         HStack(spacing: 9) {
@@ -806,12 +969,7 @@ struct PostDetailOverlay: View {
                 .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(SkeletonPulse(active: skeletonPulse))
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                skeletonPulse = true
-            }
-        }
+        .skeletonPulsing()
     }
 
     /// One placeholder reply row (avatar + a couple of lines).
@@ -826,7 +984,7 @@ struct PostDetailOverlay: View {
         }
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(SkeletonPulse(active: skeletonPulse))
+        .skeletonPulsing()
     }
 
     private func skeletonLine(widthFraction: CGFloat) -> some View {
@@ -916,12 +1074,15 @@ struct PostDetailOverlay: View {
         return output
     }
 
+    /// Any reply can collapse to its header line, Reddit-style; its whole
+    /// subtree hides with it (see `visibleComments`).
     private func toggleCollapse(_ comment: PostComment) {
-        guard comment.hasChildren else { return }
-        if collapsedCommentIDs.contains(comment.id) {
-            collapsedCommentIDs.remove(comment.id)
-        } else {
-            collapsedCommentIDs.insert(comment.id)
+        withAnimation(.quick) {
+            if collapsedCommentIDs.contains(comment.id) {
+                collapsedCommentIDs.remove(comment.id)
+            } else {
+                collapsedCommentIDs.insert(comment.id)
+            }
         }
     }
 }
@@ -944,16 +1105,18 @@ private struct NestedReplyRow: View {
         VStack(alignment: .leading, spacing: 8) {
             replyHeader
 
-            if isCollapsed {
-                Text("Replies hidden")
-                    .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.42))
-            } else {
+            // Collapsed: just the header line (avatar + name); everything
+            // else — content, actions, and the whole subtree — is hidden.
+            if !isCollapsed {
                 PostContentView(
                     content: comment.content,
                     metrics: .reply,
                     onImageTap: onImageTap
                 )
+                // Tapping the body collapses the reply, Reddit-style. Links
+                // and images keep their own gestures, which take precedence.
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onToggleCollapse)
 
                 // The red envelope plugin auto-claims on reply, so this is
                 // the outcome of posting rather than an action to take.
@@ -986,6 +1149,8 @@ private struct NestedReplyRow: View {
 
     private var replyHeader: some View {
         HStack(alignment: .center, spacing: 8) {
+            // The avatar still opens the profile; the *name* toggles the
+            // collapse, so both destinations stay one tap away.
             Button {
                 onOpenAuthor(UserProfileTarget(username: comment.author, displayName: nil, avatarURL: comment.avatarURL))
             } label: {
@@ -993,8 +1158,12 @@ private struct NestedReplyRow: View {
             }
             .buttonStyle(.plain)
 
-            Text(comment.author)
-                .font(Theme.body(12, weight: .semibold))
+            Button(action: onToggleCollapse) {
+                Text(comment.author)
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+            }
+            .buttonStyle(.plain)
 
             authorFlairBadge(comment.flairURL)
             authorTitleChip(comment.authorTitle)
@@ -1005,7 +1174,7 @@ private struct NestedReplyRow: View {
 
             Spacer(minLength: 0)
 
-            if comment.hasChildren {
+            if comment.hasChildren || isCollapsed {
                 Button(action: onToggleCollapse) {
                     Image(systemName: isCollapsed ? "chevron.down" : "chevron.up")
                         .font(.system(size: 11, weight: .semibold))
@@ -1013,8 +1182,14 @@ private struct NestedReplyRow: View {
                         .frame(width: 26, height: 26)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(isCollapsed ? "Expand replies" : "Collapse replies")
+                .accessibilityLabel(isCollapsed ? "展开回复" : "收起回复")
             }
+        }
+        // Collapsed rows re-expand from a tap anywhere on the line; the
+        // avatar's own button keeps precedence for the profile.
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isCollapsed { onToggleCollapse() }
         }
     }
 
@@ -1108,14 +1283,6 @@ private struct RevealingView<Content: View>: View {
         content
             .opacity(reveal.progress)
             .offset(y: (1 - reveal.progress) * -4)
-    }
-}
-
-/// Gentle opacity pulse for skeleton placeholders.
-private struct SkeletonPulse: ViewModifier {
-    let active: Bool
-    func body(content: Content) -> some View {
-        content.opacity(active ? 0.55 : 1)
     }
 }
 

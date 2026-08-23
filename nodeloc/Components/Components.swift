@@ -401,57 +401,204 @@ struct CachedRemoteImage<Content: View, Placeholder: View>: View {
 /// Loading indicator built from the nodeloc wordmark. A dim copy sits underneath
 /// and a full-color copy is revealed over it — either proportionally while the
 /// user drags (`progress`), or by a repeating sweep once indeterminate.
+/// The NODELOC mark, loading — from the "Nodeloc Loader" design (La/Lb/Lc).
+/// The 11c geometry: hexagon cage, six dashed spokes, six vertex nodes, hub.
+/// Per the VI motion rule nothing rotates, nothing bounces and the dash never
+/// marches — the loading feeling is a sequence around the hexagon. Reduced
+/// motion holds the mark static at full opacity, as specced.
 struct NodelocLoader: View {
-    /// 0…1 while pulling; nil animates a continuous sweep.
-    var progress: CGFloat?
-    var height: CGFloat = 26
+    enum Variant {
+        /// La — spoke and node light in turn, clockwise. The safest default.
+        case relay
+        /// Lb — spokes land outward from the hub, nodes arrive behind them.
+        /// Most expressive; splash use.
+        case reachOut
+        /// Lc — ghost structure, six equal dots travel the cage. Reads small;
+        /// degrades to cage+dots ≤30pt and to dots-only ≤18pt.
+        case minimal
+    }
 
-    @State private var sweep: CGFloat = 0
+    var variant: Variant = .relay
+    var height: CGFloat = 56
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+
+    // Design space: viewBox 23.4 20 84.2 94.5.
+    private static let designSize = CGSize(width: 84.2, height: 94.5)
+    private static let designOrigin = CGPoint(x: 23.4, y: 20)
+    private static let vertices: [CGPoint] = [
+        CGPoint(x: 65, y: 25), CGPoint(x: 99.6, y: 45), CGPoint(x: 99.6, y: 85),
+        CGPoint(x: 65, y: 105), CGPoint(x: 30.4, y: 85), CGPoint(x: 30.4, y: 45),
+    ]
+    private static let spokes: [(CGPoint, CGPoint)] = [
+        (CGPoint(x: 65, y: 49), CGPoint(x: 65, y: 33)),
+        (CGPoint(x: 79.8, y: 57.5), CGPoint(x: 92.7, y: 50.1)),
+        (CGPoint(x: 79.8, y: 72.5), CGPoint(x: 92.2, y: 79.7)),
+        (CGPoint(x: 65, y: 81), CGPoint(x: 65, y: 97)),
+        (CGPoint(x: 50.2, y: 72.5), CGPoint(x: 37.8, y: 79.7)),
+        (CGPoint(x: 50.2, y: 57.5), CGPoint(x: 37.3, y: 50.1)),
+    ]
+    private static let hub = CGPoint(x: 65, y: 65)
+    private static let nodeRadii: [CGFloat] = [5, 6.5, 8, 9.5, 7, 5.5]
 
     var body: some View {
-        wordmark
-            .opacity(0.18)
-            .overlay {
-                wordmark
-                    .mask(alignment: .leading) { revealMask }
-            }
-            .accessibilityLabel("加载中")
-    }
-
-    private var wordmark: some View {
-        Image("NodelocWordmark")
-            .resizable()
-            .scaledToFit()
-            .frame(height: height)
-    }
-
-    @ViewBuilder
-    private var revealMask: some View {
-        GeometryReader { geo in
-            if let progress {
-                // Drag-driven: reveal left→right in proportion to the pull.
-                Rectangle()
-                    .frame(width: geo.size.width * min(max(progress, 0), 1))
-            } else if reduceMotion {
-                Rectangle()
+        Group {
+            if reduceMotion {
+                canvas(at: nil)
             } else {
-                // Indeterminate: a soft band sweeping across the wordmark.
-                let band = geo.size.width * 0.45
-                LinearGradient(
-                    colors: [.clear, .white, .white, .clear],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: band)
-                .offset(x: -band + (geo.size.width + band * 2) * sweep)
-                .onAppear {
-                    withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                        sweep = 1
-                    }
+                TimelineView(.animation) { context in
+                    canvas(at: context.date.timeIntervalSinceReferenceDate)
                 }
             }
         }
+        .frame(width: height * Self.designSize.width / Self.designSize.height, height: height)
+        .accessibilityLabel("加载中")
+    }
+
+    /// One frame. `time` nil = static mark at full opacity (reduced motion).
+    private func canvas(at time: TimeInterval?) -> some View {
+        Canvas { ctx, size in
+            let scale = size.height / Self.designSize.height
+            func point(_ p: CGPoint) -> CGPoint {
+                CGPoint(x: (p.x - Self.designOrigin.x) * scale, y: (p.y - Self.designOrigin.y) * scale)
+            }
+
+            let palette = palette
+            let dotsOnly = variant == .minimal && height <= 18
+            let compact = variant == .minimal && height <= 30
+
+            // Cage.
+            if !dotsOnly {
+                var cage = Path()
+                cage.addLines(Self.vertices.map(point))
+                cage.closeSubpath()
+                let cageOpacity: Double = switch variant {
+                case .relay: 1
+                case .reachOut: time.map { breathe(phase(at: $0, duration: 1.6, delay: 0)) } ?? 1
+                case .minimal: compact ? 0.38 : 0.4
+                }
+                ctx.stroke(
+                    cage,
+                    with: .color(palette.cage.opacity(cageOpacity)),
+                    style: StrokeStyle(lineWidth: (compact ? 4 : 2.6) * scale, lineJoin: .round)
+                )
+            }
+
+            // Spokes — dashed, and the dash pattern never marches.
+            if !dotsOnly && !compact {
+                for (index, spoke) in Self.spokes.enumerated() {
+                    let opacity: Double = switch variant {
+                    case .relay:
+                        time.map { relay(phase(at: $0, duration: 1.8, delay: 0.3 * Double(index))) } ?? 1
+                    case .reachOut:
+                        time.map { reach(phase(at: $0, duration: 1.6, delay: 0.07 * Double(index))) } ?? 1
+                    case .minimal:
+                        0.22
+                    }
+                    var path = Path()
+                    path.move(to: point(spoke.0))
+                    path.addLine(to: point(spoke.1))
+                    ctx.stroke(
+                        path,
+                        with: .color(palette.spoke.opacity(opacity)),
+                        style: StrokeStyle(lineWidth: 2.4 * scale, dash: [4.4 * scale, 3.2 * scale])
+                    )
+                }
+            }
+
+            // Vertex nodes.
+            for (index, vertex) in Self.vertices.enumerated() {
+                let radius: CGFloat = switch variant {
+                case .relay, .reachOut: Self.nodeRadii[index]
+                case .minimal: dotsOnly ? 11 : (compact ? 7.5 : 5)
+                }
+                let opacity: Double = switch variant {
+                case .relay:
+                    time.map { relay(phase(at: $0, duration: 1.8, delay: 0.3 * Double(index))) } ?? 1
+                case .reachOut:
+                    time.map { reach(phase(at: $0, duration: 1.6, delay: 0.12 + 0.07 * Double(index))) } ?? 1
+                case .minimal:
+                    time.map { relay(phase(at: $0, duration: 1.5, delay: 0.25 * Double(index))) } ?? 1
+                }
+                let color = variant == .minimal ? palette.minimalDot : palette.nodes[index]
+                let center = point(vertex)
+                let r = radius * scale
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                    with: .color(color.opacity(opacity))
+                )
+            }
+
+            // Hub — never moves.
+            if !dotsOnly && !compact {
+                let center = point(Self.hub)
+                let r = 12 * scale
+                ctx.fill(
+                    Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                    with: .color(palette.hub.opacity(variant == .minimal ? 0.32 : 1))
+                )
+            }
+        }
+    }
+
+    // MARK: Motion (the design's keyframes, piecewise)
+
+    private func phase(at time: TimeInterval, duration: Double, delay: Double) -> Double {
+        let local = (time - delay).truncatingRemainder(dividingBy: duration)
+        return (local < 0 ? local + duration : local) / duration
+    }
+
+    /// nl-relay: 0.18 → 1 by 12%, back to 0.18 by 38%, rest dim. Linear.
+    private func relay(_ phase: Double) -> Double {
+        switch phase {
+        case ..<0.12: 0.18 + 0.82 * (phase / 0.12)
+        case ..<0.38: 1 - 0.82 * ((phase - 0.12) / 0.26)
+        default: 0.18
+        }
+    }
+
+    /// nl-out: in by 22%, hold to 62%, gone by 88%.
+    private func reach(_ phase: Double) -> Double {
+        switch phase {
+        case ..<0.22: phase / 0.22
+        case ..<0.62: 1
+        case ..<0.88: 1 - (phase - 0.62) / 0.26
+        default: 0
+        }
+    }
+
+    /// nl-breathe: 0.55 ↔ 1, ease-in-out.
+    private func breathe(_ phase: Double) -> Double {
+        0.55 + 0.45 * (0.5 - 0.5 * cos(phase * 2 * .pi))
+    }
+
+    // MARK: Colourways (dark, and the light ground ramp inverted)
+
+    private struct Palette {
+        let cage: Color
+        let spoke: Color
+        let hub: Color
+        let nodes: [Color]
+        let minimalDot: Color
+    }
+
+    private var palette: Palette {
+        colorScheme == .dark
+            ? Palette(
+                cage: Color(hex: 0x00A870),
+                spoke: Color(hex: 0xFF9933),
+                hub: Color(hex: 0x6FE9C5),
+                nodes: [0x00875A, 0x00A870, 0x3AD4A8, 0x3AD4A8, 0x009966, 0x00A870].map { Color(hex: $0) },
+                minimalDot: Color(hex: 0x6FE9C5)
+            )
+            : Palette(
+                cage: Color(hex: 0x009966),
+                spoke: Color(hex: 0xE0771A),
+                hub: Color(hex: 0x00593B),
+                nodes: [0x7CEBC4, 0x3AD4A8, 0x00714C, 0x00402C, 0x009966, 0x3AD4A8].map { Color(hex: $0) },
+                minimalDot: Color(hex: 0x00593B)
+            )
     }
 }
 
@@ -1065,5 +1212,177 @@ struct SectionKicker: View {
             .font(Theme.body(11))
             .tracking(0.9)
             .foregroundStyle(Theme.muted(0.5))
+    }
+}
+
+// MARK: - Skeletons
+
+/// Gentle opacity pulse for skeleton placeholders. Owns its animation state so
+/// a skeleton only has to attach the modifier — no per-screen @State needed.
+private struct SkeletonPulse: ViewModifier {
+    @State private var dimmed = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(dimmed ? 0.55 : 1)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    dimmed = true
+                }
+            }
+    }
+}
+
+extension View {
+    func skeletonPulsing() -> some View { modifier(SkeletonPulse()) }
+}
+
+/// One grey placeholder line for skeleton screens.
+struct SkeletonLine: View {
+    var widthFraction: CGFloat = 1
+    var height: CGFloat = 13
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(Theme.neutral300)
+            .frame(height: height)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .scaleEffect(x: widthFraction, anchor: .leading)
+    }
+}
+
+// MARK: - Toast
+
+/// App-wide transient notice, for user actions that would otherwise fail
+/// silently (bookmark, like, reply). One at a time; new messages replace the
+/// current one and restart the clock.
+@MainActor
+@Observable
+final class ToastCenter {
+    static let shared = ToastCenter()
+
+    private(set) var message: String?
+    private var hideTask: Task<Void, Never>?
+
+    func show(_ text: String) {
+        hideTask?.cancel()
+        withAnimation(.spring(duration: 0.3)) { message = text }
+        hideTask = Task {
+            try? await Task.sleep(for: .seconds(2.6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) { self.message = nil }
+        }
+    }
+
+    /// The friendly line for a failed action — never the raw error.
+    func showError(_ error: Error) {
+        show((error as? LocalizedError)?.errorDescription ?? "操作失败，请稍后重试")
+    }
+}
+
+/// Mounted once at the root (ContentView); floats over everything.
+struct ToastHost: View {
+    private var center = ToastCenter.shared
+
+    var body: some View {
+        if let message = center.message {
+            Text(message)
+                .font(Theme.body(13, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 11)
+                .glassEffect(.regular.tint(Theme.bg.opacity(0.5)), in: .capsule)
+                .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
+                .padding(.horizontal, 32)
+                .padding(.top, 6)
+                .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+}
+
+#Preview("Nodeloc Loader") {
+    VStack(spacing: 28) {
+        HStack(spacing: 28) {
+            VStack(spacing: 8) {
+                NodelocLoader(variant: .relay, height: 96)
+                Text("La · Relay").font(.caption2)
+            }
+            VStack(spacing: 8) {
+                NodelocLoader(variant: .reachOut, height: 96)
+                Text("Lb · Reach out").font(.caption2)
+            }
+            VStack(spacing: 8) {
+                NodelocLoader(variant: .minimal, height: 96)
+                Text("Lc · Minimal").font(.caption2)
+            }
+        }
+        HStack(alignment: .bottom, spacing: 24) {
+            NodelocLoader(variant: .minimal, height: 44)
+            NodelocLoader(variant: .minimal, height: 24)
+            NodelocLoader(variant: .minimal, height: 16)
+        }
+    }
+    .padding(40)
+    .background(Theme.bg)
+}
+
+// MARK: - Pull to refresh (Lc)
+
+/// Drives a custom pull-to-refresh: feed it the scroll's top offset from
+/// onScrollGeometryChange and it reports pull progress, fires `onRefresh`
+/// once past the threshold, and re-arms after the scroll settles. Exists
+/// because `.refreshable` can't restyle its ProgressView, and the design
+/// names Lc as the pull-to-refresh spinner.
+@MainActor
+@Observable
+final class PullToRefresh {
+    private(set) var progress: Double = 0
+    private(set) var isRefreshing = false
+
+    private let threshold: CGFloat = 72
+    private var triggered = false
+
+    /// `top` is contentOffset.y — negative while rubber-banding past the top.
+    func scrolled(to top: CGFloat, onRefresh: @escaping () async -> Void) {
+        let pull = max(0, -top)
+        if !isRefreshing {
+            progress = min(1, Double(pull / threshold))
+        }
+        if pull <= 2 { triggered = false }
+        guard pull >= threshold, !triggered, !isRefreshing else { return }
+
+        triggered = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.quick) { isRefreshing = true }
+        Task {
+            let start = Date()
+            await onRefresh()
+            // Hold through at least one loop step so the loader doesn't blink.
+            let elapsed = Date().timeIntervalSince(start)
+            if elapsed < 0.6 {
+                try? await Task.sleep(for: .seconds(0.6 - elapsed))
+            }
+            withAnimation(.quick) {
+                self.isRefreshing = false
+                self.progress = 0
+            }
+        }
+    }
+}
+
+/// The Lc dot loop fading and growing in with the pull, steady while
+/// refreshing. Place near the top of the screen, over the rubber-band gap.
+struct NodelocRefreshIndicator: View {
+    let pull: PullToRefresh
+
+    var body: some View {
+        if pull.progress > 0.02 || pull.isRefreshing {
+            NodelocLoader(variant: .minimal, height: 26)
+                .opacity(pull.isRefreshing ? 1 : 0.25 + 0.75 * pull.progress)
+                .scaleEffect(pull.isRefreshing ? 1 : 0.7 + 0.3 * pull.progress)
+                .transition(.opacity)
+        }
     }
 }

@@ -137,7 +137,10 @@ final class EmojiImageStore {
         if raw.hasPrefix("http") { return URL(string: raw) }
         if raw.hasPrefix("//") { return URL(string: "https:" + raw) }
         if raw.hasPrefix("/") { return URL(string: raw, relativeTo: DiscourseConfig.baseURL)?.absoluteURL }
-        return URL(string: raw)
+        // A bare name (no scheme, no path) is never a fetchable image — turning
+        // it into a relative URL produced -1002 requests for strings like "gem".
+        guard let url = URL(string: raw), url.scheme != nil else { return nil }
+        return url
     }
 }
 
@@ -1000,6 +1003,9 @@ struct PostImageFullScreen: ViewModifier {
             ) {
                 images = []
             }
+            // Clear, so the viewer's own dimming layer is all there is — the
+            // drag-to-dismiss fade then reveals the reader behind the image.
+            .presentationBackground(.clear)
         }
     }
 
@@ -1376,6 +1382,9 @@ struct MediaViewerChrome<Content: View>: View {
     /// Sits between the caption and the action bar. The video puts its
     /// transport row here; the image viewer has nothing to put.
     var middleBar: AnyView?
+    /// The image viewer dims this during its drag-to-dismiss; the media stays
+    /// opaque while the room darkens/lightens around it.
+    var backgroundOpacity: Double = 1
     let onClose: () -> Void
     @Binding var isVisible: Bool
     /// Reports when a node or profile page covers the media, so a video can
@@ -1392,7 +1401,7 @@ struct MediaViewerChrome<Content: View>: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(backgroundOpacity).ignoresSafeArea()
 
             content
 
@@ -1843,6 +1852,13 @@ struct PostImageViewer: View {
     let onClose: () -> Void
 
     @State private var isChromeVisible = true
+    /// Drag-to-dismiss: how far the image has been pulled down.
+    @State private var dragOffset: CGFloat = 0
+    /// nil until this gesture's direction is decided; false = it's a page
+    /// swipe or upward drag, leave it to the TabView.
+    @State private var isDismissDrag: Bool?
+    /// Zoomed images pan with the drag instead of dismissing.
+    @State private var isZoomed = false
 
     var body: some View {
         MediaViewerChrome(
@@ -1852,6 +1868,7 @@ struct PostImageViewer: View {
             author: author,
             onLike: onLike,
             onComment: onComment,
+            backgroundOpacity: 1 - Double(min(max(dragOffset, 0) / 500, 0.8)),
             onClose: onClose,
             isVisible: $isChromeVisible
         ) {
@@ -1861,13 +1878,50 @@ struct PostImageViewer: View {
                         urlString: image.fullSizeURLString,
                         onToggleChrome: {
                             withAnimation(.quick) { isChromeVisible.toggle() }
-                        }
+                        },
+                        onZoomChanged: { isZoomed = $0 }
                     )
                     .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
+            // Telegram-style: the image follows the finger down and shrinks a
+            // little while the room dims out behind it.
+            .offset(y: dragOffset)
+            .scaleEffect(max(1 - dragOffset / 1400, 0.85))
+            .simultaneousGesture(dismissDragGesture, isEnabled: !isZoomed)
         }
+    }
+
+    /// Vertical pull dismisses; horizontal swipes stay with the pager. The
+    /// direction is decided once per gesture from its first movement.
+    private var dismissDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                if isDismissDrag == nil {
+                    let translation = value.translation
+                    isDismissDrag = translation.height > 0
+                        && abs(translation.height) > abs(translation.width) * 1.2
+                    if isDismissDrag == true {
+                        withAnimation(.quick) { isChromeVisible = false }
+                    }
+                }
+                guard isDismissDrag == true else { return }
+                dragOffset = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                let wasDismissDrag = isDismissDrag == true
+                isDismissDrag = nil
+                guard wasDismissDrag else { return }
+                if dragOffset > 130 || value.velocity.height > 900 {
+                    onClose()
+                } else {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        dragOffset = 0
+                    }
+                    withAnimation(.quick) { isChromeVisible = true }
+                }
+            }
     }
 }
 
@@ -1875,6 +1929,9 @@ struct PostImageViewer: View {
 private struct ZoomableImage: View {
     let urlString: String
     var onToggleChrome: (() -> Void)?
+    /// Reports zoomed-in state so the viewer disables drag-to-dismiss while
+    /// the drag should pan the magnified image instead.
+    var onZoomChanged: ((Bool) -> Void)?
 
     @State private var scale: CGFloat = 1
     @State private var committedScale: CGFloat = 1
@@ -1929,9 +1986,13 @@ private struct ZoomableImage: View {
 
     private var zoomGesture: some Gesture {
         MagnifyGesture()
-            .onChanged { scale = min(max(committedScale * $0.magnification, 1), maxScale) }
+            .onChanged {
+                scale = min(max(committedScale * $0.magnification, 1), maxScale)
+                onZoomChanged?(scale > 1.01)
+            }
             .onEnded { _ in
                 committedScale = scale
+                onZoomChanged?(scale > 1.01)
                 // Zooming out can leave the image off-centre; pull it back.
                 withAnimation(.easeOut(duration: 0.2)) {
                     offset = clamped(offset)
@@ -1951,6 +2012,7 @@ private struct ZoomableImage: View {
             committedScale = scale
             committedOffset = offset
         }
+        onZoomChanged?(scale > 1.01)
     }
 
     /// Keeps the image's edges from being dragged inside the screen. When an
@@ -2344,3 +2406,4 @@ struct PostOneboxView: View {
     .environment(VideoMuteState.shared)
     .environment(AppState())
 }
+

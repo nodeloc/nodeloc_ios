@@ -52,6 +52,37 @@ func closeOverlay(_ app: AppState) {
     }
 }
 
+/// Presents the in-place auth overlay (AuthFlowOverlay) over whatever the
+/// guest was reading, rather than tearing down to the cold-start AuthView.
+@MainActor
+func presentAuth(_ app: AppState, mode: AuthMode = .login) {
+    app.authMode = mode
+    withAnimation(.overlayPush) {
+        app.overlay = .auth
+    }
+}
+
+/// Header 登录 button shown while browsing as a guest. Same glass chrome as
+/// the hamburger `HeaderIconButton`, stretched to a capsule for the text.
+struct GuestLoginButton: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        Button {
+            presentAuth(app)
+        } label: {
+            Text("登录")
+                .font(Theme.body(13, weight: .semibold))
+                .foregroundStyle(Theme.headerText)
+                .padding(.horizontal, 14)
+                .frame(height: FloatingHeader.controlHeight)
+        }
+        .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
+        .buttonBorderShape(.capsule)
+        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+    }
+}
+
 func nodelocSiteURL(_ path: String) -> URL? {
     if path.hasPrefix("http") { return URL(string: path) }
     if path.hasPrefix("/") {

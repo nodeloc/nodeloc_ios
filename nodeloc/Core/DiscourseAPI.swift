@@ -20,14 +20,17 @@ nonisolated enum DiscourseConfig {
     /// enable the native GIF search. Empty = GIF button disabled.
     static let klipyAPIKey = "EzZHqISrqNDXf1Jy8TdgG9WQzM1gqPlUYHoQrkZhL0X8WZIM8KL3XTSYatDZ83Bt"
 
-    static func clientID() -> String {
+    /// Stable per-install id, generated once and memoized (static lets are
+    /// initialized lazily and thread-safely) so authenticated requests don't
+    /// hit UserDefaults on every call.
+    static let clientID: String = {
         if let existing = UserDefaults.standard.string(forKey: clientIDDefaultsKey) {
             return existing
         }
         let id = UUID().uuidString
         UserDefaults.standard.set(id, forKey: clientIDDefaultsKey)
         return id
-    }
+    }()
 }
 
 /// Holds the signed-in user's auth state. The app supports both Discourse User API
@@ -48,14 +51,53 @@ final class DiscourseAuth {
 
 enum DiscourseError: Error, LocalizedError {
     case badResponse(Int)
+    /// Cloudflare answered with a challenge instead of the API — the app can't
+    /// solve it, only report it distinctly from a real permission error.
+    case challenged
     case decoding(Error)
     case transport(Error)
 
+    /// True when the device has no usable network, so screens can show a
+    /// wifi-slash state and offer a retry.
+    var isOffline: Bool {
+        guard case .transport(let error) = self,
+              let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Friendly, user-facing wording only — status codes and technical detail
+    /// stay out of the UI.
     var errorDescription: String? {
         switch self {
-        case .badResponse(let code): return "Server returned status \(code)."
-        case .decoding(let error): return "Couldn't read the response: \(error.localizedDescription)"
-        case .transport(let error): return error.localizedDescription
+        case .badResponse(let code):
+            switch code {
+            case 401, 403: return "没有权限或登录已失效，请重新登录后再试"
+            case 404: return "内容不存在或已被删除"
+            case 429: return "操作太频繁，请稍后再试"
+            case 500...: return "服务器开小差了，请稍后再试"
+            default: return "请求失败，请稍后重试"
+            }
+        case .challenged:
+            return "请求被站点安全防护拦截，请稍后再试"
+        case .decoding:
+            return "数据加载出错，请稍后重试"
+        case .transport(let error):
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+                    return "网络不可用，请检查网络连接"
+                case .timedOut:
+                    return "连接超时，请稍后重试"
+                default:
+                    break
+                }
+            }
+            return "网络异常，请稍后重试"
         }
     }
 }
@@ -78,28 +120,67 @@ struct DiscourseClient {
         let data: Data
     }
 
-    // MARK: Requests
+    // MARK: Request pipeline
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+    /// Builds an authenticated JSON request against the Discourse base URL.
+    /// Every endpoint goes through here so headers stay consistent.
+    private func makeRequest(
+        _ method: String = "GET",
+        path: String,
+        query: [URLQueryItem] = [],
+        includeCSRF: Bool
+    ) -> URLRequest {
         var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: false)
+        applyAuth(to: &request, includeCSRF: includeCSRF)
+        return request
+    }
 
-        let data: Data
-        let response: URLResponse
+    /// Executes a request, mapping transport failures and non-2xx statuses to
+    /// `DiscourseError`. The single funnel for all network I/O in this client.
+    private func perform(_ request: URLRequest) async throws -> Data {
+        let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
         } catch {
             throw DiscourseError.transport(error)
         }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
+            // Cloudflare interception looks like a 403 but isn't one from
+            // Discourse: it carries cf-mitigated (or an HTML body from the
+            // cloudflare server) instead of a JSON error.
+            let cfMitigated = http.value(forHTTPHeaderField: "cf-mitigated")
+            let server = http.value(forHTTPHeaderField: "Server")?.lowercased() ?? ""
+            let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+            let isChallenge = cfMitigated != nil
+                || (http.statusCode == 403 && server.contains("cloudflare") && contentType.contains("text/html"))
+
+            #if DEBUG
+            let bodyPrefix = String(decoding: data.prefix(200), as: UTF8.self)
+            print("""
+            [DiscourseAPI] \(http.statusCode) \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "")
+              server=\(server) cf-mitigated=\(cfMitigated ?? "-") cf-ray=\(http.value(forHTTPHeaderField: "cf-ray") ?? "-")
+              body: \(bodyPrefix)
+            """)
+            #endif
+
+            throw isChallenge ? DiscourseError.challenged : DiscourseError.badResponse(http.statusCode)
         }
+        return data
+    }
+
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        let data = try await perform(makeRequest(path: path, query: query, includeCSRF: false))
+        return try Self.decode(data)
+    }
+
+    private static func decode<T: Decodable>(_ data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
             return try decoder.decode(T.self, from: data)
         } catch {
             throw DiscourseError.decoding(error)
@@ -107,23 +188,27 @@ struct DiscourseClient {
     }
 
     private func applyAuth(to request: inout URLRequest, includeCSRF: Bool) {
-        let hasUserAPIKey = auth.userApiKey != nil
-        let hasWebsiteSession = auth.sessionCookie != nil
+        let userApiKey = auth.userApiKey
+        let sessionCookie = auth.sessionCookie
 
-        if let key = auth.userApiKey {
-            request.setValue(key, forHTTPHeaderField: "User-Api-Key")
-            request.setValue(DiscourseConfig.clientID(), forHTTPHeaderField: "User-Api-Client-Id")
+        if let userApiKey {
+            request.setValue(userApiKey, forHTTPHeaderField: "User-Api-Key")
+            request.setValue(DiscourseConfig.clientID, forHTTPHeaderField: "User-Api-Client-Id")
         }
-        if let cookie = auth.sessionCookie {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if sessionCookie != nil {
+            // No manual Cookie header: Discourse rotates the `_t` auth token,
+            // and a pinned snapshot goes stale and gets every request answered
+            // with not_logged_in. URLSession's cookie jar attaches the cookies
+            // itself and absorbs rotations from Set-Cookie; DiscourseLogin
+            // seeds the jar on restore and snapshots it on backgrounding.
             request.setValue(DiscourseConfig.baseURL.absoluteString, forHTTPHeaderField: "Origin")
             request.setValue(DiscourseConfig.baseURL.absoluteString, forHTTPHeaderField: "Referer")
         }
-        if hasUserAPIKey || hasWebsiteSession {
+        if userApiKey != nil || sessionCookie != nil {
             request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
             request.setValue("true", forHTTPHeaderField: "Discourse-Present")
         }
-        if (includeCSRF || hasWebsiteSession), let csrf = auth.csrfToken {
+        if (includeCSRF || sessionCookie != nil), let csrf = auth.csrfToken {
             request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
         }
     }
@@ -175,12 +260,6 @@ struct DiscourseClient {
             "category/\(categoryID)/notifications",
             form: ["notification_level": String(level)]
         )
-    }
-
-    private static func decode<T: Decodable>(_ data: Data) throws -> T {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(T.self, from: data)
     }
 
     func categories(includeSubcategories: Bool = false) async throws -> CategoriesResponse {
@@ -329,6 +408,15 @@ struct DiscourseClient {
         try await get("session/current.json")
     }
 
+    /// Signup helper: whether a username is free, with Discourse's suggestion
+    /// when it isn't.
+    func checkUsername(_ username: String) async throws -> UsernameCheckResponse {
+        try await get(
+            "u/check_username.json",
+            query: [URLQueryItem(name: "username", value: username)]
+        )
+    }
+
     func notifications() async throws -> NotificationsResponse {
         try await get("notifications.json")
     }
@@ -382,6 +470,42 @@ struct DiscourseClient {
                 targetMessageID: targetMessageID
             )
         )
+    }
+
+    /// Raw variant of `chatMessages` for the disk cache: the snapshot is
+    /// stored exactly as served, so it re-decodes through the same path later.
+    func chatMessagesWithRaw(
+        channelID: Int,
+        pageSize: Int = 50,
+        targetMessageID: Int? = nil
+    ) async throws -> (response: ChatMessagesResponse, raw: Data) {
+        let data = try await perform(makeRequest(
+            path: "chat/api/channels/\(channelID)/messages.json",
+            query: chatMessageQuery(
+                pageSize: pageSize,
+                fetchFromLastRead: targetMessageID == nil,
+                targetMessageID: targetMessageID
+            ),
+            includeCSRF: false
+        ))
+        return (try Self.decode(data), data)
+    }
+
+    /// One MessageBus long-poll round — the transport Discourse itself uses
+    /// for live updates. `positions` maps bus channel ("/chat/123") to the
+    /// last seen message-bus id (-1 = only new events). The server holds the
+    /// request ~25s and answers with whatever arrives.
+    func messageBusPoll(clientID: String, positions: [String: Int]) async throws -> Data {
+        var request = makeRequest("POST", path: "message-bus/\(clientID)/poll", includeCSRF: true)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = positions
+            .map { key, value in
+                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: Self.formAllowedCharacters) ?? key
+                return "\(encodedKey)=\(value)"
+            }
+            .joined(separator: "&")
+            .data(using: .utf8)
+        return try await perform(request)
     }
 
     func chatSearch(
@@ -444,13 +568,7 @@ struct DiscourseClient {
         }
 
         let data = try await post("chat/\(channelID).json", form: form)
-        do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(ChatCreateMessageResponse.self, from: data)
-        } catch {
-            throw DiscourseError.decoding(error)
-        }
+        return try Self.decode(data)
     }
 
     /// Marks a chat channel read up to `messageID` (the endpoint requires the
@@ -458,26 +576,11 @@ struct DiscourseClient {
     /// stops counting it.
     @discardableResult
     func markChatChannelRead(channelID: Int, messageID: Int) async throws -> Data {
-        var components = URLComponents(
-            url: baseURL.appending(path: "chat/api/channels/\(channelID)/read"),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [URLQueryItem(name: "message_id", value: String(messageID))]
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "PUT"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
-        do {
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                throw DiscourseError.badResponse(http.statusCode)
-            }
-            return data
-        } catch let error as DiscourseError {
-            throw error
-        } catch {
-            throw DiscourseError.transport(error)
-        }
+        try await send(
+            "PUT",
+            path: "chat/api/channels/\(channelID)/read",
+            query: [URLQueryItem(name: "message_id", value: String(messageID))]
+        )
     }
 
     private func chatMessageQuery(
@@ -506,50 +609,23 @@ struct DiscourseClient {
 
     /// Bodyless authenticated request (PUT/DELETE), used by the follow endpoints.
     @discardableResult
-    private func send(_ method: String, path: String) async throws -> Data {
-        var request = URLRequest(url: baseURL.appending(path: path))
-        request.httpMethod = method
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-        return data
+    private func send(_ method: String, path: String, query: [URLQueryItem] = []) async throws -> Data {
+        try await perform(makeRequest(method, path: path, query: query, includeCSRF: true))
     }
 
+    /// Unordered form fields; sugar over `formItems` for the common case.
     @discardableResult
     private func post(_ path: String, form: [String: String]) async throws -> Data {
-        var request = URLRequest(url: baseURL.appending(path: path))
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
+        try await formItems("POST", path: path, items: form.map { ($0.key, $0.value) })
+    }
 
+    /// RFC 3986 unreserved characters — everything else gets percent-encoded in
+    /// form bodies.
+    private static let formAllowedCharacters: CharacterSet = {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
-        request.httpBody = form
-            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
-            .joined(separator: "&")
-            .data(using: .utf8)
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-        return data
-    }
+        return allowed
+    }()
 
     /// Form-encoded request with ordered, possibly repeated keys, for any HTTP
     /// method. Rails reads `options[]=a&options[]=b` as an array; a dictionary
@@ -560,33 +636,17 @@ struct DiscourseClient {
         path: String,
         items: [(String, String)]
     ) async throws -> Data {
-        var request = URLRequest(url: baseURL.appending(path: path))
-        request.httpMethod = method
+        var request = makeRequest(method, path: path, includeCSRF: true)
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
-
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
         request.httpBody = items
             .map { key, value in
-                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
-                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+                let encodedKey = key.addingPercentEncoding(withAllowedCharacters: Self.formAllowedCharacters) ?? key
+                let encodedValue = value.addingPercentEncoding(withAllowedCharacters: Self.formAllowedCharacters) ?? ""
                 return "\(encodedKey)=\(encodedValue)"
             }
             .joined(separator: "&")
             .data(using: .utf8)
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-        return data
+        return try await perform(request)
     }
 
     /// Saves account preferences. `items` are already-encoded `user_option`
@@ -717,37 +777,20 @@ struct DiscourseClient {
     /// array, which form encoding can't express.
     @discardableResult
     private func postJSON(_ path: String, body: Encodable) async throws -> Data {
-        var request = URLRequest(url: baseURL.appending(path: path))
-        request.httpMethod = "POST"
+        var request = makeRequest("POST", path: path, includeCSRF: true)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
-
         do {
             request.httpBody = try JSONEncoder().encode(body)
         } catch {
             throw DiscourseError.decoding(error)
         }
-
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-        return data
+        return try await perform(request)
     }
 
     private func postMultipart<T: Decodable>(_ path: String, fields: [String: String], file: MultipartFile) async throws -> T {
         let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: baseURL.appending(path: path))
-        request.httpMethod = "POST"
+        var request = makeRequest("POST", path: path, includeCSRF: true)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        applyAuth(to: &request, includeCSRF: true)
 
         var body = Data()
         for (name, value) in fields {
@@ -762,23 +805,8 @@ struct DiscourseClient {
         body.appendUTF8("\r\n--\(boundary)--\r\n")
         request.httpBody = body
 
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-
-        do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw DiscourseError.decoding(error)
-        }
+        let data = try await perform(request)
+        return try Self.decode(data)
     }
 
     /// Likes a post (post_action_type_id 2).
@@ -869,13 +897,7 @@ struct DiscourseClient {
         }
 
         let data = try await post("node/create", form: form)
-        do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(CreateCommunityResponse.self, from: data)
-        } catch {
-            throw DiscourseError.decoding(error)
-        }
+        return try Self.decode(data)
     }
 
     /// Uploads a composer attachment and returns the Discourse upload token/URL.
@@ -893,23 +915,8 @@ struct DiscourseClient {
         ]
         var request = URLRequest(url: components.url!)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw DiscourseError.transport(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DiscourseError.badResponse(http.statusCode)
-        }
-        do {
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try decoder.decode(KlipySearchResponse.self, from: data)
-        } catch {
-            throw DiscourseError.decoding(error)
-        }
+        let data = try await perform(request)
+        return try Self.decode(data)
     }
 
     /// `upload_type` replaces the `type` param, which Discourse deprecated in
@@ -1062,9 +1069,11 @@ enum DiscourseFormat {
     ///
     /// Long tokens are made breakable, because a bare URL in an excerpt has no
     /// wrap opportunity and would widen the row past the screen.
+    private static let htmlTagPattern = /<[^>]+>/
+
     static func plainText(_ html: String?) -> String {
         guard let html else { return "" }
-        var text = html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        var text = html.replacing(htmlTagPattern, with: "")
         let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
                         "&#39;": "'", "&hellip;": "…", "&nbsp;": " "]
         for (entity, value) in entities { text = text.replacingOccurrences(of: entity, with: value) }

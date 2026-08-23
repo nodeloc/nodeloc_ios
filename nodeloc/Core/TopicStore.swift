@@ -194,7 +194,7 @@ final class TopicStore {
                 myPollVotes = firstPost.pollsVotes ?? [:]
                 lottery = firstPost.lottery
                 firstAuthorTitle = firstPost.userTitle
-                firstAuthorFlairURL = NodeSummaryFactory.resolvedURL(firstPost.flairUrl)
+                firstAuthorFlairURL = Self.flairImageURL(firstPost.flairUrl)
                 firstPostLikedByMe = firstPost.likedByMe
                 firstPostLikeCount = firstPost.likeCount
                 firstPostRewards = firstPost.rewards ?? []
@@ -506,7 +506,7 @@ final class TopicStore {
                     hasChildren: !kids.isEmpty,
                     groupID: groupID,
                     authorTitle: post.userTitle,
-                    flairURL: NodeSummaryFactory.resolvedURL(post.flairUrl),
+                    flairURL: Self.flairImageURL(post.flairUrl),
                     isLiked: post.likedByMe,
                     rewards: post.rewards ?? []
                 )
@@ -576,6 +576,7 @@ final class TopicStore {
         } catch {
             firstPostLikedByMe = wasLiked
             firstPostLikeCount += wasLiked ? 1 : -1
+            ToastCenter.shared.showError(error)
         }
     }
 
@@ -593,6 +594,7 @@ final class TopicStore {
             await load(topicID: topicID)
             return created.postNumber
         } catch {
+            ToastCenter.shared.showError(error)
             return nil
         }
     }
@@ -612,6 +614,7 @@ final class TopicStore {
             guard let now = comments.firstIndex(where: { $0.id == id }) else { return }
             comments[now].isLiked = wasLiked
             comments[now].votes += wasLiked ? 1 : -1
+            ToastCenter.shared.showError(error)
         }
     }
 
@@ -633,6 +636,15 @@ final class TopicStore {
     /// Repost — republishes this topic into another node via discourse-community.
     func repost(topicID: Int, categoryID: Int, title: String) async throws {
         try await client.repost(topicID: topicID, categoryID: categoryID, title: title)
+    }
+
+    /// Discourse's `flair_url` is either an image path/URL or a bare Font
+    /// Awesome icon name (e.g. "gem"). Only the former is fetchable — feeding
+    /// an icon name to the image loader produced -1002 "unsupported URL"
+    /// requests for literally "gem".
+    private static func flairImageURL(_ raw: String?) -> URL? {
+        guard let raw, raw.hasPrefix("/") || raw.hasPrefix("http") else { return nil }
+        return NodeSummaryFactory.resolvedURL(raw)
     }
 
     private func nestedComments(from posts: [TopicPost]) -> [PostComment] {

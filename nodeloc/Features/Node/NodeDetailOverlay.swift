@@ -23,6 +23,8 @@ struct NodeDetailOverlay: View {
     @State private var showSortPicker = false
     @State private var showAbout = false
     @State private var scrollOffset: CGFloat = 0
+    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
+    @State private var pull = PullToRefresh()
     /// Media opened straight from a card, without entering the post.
     @State private var viewerImages: [PostImage] = []
     @State private var viewerIndex = 0
@@ -55,12 +57,17 @@ struct NodeDetailOverlay: View {
                     .frame(maxWidth: .infinity)
                 }
                 .scrollIndicators(.hidden)
-                .refreshable { await store.refresh() }
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
-                    max(0, geo.contentOffset.y)
+                    geo.contentOffset.y
                 } action: { _, newValue in
-                    scrollOffset = newValue
+                    scrollOffset = max(0, newValue)
+                    pull.scrolled(to: newValue) { await store.refresh() }
                 }
+
+                NodelocRefreshIndicator(pull: pull)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, UIApplication.topSafeAreaInset + 66)
+                    .zIndex(5)
 
                 // Floating chrome, kept clear of the status bar. The banner still
                 // bleeds up behind it via its own safe-area padding.
@@ -319,9 +326,25 @@ struct NodeDetailOverlay: View {
     /// three, against 320pt of usable width on an SE. 分享 lives in the menu.
     private var headerTools: some View {
         HStack(spacing: 6) {
-            Button(action: startCompose) { toolIcon("plus") }
+            // Guests get 登录 where compose would be — posting needs an account
+            // anyway, and the capsule has no room for a fourth control.
+            if app.isGuest {
+                Button {
+                    presentAuth(app)
+                } label: {
+                    Text("登录")
+                        .font(Theme.body(13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(height: 30)
+                        .background(Theme.accent, in: Capsule())
+                }
                 .buttonStyle(.plain)
-                .accessibilityLabel("在本节点发帖")
+            } else {
+                Button(action: startCompose) { toolIcon("plus") }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("在本节点发帖")
+            }
 
             Button(action: startNodeSearch) { toolIcon("magnifyingglass") }
                 .buttonStyle(.plain)
@@ -596,7 +619,7 @@ struct NodeDetailOverlay: View {
     @ViewBuilder
     private var topicList: some View {
         if store.isLoading && store.posts.isEmpty {
-            NodelocLoader(progress: nil)
+            NodelocLoader()
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 48)
         } else if store.posts.isEmpty {
@@ -646,9 +669,9 @@ struct NodeDetailOverlay: View {
 
 }
 
-/// Node logo, falling back to a colored initial.
-/// One topic, rendered per reading mode.
-private struct NodeTopicRow: View {
+/// One topic, rendered per reading mode. Internal (not private): the home feed
+/// renders its compact/expand modes with the same rows so the two lists match.
+struct NodeTopicRow: View {
     let post: Post
     let mode: NodeReadingMode
     let onTap: () -> Void

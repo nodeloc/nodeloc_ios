@@ -172,51 +172,48 @@ struct ChatView: View {
                 .foregroundStyle(Theme.text)
 
             HStack {
-                Button {
-                    withAnimation(.quick) {
-                        app.overlay = .sidebar
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Theme.headerText)
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-                .buttonBorderShape(.circle)
-                .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+                SidebarMenuButton()
 
                 Spacer()
 
-                HStack(spacing: 0) {
-                    Button {
-                        withAnimation(.quick) {
-                            app.overlay = .compose
+                // Guests get 登录 where the tools would be — every inbox
+                // action needs an account anyway.
+                if app.isGuest {
+                    GuestLoginButton()
+                } else {
+                    HStack(spacing: 0) {
+                        Button {
+                            withAnimation(.quick) {
+                                app.overlay = .compose
+                            }
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 34, height: 34)
                         }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 34, height: 34)
-                    }
 
-                    Button {} label: {
-                        Image(systemName: "checkmark.message")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 34, height: 34)
-                    }
+                        Button {} label: {
+                            Image(systemName: "checkmark.message")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 34, height: 34)
+                        }
 
-                    Button {} label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 34, height: 34)
+                        Button {} label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 34, height: 34)
+                        }
                     }
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 5)
+                    // 48, not 50: `.glass` buttons render 34pt labels as 48pt
+                    // capsules, so matching keeps the hamburger's centre level
+                    // with the other tabs' headers.
+                    .frame(height: 48)
+                    .glassBackground(in: Capsule(), tint: Theme.bg.opacity(0.34))
+                    .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+                    .buttonStyle(.plain)
                 }
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 5)
-                .frame(height: 50)
-                .glassBackground(in: Capsule(), tint: Theme.bg.opacity(0.34))
-                .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 16)
@@ -958,6 +955,9 @@ private struct ChatConversationView: View {
             if let latest = store.messages.map(\.id).max() {
                 await MessageCenterStore.shared.markChatChannelRead(channelID: chat.id, messageID: latest)
             }
+        }
+        .onDisappear {
+            store.stopLiveUpdates()
         }
     }
 

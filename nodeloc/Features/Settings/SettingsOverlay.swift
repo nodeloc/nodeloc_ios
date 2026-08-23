@@ -18,7 +18,7 @@ struct SettingsOverlay: View {
     @State private var openAccountPage: AccountPage?
 
     private enum AccountPage: String, Identifiable {
-        case profile, associatedAccounts, security
+        case profile, associatedAccounts, security, pushNotifications
         var id: String { rawValue }
     }
 
@@ -53,6 +53,7 @@ struct SettingsOverlay: View {
         case .profile: ProfileEditPage(onClose: onClose)
         case .associatedAccounts: AssociatedAccountsPage(onClose: onClose)
         case .security: SecurityPage(onClose: onClose)
+        case .pushNotifications: PushSettingsPage(onClose: onClose)
         }
     }
 
@@ -89,6 +90,11 @@ struct SettingsOverlay: View {
                     SettingsSection(title: "账号") {
                         SettingsNavRow(title: "通知", icon: "bell.fill") {
                             app.overlay = .notifications
+                        }
+                        if isSignedIn {
+                            SettingsNavRow(title: "推送通知", icon: "bell.badge") {
+                                withAnimation(.panelSlide) { openAccountPage = .pushNotifications }
+                            }
                         }
                         SettingsNavRow(title: "Nodeloc Pro", icon: "sparkle") {
                             app.overlay = .pro

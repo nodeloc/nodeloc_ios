@@ -13,6 +13,8 @@ struct ProfileView: View {
     @State private var showNodes = false
     @State private var selectedTab: ProfileStore.ProfileTab = .topics
     @State private var scrollOffset: CGFloat = 0
+    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
+    @State private var pull = PullToRefresh()
 
     /// Anchor for the scroll-to-top the identity capsule performs.
     private let topAnchor = "profile-top"
@@ -46,6 +48,9 @@ struct ProfileView: View {
                 geometry.contentOffset.y
             } action: { _, newValue in
                 scrollOffset = newValue
+                pull.scrolled(to: newValue) {
+                    await store.load(isAppAuthed: app.authed, force: true)
+                }
             }
             // Pinned above the scroll view so they stay reachable as the banner
             // scrolls away, matching the home feed's floating controls. The
@@ -55,10 +60,13 @@ struct ProfileView: View {
                 floatingHeaderButtons(scrollProxy: proxy)
                     .padding(.top, UIApplication.topSafeAreaInset)
             }
+            .overlay(alignment: .top) {
+                NodelocRefreshIndicator(pull: pull)
+                    .padding(.top, UIApplication.topSafeAreaInset + 66)
+            }
         }
         .task(id: app.authed) { await store.load(isAppAuthed: app.authed) }
         .task(id: tabTaskKey) { await store.loadTab(selectedTab) }
-        .refreshable { await store.load(isAppAuthed: app.authed, force: true) }
         .sheet(isPresented: $showBadges) { badgeSheet }
         .sheet(isPresented: $showNodes) { nodesSheet }
     }
@@ -124,12 +132,19 @@ struct ProfileView: View {
             }
         } label: {
             HStack(spacing: 8) {
-                RemoteAvatar(
-                    url: store.avatarURL,
-                    letter: store.initial,
-                    variant: abs(store.username.hashValue),
-                    size: 26
-                )
+                if store.isGuest {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(Theme.muted(0.4))
+                        .frame(width: 26, height: 26)
+                } else {
+                    RemoteAvatar(
+                        url: store.avatarURL,
+                        letter: store.initial,
+                        variant: abs(store.username.hashValue),
+                        size: 26
+                    )
+                }
                 Text(store.displayName)
                     .font(Theme.body(14, weight: .semibold))
                     .foregroundStyle(Theme.text)
@@ -205,12 +220,24 @@ struct ProfileView: View {
 
     private var profileCard: some View {
         VStack(spacing: 14) {
-            RemoteAvatar(
-                url: store.avatarURL,
-                letter: store.initial,
-                variant: abs(store.username.hashValue),
-                size: 96
-            )
+            Group {
+                if store.isGuest {
+                    // The generic guest avatar, same as the post reader's.
+                    Image(systemName: "person.crop.circle.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .foregroundStyle(Theme.muted(0.4))
+                        .frame(width: 96, height: 96)
+                        .background(Theme.bg, in: Circle())
+                } else {
+                    RemoteAvatar(
+                        url: store.avatarURL,
+                        letter: store.initial,
+                        variant: abs(store.username.hashValue),
+                        size: 96
+                    )
+                }
+            }
             .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 5))
             .shadow(color: .black.opacity(0.14), radius: 14, y: 8)
             .offset(y: -42)
@@ -305,21 +332,10 @@ struct ProfileView: View {
         .padding(.bottom, 18)
     }
 
-    /// Guests still need a way into the login flow.
+    /// Guests still need a way into the login flow — the same glass 登录
+    /// button the home header shows.
     private var guestLoginAction: some View {
-        Button {
-            withAnimation(.quick) {
-                app.isGuest = false
-                app.authed = false
-            }
-        } label: {
-            Label("登录", systemImage: "person.crop.circle.badge.checkmark")
-                .font(Theme.body(13, weight: .semibold))
-                .frame(height: 34)
-                .padding(.horizontal, 18)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(Theme.accent)
+        GuestLoginButton()
     }
 
     @ViewBuilder

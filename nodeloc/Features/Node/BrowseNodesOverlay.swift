@@ -17,7 +17,6 @@ struct BrowseNodesOverlay: View {
     @State private var showsSearch = false
     @State private var showsGroupList = false
     @State private var selectedNode: SidebarNodeSummary?
-    @State private var skeletonPulse = false
     let showsCloseButton: Bool
     private let headerIconFrame: CGFloat = 34
     private let headerContentHeight: CGFloat = 56
@@ -104,19 +103,25 @@ struct BrowseNodesOverlay: View {
 
                 Spacer()
 
-                Button {
-                    withAnimation(.overlayPush) {
-                        app.overlay = .createNode
+                // Guests get 登录 where 新建 would be — creating a node needs
+                // an account anyway.
+                if app.isGuest {
+                    GuestLoginButton()
+                } else {
+                    Button {
+                        withAnimation(.overlayPush) {
+                            app.overlay = .createNode
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .frame(width: headerIconFrame, height: headerIconFrame)
                     }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .frame(width: headerIconFrame, height: headerIconFrame)
+                    .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
+                    .buttonBorderShape(.circle)
+                    .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
                 }
-                .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-                .buttonBorderShape(.circle)
-                .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
             }
         }
         .padding(.horizontal, 16)
@@ -628,12 +633,7 @@ struct BrowseNodesOverlay: View {
                 }
             }
         }
-        .opacity(skeletonPulse ? 0.55 : 1)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                skeletonPulse = true
-            }
-        }
+        .skeletonPulsing()
     }
 
     private var skeletonCard: some View {

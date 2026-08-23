@@ -31,6 +31,9 @@ enum AuthError: Error, LocalizedError {
     case cancelled
     case missingCredentials
     case loginFailed(String)
+    /// Credentials were right but the account has 2FA — the UI should ask for
+    /// the one-time code and retry.
+    case secondFactorRequired
     case signupFailed(String)
     case signupNeedsActivation(String)
 
@@ -43,6 +46,7 @@ enum AuthError: Error, LocalizedError {
         case .cancelled: return "Login was cancelled."
         case .missingCredentials: return "Please fill in all required fields."
         case .loginFailed(let message): return message
+        case .secondFactorRequired: return "此账号已开启两步验证，请输入验证码。"
         case .signupFailed(let message): return message
         case .signupNeedsActivation(let message): return message
         }
@@ -79,7 +83,41 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         DiscourseAuth.shared.sessionCookie = cookie
         DiscourseAuth.shared.csrfToken = Keychain.get(keychainCSRF)
         DiscourseAuth.shared.username = Keychain.get(keychainUser)
+        // Requests rely on the cookie jar (not a pinned header) so Discourse's
+        // `_t` token rotation keeps working; seed it with the stored session.
+        if let cookie {
+            injectCookiesIntoJar(cookie)
+        }
         return true
+    }
+
+    /// Snapshots the (possibly rotated) session cookies back into the Keychain
+    /// so the next launch restores a token the server still accepts. Called on
+    /// backgrounding; a no-op for User-API-Key sign-ins.
+    func persistRotatedSession() {
+        guard DiscourseAuth.shared.sessionCookie != nil,
+              let cookie = currentCookieHeader() else { return }
+        DiscourseAuth.shared.sessionCookie = cookie
+        Keychain.set(cookie, for: keychainSession)
+    }
+
+    /// Rebuilds jar cookies from a stored "name=value; name=value" header.
+    private func injectCookiesIntoJar(_ header: String) {
+        let host = DiscourseConfig.baseURL.host ?? "www.nodeloc.com"
+        for pair in header.components(separatedBy: "; ") {
+            guard let separator = pair.firstIndex(of: "=") else { continue }
+            let name = String(pair[..<separator])
+            let value = String(pair[pair.index(after: separator)...])
+            guard let cookie = HTTPCookie(properties: [
+                .domain: host,
+                .path: "/",
+                .name: name,
+                .value: value,
+                .secure: "TRUE",
+                .expires: Date().addingTimeInterval(60 * 60 * 24 * 365),
+            ]) else { continue }
+            HTTPCookieStorage.shared.setCookie(cookie)
+        }
     }
 
     func signOut() {
@@ -96,23 +134,31 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
 
     // MARK: Username/password auth
 
-    func login(identifier rawIdentifier: String, password rawPassword: String) async throws {
+    /// `secondFactorToken` is the OTP (or backup code, with method 2) for
+    /// accounts that have 2FA; the first attempt goes without one and throws
+    /// `secondFactorRequired` when the server asks for it.
+    func login(
+        identifier rawIdentifier: String,
+        password rawPassword: String,
+        secondFactorToken: String? = nil,
+        secondFactorMethod: Int = 1
+    ) async throws {
         let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = rawPassword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !identifier.isEmpty, !password.isEmpty else { throw AuthError.missingCredentials }
 
         signOut()
         let csrf = try await fetchCSRFToken()
-        let (data, _) = try await postForm(
-            "session",
-            form: [
-                "login": identifier,
-                "password": password,
-                "second_factor_method": "1",
-                "timezone": TimeZone.current.identifier,
-            ],
-            csrf: csrf
-        )
+        var form = [
+            "login": identifier,
+            "password": password,
+            "second_factor_method": String(secondFactorMethod),
+            "timezone": TimeZone.current.identifier,
+        ]
+        if let secondFactorToken {
+            form["second_factor_token"] = secondFactorToken
+        }
+        let (data, _) = try await postForm("session", form: form, csrf: csrf)
 
         // Discourse answers HTTP 200 even when the login fails — the outcome is
         // in the body. A wrong password, an unactivated account, a required
@@ -121,6 +167,14 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         // On success it renders the signed-in user, so `user.username` is the
         // authoritative "logged in" signal — no follow-up request needed.
         let result = try? decode(SessionLoginResponse.self, from: data)
+        if result?.reason == "invalid_second_factor" {
+            // Without a token this is the server asking for one; with a token
+            // it means the code was wrong.
+            if secondFactorToken == nil {
+                throw AuthError.secondFactorRequired
+            }
+            throw AuthError.loginFailed(result?.error ?? "验证码不正确，请重试。")
+        }
         if let message = result?.error ?? result?.failed {
             throw AuthError.loginFailed(message)
         }
@@ -282,7 +336,7 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         )!
         components.queryItems = [
             .init(name: "application_name", value: DiscourseConfig.appName),
-            .init(name: "client_id", value: DiscourseConfig.clientID()),
+            .init(name: "client_id", value: DiscourseConfig.clientID),
             .init(name: "scopes", value: DiscourseScopes.value),
             .init(name: "public_key", value: publicPEM),
             .init(name: "nonce", value: nonce),
@@ -416,6 +470,11 @@ private struct CSRFResponse: Decodable {
 private struct SessionLoginResponse: Decodable {
     let error: String?
     let failed: String?
+    /// "invalid_second_factor" when the account has 2FA and the token was
+    /// missing or wrong.
+    let reason: String?
+    let totpEnabled: Bool?
+    let backupEnabled: Bool?
     let user: LoggedInUser?
 
     struct LoggedInUser: Decodable {

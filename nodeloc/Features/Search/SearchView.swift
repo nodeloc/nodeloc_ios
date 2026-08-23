@@ -5,7 +5,9 @@
 
 import SwiftUI
 
-private enum SearchScope: String, CaseIterable {
+/// Internal (not file-private): the system search field lives in MainView's
+/// tab bar, so its `.searchScopes` needs this type too.
+enum SearchScope: String, CaseIterable {
     case all = "全部"
     case nodes = "节点"
     case posts = "帖子"
@@ -77,11 +79,6 @@ private struct SearchExperience: View {
                 telegramSearchControls
             }
 
-            if !isOverlay {
-                screenSearchHeader
-                    .frame(maxHeight: .infinity, alignment: .top)
-            }
-
             if let selectedProfile {
                 PublicProfileOverlay(target: selectedProfile) {
                     withAnimation(.overlayPush) {
@@ -109,6 +106,12 @@ private struct SearchExperience: View {
         .onChange(of: query) { _, newValue in
             Task { await store.search(newValue) }
         }
+        // Screen mode types into the system field in the tab bar (.searchable
+        // in MainView); mirror it into the local query that drives results.
+        .onChange(of: app.searchQuery) { _, newValue in
+            guard !isOverlay else { return }
+            query = newValue
+        }
         .sheet(isPresented: $showHistory) {
             SearchHistorySheet { term in
                 showHistory = false
@@ -134,7 +137,7 @@ private struct SearchExperience: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Color.clear
-                    .frame(height: isOverlay ? 26 : 118)
+                    .frame(height: isOverlay ? 26 : 12)
 
                 if isSearching {
                     resultsSection
@@ -145,6 +148,9 @@ private struct SearchExperience: View {
             .padding(.bottom, isOverlay ? 130 : 14)
         }
         .scrollIndicators(.hidden)
+        // Telegram-style: dragging the list tracks the keyboard down with the
+        // finger instead of leaving it stuck open.
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var redditSuggestions: some View {
@@ -200,8 +206,31 @@ private struct SearchExperience: View {
         .padding(.horizontal, 20)
     }
 
+    /// Which scope filters the results: the system scope row in screen mode,
+    /// the glass capsules in overlay mode.
+    private var activeScope: SearchScope {
+        isOverlay ? selectedScope : app.searchScope
+    }
+
+    /// Topics that carry media, for the 媒体 scope.
+    private var mediaResults: [Post] {
+        store.results.filter { !$0.media.isEmpty || $0.videoURL != nil }
+    }
+
+    private var scopedResultsAreEmpty: Bool {
+        switch activeScope {
+        case .all:
+            return store.results.isEmpty && store.userResults.isEmpty && store.nodeResults.isEmpty
+        case .nodes: return store.nodeResults.isEmpty
+        case .posts: return store.results.isEmpty
+        case .users: return store.userResults.isEmpty
+        case .apps: return store.appResults.isEmpty
+        case .media: return mediaResults.isEmpty
+        }
+    }
+
     private var resultsSection: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             if store.isSearching {
                 ProgressView()
                     .tint(Theme.accent)
@@ -209,25 +238,154 @@ private struct SearchExperience: View {
                     .padding(.top, 24)
             }
 
-            ForEach(store.results) { post in
-                PostCard(
-                    post: post,
-                    postTransitionNamespace: postTransitionNamespace,
-                    onOpenAuthor: { target in
-                        withAnimation(.panelSlide) {
-                            selectedProfile = target
-                        }
-                    }
-                )
+            switch activeScope {
+            case .all:
+                // Discourse's default mixed result: nodes and users first
+                // (capped, like the web's grouped search), then the topics.
+                if !store.nodeResults.isEmpty {
+                    sectionHeader(title: "节点", trailing: nil)
+                    ForEach(store.nodeResults.prefix(3)) { nodeRow($0) }
+                }
+                if !store.userResults.isEmpty {
+                    sectionHeader(title: "用户", trailing: nil)
+                    ForEach(store.userResults.prefix(3)) { userRow($0) }
+                }
+                if !store.results.isEmpty, !store.nodeResults.isEmpty || !store.userResults.isEmpty {
+                    sectionHeader(title: "帖子", trailing: nil)
+                }
+                postCards(store.results)
+            case .nodes:
+                ForEach(store.nodeResults) { nodeRow($0) }
+            case .posts:
+                postCards(store.results)
+            case .users:
+                ForEach(store.userResults) { userRow($0) }
+            case .apps:
+                ForEach(store.appResults) { appRow($0) }
+            case .media:
+                postCards(mediaResults)
             }
 
-            if !store.isSearching && store.results.isEmpty {
+            if !store.isSearching && scopedResultsAreEmpty {
                 EmptyStateView(icon: "magnifyingglass", message: "没有找到相关内容")
                 .frame(maxWidth: .infinity)
                 .padding(.top, 54)
             }
         }
         .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private func postCards(_ posts: [Post]) -> some View {
+        ForEach(posts) { post in
+            PostCard(
+                post: post,
+                postTransitionNamespace: postTransitionNamespace,
+                onOpenAuthor: { target in
+                    withAnimation(.panelSlide) {
+                        selectedProfile = target
+                    }
+                }
+            )
+        }
+    }
+
+    private func userRow(_ user: SearchUserResult) -> some View {
+        Button {
+            withAnimation(.panelSlide) {
+                selectedProfile = UserProfileTarget(
+                    username: user.username,
+                    displayName: user.displayName,
+                    avatarURL: user.avatarURL
+                )
+            }
+        } label: {
+            HStack(spacing: 10) {
+                RemoteAvatar(
+                    url: user.avatarURL,
+                    letter: String(user.username.prefix(1)).uppercased(),
+                    variant: user.id % 2,
+                    size: 34
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(user.displayName ?? user.username)
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text("u/\(user.username)")
+                        .font(Theme.body(11))
+                        .foregroundStyle(Theme.muted(0.5))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func nodeRow(_ node: SearchNodeResult) -> some View {
+        Button {
+            app.openNode(slug: node.slug)
+        } label: {
+            HStack(spacing: 10) {
+                RemoteAvatar(
+                    url: node.logoURL,
+                    letter: String(node.name.prefix(1)).uppercased(),
+                    variant: node.id % 2,
+                    size: 34,
+                    cornerRadius: 10
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("n/\(node.slug)")
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    if !node.desc.isEmpty {
+                        Text(node.desc)
+                            .font(Theme.body(11))
+                            .foregroundStyle(Theme.muted(0.5))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func appRow(_ item: DirectoryApp) -> some View {
+        Button {
+            app.selectedApp = item
+            withAnimation(.overlayPush) {
+                app.overlay = .appDetail
+            }
+        } label: {
+            HStack(spacing: 10) {
+                RemoteAvatar(
+                    url: item.logoUrl.flatMap(URL.init(string:)),
+                    letter: String(item.name.prefix(1)).uppercased(),
+                    variant: item.id % 2,
+                    size: 34,
+                    cornerRadius: 10
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name)
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    if let description = item.description, !description.isEmpty {
+                        Text(description)
+                            .font(Theme.body(11))
+                            .foregroundStyle(Theme.muted(0.5))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var telegramSearchControls: some View {
@@ -336,21 +494,6 @@ private struct SearchExperience: View {
         .shadow(color: .black.opacity(0.08), radius: 12, y: 7)
     }
 
-    private var screenSearchHeader: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("搜索")
-                .font(Theme.heading(25, weight: .semibold))
-                .foregroundStyle(Theme.text)
-
-            searchField
-                .focused($searchFocused)
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 14)
-        .background(Theme.bg)
-    }
-
     private func sectionHeader(
         title: String,
         trailing: String?,
@@ -382,6 +525,12 @@ private struct SearchExperience: View {
     /// the keyboard so the results are visible immediately.
     private func apply(_ term: String) {
         query = term
+        // Screen mode's visible field is the system one: sync the text and ask
+        // MainView to present search, or the scope row stays hidden.
+        if !isOverlay {
+            app.searchQuery = term
+            app.searchActivationRequested = true
+        }
         history.record(term)
         searchFocused = false
     }

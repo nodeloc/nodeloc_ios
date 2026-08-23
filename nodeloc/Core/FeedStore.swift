@@ -3,7 +3,8 @@
 //  nodeloc
 //
 //  Loads the live "latest" topics from nodeloc.com and maps them onto the
-//  Post card model. Falls back to sample data if the network is unavailable.
+//  Post card model. A failed load keeps the list empty and sets `errorText`;
+//  HomeView shows the friendly retry state — never sample data.
 //
 
 import Foundation
@@ -18,7 +19,6 @@ final class FeedStore {
     var isLoading = false
     var isLoadingMore = false
     var errorText: String?
-    var usingSampleData = false
     /// Another page is available (the list carried a `more_topics_url`).
     private(set) var hasMore = false
 
@@ -50,22 +50,17 @@ final class FeedStore {
             )
             posts = latest.topicList.topics.map { map(topic: $0, usersByID: usersByID) }
             hasMore = latest.topicList.moreTopicsUrl != nil
-            usingSampleData = false
         } catch {
             errorText = (error as? DiscourseError)?.errorDescription ?? error.localizedDescription
-            if posts.isEmpty {
-                posts = SampleData.posts
-                usingSampleData = true
-            }
             hasMore = false
         }
         isLoading = false
     }
 
-    /// Appends the next page. Safe to call repeatedly — no-op while a page is in
-    /// flight, when there's nothing more, or on the sample-data fallback.
+    /// Appends the next page. Safe to call repeatedly — no-op while a page is
+    /// in flight or when there's nothing more.
     func loadMore() async {
-        guard hasMore, !isLoadingMore, !isLoading, !usingSampleData else { return }
+        guard hasMore, !isLoadingMore, !isLoading else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
         do {

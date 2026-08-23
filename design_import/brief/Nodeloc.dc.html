@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="stylesheet" href="_ds/nocturne-47ca7dbf-c972-4901-b0c3-f1f2f650defc/styles.css">
+<script src="_ds/nocturne-47ca7dbf-c972-4901-b0c3-f1f2f650defc/_ds_bundle.js"></script>
+<style>
+  body{margin:0}
+  a{color:var(--color-accent);text-decoration:none}
+  a:hover{color:var(--color-accent-700)}
+  ::-webkit-scrollbar{display:none}
+  :root{
+    --color-bg:#ffffff; --color-surface:#f7f7f7; --color-text:#222222;
+    --color-divider:color-mix(in srgb, #222222 12%, transparent);
+    --color-accent:#009966; --color-accent-2:#FF9933;
+    --color-header-bg:#ffffff; --color-header-text:#333333;
+    --color-selected:#cdfeee; --color-hover:#f2f2f2; --color-highlight:#ffff4d;
+    --color-danger:#c80001; --color-success:#009900; --color-love:#fa6c8d;
+    --color-neutral-100:#ffffff; --color-neutral-200:#f7f7f7; --color-neutral-300:#f2f2f2;
+    --color-neutral-400:#e3e3e3; --color-neutral-500:#bdbdbd; --color-neutral-600:#8f8f8f;
+    --color-neutral-700:#666666; --color-neutral-800:#333333; --color-neutral-900:#222222;
+    --color-accent-100:#cdfeee; --color-accent-200:#a3f6dc; --color-accent-300:#6fe9c5;
+    --color-accent-400:#3ad4a8; --color-accent-500:#009966; --color-accent-600:#00875a;
+    --color-accent-700:#00714c; --color-accent-800:#005a3e; --color-accent-900:#00402c;
+    --color-accent-2-100:#ffe9cc; --color-accent-2-200:#ffd199; --color-accent-2-300:#ffb85c;
+    --color-accent-2-400:#ffa640; --color-accent-2-500:#FF9933; --color-accent-2-600:#e37e1a;
+    --color-accent-2-700:#b3630f; --color-accent-2-800:#804609; --color-accent-2-900:#4d2a05;
+    --shadow-sm:0 0 0 1px #e3e3e3; --shadow-md:0 0 0 1px #e3e3e3, 0 6px 18px rgba(0,0,0,0.08);
+    --shadow-lg:0 0 0 1px #bdbdbd, 0 16px 40px rgba(0,0,0,0.14);
+  }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:var(--color-neutral-300);display:flex;align-items:center;justify-content:center;padding:56px 24px;font-family:var(--font-body);color:var(--color-text)">
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ false }}" hint-size="402,874">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);position:relative;overflow:hidden">
+
+<!-- ═══ AUTH ═══ -->
+<sc-if value="{{ showAuth }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;display:flex;flex-direction:column;padding:70px 24px 32px;box-sizing:border-box;overflow:auto">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:24px">
+      <svg width="30" height="30" viewBox="0 0 130 130" fill="none" style="flex:none">
+        <g stroke="#009966" stroke-width="3" stroke-linejoin="round"><path d="M65 25L99.6 45L99.6 85L65 105L30.4 85L30.4 45z"/></g>
+        <g stroke="#E0771A" stroke-width="2.8" stroke-dasharray="4.4 3.2"><path d="M65 49L65 33M79.8 57.5L92.7 50.1M79.8 72.5L92.2 79.7M65 81L65 97M50.2 72.5L37.8 79.7M50.2 57.5L37.3 50.1"/></g>
+        <circle cx="65" cy="25" r="5" fill="#7cebc4"/><circle cx="30.4" cy="45" r="5.5" fill="#3ad4a8"/><circle cx="99.6" cy="45" r="6.5" fill="#3ad4a8"/>
+        <circle cx="30.4" cy="85" r="7" fill="#009966"/><circle cx="99.6" cy="85" r="8" fill="#00714c"/><circle cx="65" cy="105" r="9.5" fill="#00402c"/>
+        <circle cx="65" cy="65" r="12" fill="#00593b"/>
+      </svg>
+      <span style="font-family:var(--font-heading);font-weight:600;font-size:19px;letter-spacing:-0.02em">NODELOC</span>
+    </div>
+    <h1 style="font-size:26px;margin-bottom:6px">{{ authTitle }}</h1>
+    <p style="font-size:13px;opacity:0.7;margin-bottom:18px">{{ authSubtitle }}</p>
+    <div class="seg" style="width:100%;margin-bottom:18px">
+      <label class="seg-opt" style="flex:1;justify-content:center"><input type="radio" name="authmode" checked="{{ isLoginMode }}" onChange="{{ setLoginMode }}"/>Log in</label>
+      <label class="seg-opt" style="flex:1;justify-content:center"><input type="radio" name="authmode" checked="{{ isSignupMode }}" onChange="{{ setSignupMode }}"/>Sign up</label>
+    </div>
+    <div class="field" style="margin-bottom:10px">
+      <label>Email</label>
+      <input class="input" type="email" placeholder="you@example.com"/>
+    </div>
+    <div class="field" style="margin-bottom:16px">
+      <label>Password</label>
+      <input class="input" type="password" placeholder="••••••••"/>
+    </div>
+    <button class="btn btn-primary btn-block" onClick="{{ completeAuth }}">{{ authCta }}</button>
+    <div style="display:flex;align-items:center;gap:10px;margin:20px 0">
+      <div style="flex:1;height:1px;background:var(--color-divider)"></div>
+      <span style="font-size:11px;opacity:0.5">or continue with</span>
+      <div style="flex:1;height:1px;background:var(--color-divider)"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn btn-secondary btn-block" onClick="{{ completeAuth }}" style="justify-content:flex-start;gap:12px;padding-left:16px">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5"/><path d="M10 2.8c2.4 2 2.4 12.4 0 14.4M3.2 7.2h13.6M3.2 12.8h13.6" stroke="currentColor" stroke-width="1.3"/></svg>
+        Continue with Google
+      </button>
+      <button class="btn btn-secondary btn-block" onClick="{{ completeAuth }}" style="justify-content:flex-start;gap:12px;padding-left:16px">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M10 2a8 8 0 00-2.5 15.6c.4.1.5-.2.5-.4v-1.5c-2.2.5-2.7-1-2.7-1-.4-.9-.9-1.2-.9-1.2-.7-.5.1-.5.1-.5.8.1 1.2.8 1.2.8.7 1.2 1.9.9 2.3.7.1-.5.3-.9.5-1.1-1.8-.2-3.6-.9-3.6-3.9 0-.9.3-1.6.8-2.1-.1-.2-.4-1 .1-2.1 0 0 .7-.2 2.2.8a7.5 7.5 0 014 0c1.5-1 2.2-.8 2.2-.8.4 1.1.2 1.9.1 2.1.5.5.8 1.2.8 2.1 0 3-1.8 3.7-3.6 3.9.3.3.6.8.6 1.6v2.4c0 .2.1.5.6.4A8 8 0 0010 2z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>
+        Continue with GitHub
+      </button>
+      <button class="btn btn-secondary btn-block" onClick="{{ completeAuth }}" style="justify-content:flex-start;gap:12px;padding-left:16px">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5"/><path d="M5.8 10.3l2.4 3.9 5.6-8.4-9.6 3.7 2 .9z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+        Continue with Telegram
+      </button>
+      <button class="btn btn-secondary btn-block" onClick="{{ completeAuth }}" style="justify-content:flex-start;gap:12px;padding-left:16px">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M3 3l14 14M17 3L3 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        Continue with X
+      </button>
+    </div>
+    <p style="font-size:11px;opacity:0.45;margin-top:18px;text-align:center">By continuing you agree to the Terms & Privacy Policy.</p>
+  </div>
+</sc-if>
+
+<!-- ═══ ONBOARDING ═══ -->
+<sc-if value="{{ showOnboarding }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1;display:flex;flex-direction:column;padding:70px 24px 32px;box-sizing:border-box">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:28px">
+      <svg width="30" height="30" viewBox="0 0 130 130" fill="none" style="flex:none">
+        <g stroke="#009966" stroke-width="3" stroke-linejoin="round"><path d="M65 25L99.6 45L99.6 85L65 105L30.4 85L30.4 45z"/></g>
+        <g stroke="#E0771A" stroke-width="2.8" stroke-dasharray="4.4 3.2"><path d="M65 49L65 33M79.8 57.5L92.7 50.1M79.8 72.5L92.2 79.7M65 81L65 97M50.2 72.5L37.8 79.7M50.2 57.5L37.3 50.1"/></g>
+        <circle cx="65" cy="25" r="5" fill="#7cebc4"/><circle cx="30.4" cy="45" r="5.5" fill="#3ad4a8"/><circle cx="99.6" cy="45" r="6.5" fill="#3ad4a8"/>
+        <circle cx="30.4" cy="85" r="7" fill="#009966"/><circle cx="99.6" cy="85" r="8" fill="#00714c"/><circle cx="65" cy="105" r="9.5" fill="#00402c"/>
+        <circle cx="65" cy="65" r="12" fill="#00593b"/>
+      </svg>
+      <span style="font-family:var(--font-heading);font-weight:600;font-size:19px;letter-spacing:-0.02em">NODELOC</span>
+    </div>
+    <h1 style="font-size:30px;margin-bottom:8px">Find your people.</h1>
+    <p style="font-size:14px;opacity:0.75;margin-bottom:28px">NODELOC is a home for every interest — pick a few Nodes to start your feed.</p>
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-start;align-content:flex-start;gap:8px;overflow:auto;flex:1">
+      <sc-for list="{{ interestsList }}" as="it" hint-placeholder-count="10">
+        <div onClick="{{ it.toggle }}" style="cursor:pointer;padding:9px 16px;border-radius:999px;font-size:13px;border:1px solid {{ it.border }};background:{{ it.bg }};color:{{ it.color }};transition:background .15s">{{ it.name }}</div>
+      </sc-for>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:20px">
+      <span style="font-size:12px;opacity:0.55">{{ selectedCount }} selected</span>
+      <button class="btn btn-primary" disabled="{{ cannotContinue }}" onClick="{{ finishOnboarding }}" style="min-width:132px">Continue</button>
+    </div>
+  </div>
+</sc-if>
+
+<!-- ═══ MAIN APP ═══ -->
+<sc-if value="{{ showMain }}" hint-placeholder-val="{{ false }}">
+<div style="flex:1;display:flex;flex-direction:column;min-height:0;position:relative">
+
+  <!-- HOME -->
+  <sc-if value="{{ tabHome }}" hint-placeholder-val="{{ true }}">
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+<sc-if value="{{ headerExpanded }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:58px 20px 10px;display:flex;align-items:center;gap:8px;flex:none;background:var(--color-header-bg);color:var(--color-header-text);border-bottom:1px solid var(--color-divider)">
+          <button class="btn btn-icon btn-secondary" onClick="{{ openSidebar }}" style="flex:none;border-radius:50%;color:var(--color-header-text)">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </button>
+          <div onClick="{{ selectSearch }}" style="flex:1;display:flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;background:var(--color-surface);border:1px solid var(--color-divider);cursor:pointer;min-width:0">
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" style="flex:none;color:var(--color-neutral-500)"><circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.6"/><path d="M17 17l-4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <span style="font-size:13px;color:var(--color-neutral-500)">Search NODELOC</span>
+          </div>
+          <button class="btn btn-icon btn-primary" style="flex:none;border-radius:50%">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div style="display:flex;gap:8px;padding:0 20px 14px;flex:none;overflow:auto">
+          <div class="tag tag-outline" style="padding:6px 14px">All</div>
+          <div class="tag tag-neutral" style="padding:6px 14px">Following</div>
+          <div class="tag tag-neutral" style="padding:6px 14px">Popular</div>
+        </div>
+      </sc-if>
+      <sc-if value="{{ headerCollapsed }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:58px;left:16px;right:16px;z-index:20;display:flex;justify-content:space-between;pointer-events:none">
+          <button onClick="{{ openSidebar }}" style="pointer-events:auto;width:40px;height:40px;border-radius:50%;background:var(--color-surface);box-shadow:var(--shadow-md);border:none;display:flex;align-items:center;justify-content:center;color:var(--color-header-text);cursor:pointer">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </button>
+          <button style="pointer-events:auto;width:40px;height:40px;border-radius:50%;background:var(--color-surface);box-shadow:var(--shadow-md);border:1px solid var(--color-accent);display:flex;align-items:center;justify-content:center;color:var(--color-accent);cursor:pointer">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </sc-if>
+      <div onScroll="{{ handleFeedScroll }}" style="flex:1;overflow:auto;padding:{{ feedPadTop }}px 16px 100px;display:flex;flex-direction:column;gap:10px">
+        <sc-for list="{{ posts }}" as="p" hint-placeholder-count="4">
+          <div class="card elev-sm" onClick="{{ p.open }}" style="cursor:pointer;background:{{ p.cardBg }}" style-hover="background:var(--color-hover)">
+            <sc-if value="{{ p.pinned }}" hint-placeholder-val="{{ false }}"><div class="tag" style="background:var(--color-highlight);color:var(--color-neutral-900);align-self:flex-start">Pinned</div></sc-if>
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="width:22px;height:22px;border-radius:7px;background:{{ p.avatarBg }};color:{{ p.avatarColor }};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;flex:none">{{ p.avatarLetter }}</div>
+              <span style="font-size:12px;font-weight:500">{{ p.node }}</span>
+              <span style="font-size:11px;opacity:0.5">· {{ p.time }}</span>
+            </div>
+            <div class="card-title">{{ p.title }}</div>
+            <p class="card-body">{{ p.excerpt }}</p>
+            <sc-if value="{{ p.hasImage }}" hint-placeholder-val="{{ false }}">
+              <div style="height:120px;border-radius:8px;background:repeating-linear-gradient(135deg,var(--color-surface),var(--color-surface) 8px,var(--color-neutral-800) 8px,var(--color-neutral-800) 16px);display:flex;align-items:center;justify-content:center">
+                <span style="font-family:ui-monospace,monospace;font-size:10px;opacity:0.5">image placeholder</span>
+              </div>
+            </sc-if>
+            <div class="card-meta" style="margin-top:2px">
+              <button onClick="{{ p.like }}" style="background:none;border:none;padding:4px 2px;display:flex;align-items:center;gap:4px;color:{{ p.likeColor }};cursor:pointer">
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="{{ p.likeFill }}"><path d="M10 17s-6.5-4.1-6.5-9A3.8 3.8 0 0110 5.8 3.8 3.8 0 0116.5 8c0 4.9-6.5 9-6.5 9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                <span style="font-size:11px;font-weight:600">{{ p.voteCount }}</span>
+              </button>
+              <span style="display:flex;align-items:center;gap:4px"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><path d="M3 4h14v9H8l-4 3v-3H3V4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>{{ p.comments }}</span>
+              <span style="display:flex;align-items:center;gap:4px"><svg width="13" height="13" viewBox="0 0 20 20" fill="none"><path d="M13 5.5a2 2 0 100-4 2 2 0 000 4zM5 12a2 2 0 100-4 2 2 0 000 4zM13 18.5a2 2 0 100-4 2 2 0 000 4z" stroke="currentColor" stroke-width="1.5"/><path d="M6.7 10.9l4.6-3.8M6.7 13.1l4.6 3.8" stroke="currentColor" stroke-width="1.5"/></svg>Share</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- SEARCH -->
+  <sc-if value="{{ tabSearch }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:58px 20px 14px;flex:none">
+        <h3 style="margin-bottom:12px">Browse</h3>
+        <input class="input" placeholder="Search Nodes, posts, people"/>
+      </div>
+      <div style="flex:1;overflow:auto;padding:0 20px 24px">
+        <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.5;margin-bottom:10px">Trending nodes</div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:22px">
+          <sc-for list="{{ communities }}" as="c" hint-placeholder-count="5">
+            <div class="card elev-sm" style="flex-direction:row;align-items:center" style-hover="background:var(--color-hover)">
+              <div style="width:34px;height:34px;border-radius:9px;background:{{ c.avatarBg }};color:{{ c.avatarColor }};display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;flex:none">{{ c.letter }}</div>
+              <div style="flex:1;min-width:0">
+                <div class="card-title" style="font-size:14px">{{ c.name }}</div>
+                <div class="card-body" style="font-size:11px;margin:0">{{ c.members }} members · {{ c.desc }}</div>
+              </div>
+              <button class="btn btn-secondary" style="font-size:12px;padding:6px 12px">Join</button>
+            </div>
+          </sc-for>
+        </div>
+        <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.5;margin-bottom:10px">Trending tags</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <sc-for list="{{ tags }}" as="t" hint-placeholder-count="6">
+            <div class="tag tag-neutral">{{ t }}</div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- CHAT -->
+  <sc-if value="{{ tabChat }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div style="padding:58px 20px 14px;flex:none"><h3>Chats</h3></div>
+      <div style="flex:1;overflow:auto;padding-bottom:90px">
+        <sc-for list="{{ chats }}" as="ch" hint-placeholder-count="6">
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--color-divider);cursor:pointer" style-hover="background:var(--color-hover)">
+            <div style="width:40px;height:40px;border-radius:50%;background:{{ ch.avatarBg }};color:{{ ch.avatarColor }};display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;flex:none">{{ ch.letter }}</div>
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;justify-content:space-between;gap:8px">
+                <span style="font-size:14px;font-weight:500">{{ ch.name }}</span>
+                <span style="font-size:11px;opacity:0.5;flex:none">{{ ch.time }}</span>
+              </div>
+              <div style="font-size:12px;opacity:0.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ch.lastMsg }}</div>
+            </div>
+            <sc-if value="{{ ch.unread }}" hint-placeholder-val="{{ false }}"><span style="width:8px;height:8px;border-radius:50%;background:var(--color-accent);flex:none"></span></sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- PROFILE -->
+  <sc-if value="{{ tabProfile }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+      <div style="flex:1;overflow:auto;padding:58px 20px 100px">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">
+          <div style="width:56px;height:56px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-100);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:600;flex:none">R</div>
+          <div>
+            <div style="font-family:var(--font-heading);font-weight:600;font-size:17px">rowan.codes</div>
+            <div style="font-size:12px;opacity:0.55">Joined Mar 2024</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:20px">
+          <div class="card elev-sm" style="align-items:center;text-align:center;gap:2px"><div style="font-family:var(--font-heading);font-weight:600;font-size:20px;color:var(--color-accent-700)">2,481</div><div style="font-size:11px;opacity:0.6">Karma</div></div>
+          <div class="card elev-sm" style="align-items:center;text-align:center;gap:2px"><div style="font-family:var(--font-heading);font-weight:600;font-size:20px">64</div><div style="font-size:11px;opacity:0.6">Posts</div></div>
+          <div class="card elev-sm" style="align-items:center;text-align:center;gap:2px"><div style="font-family:var(--font-heading);font-weight:600;font-size:20px">312</div><div style="font-size:11px;opacity:0.6">Comments</div></div>
+        </div>
+        <div class="card elev-sm" style="margin-bottom:20px">
+          <div class="card-kicker">Activity</div>
+          <div style="display:flex;align-items:flex-end;gap:6px;height:64px;margin-top:6px">
+            <sc-for list="{{ activityBars }}" as="b" hint-placeholder-count="7">
+              <div style="flex:1;height:{{ b.h }}%;background:var(--color-accent-700);border-radius:3px"></div>
+            </sc-for>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;opacity:0.5;margin-top:6px"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+        </div>
+        <div class="card elev-sm" style="margin-bottom:20px;flex-direction:row;align-items:center;background:color-mix(in srgb, var(--color-accent-100) 55%, var(--color-surface))">
+          <div style="flex:1">
+            <div class="card-kicker">Nodeloc Pro</div>
+            <div style="font-size:13px;opacity:0.8">Ad-free, custom badges & more</div>
+          </div>
+          <button class="btn btn-primary" onClick="{{ openPro }}" style="font-size:12px">Upgrade</button>
+        </div>
+        <button class="btn btn-secondary btn-block" onClick="{{ openSettings }}">Settings</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <!-- BOTTOM TAB BAR (floating, collapses on scroll) -->
+  <div style="position:absolute;left:0;right:0;bottom:22px;display:flex;justify-content:center;z-index:20;pointer-events:none">
+    <sc-if value="{{ navExpanded }}" hint-placeholder-val="{{ true }}">
+      <div style="pointer-events:auto;display:flex;gap:4px;align-items:center;padding:8px;border-radius:999px;background:var(--color-surface);box-shadow:var(--shadow-md)">
+        <button onClick="{{ selectHome }}" style="background:{{ homeBg }};border-radius:999px;border:none;display:flex;flex-direction:column;align-items:center;gap:2px;color:{{ homeColor }};cursor:pointer;padding:5px 14px">
+          <svg width="19" height="19" viewBox="14 8.6 102 117.3" fill="none">
+            <g stroke="currentColor" stroke-width="7" stroke-linejoin="round"><path d="M65 25L99.6 45L99.6 85L65 105L30.4 85L30.4 45z"/></g>
+            <circle cx="65" cy="65" r="15" fill="currentColor"/>
+          </svg>
+          <span style="font-size:10px">Home</span>
+        </button>
+        <button onClick="{{ selectChat }}" style="background:{{ chatBg }};border-radius:999px;border:none;position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;color:{{ chatColor }};cursor:pointer;padding:5px 14px">
+          <svg width="19" height="19" viewBox="0 0 20 20" fill="none"><path d="M3 4h14v9H8l-4 3v-3H3V4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          <span style="font-size:10px">Chat</span>
+          <span style="position:absolute;top:2px;right:10px;width:7px;height:7px;border-radius:50%;background:var(--color-love);border:1.5px solid var(--color-surface)"></span>
+        </button>
+        <button onClick="{{ selectProfile }}" style="background:{{ profileBg }};border-radius:999px;border:none;display:flex;flex-direction:column;align-items:center;gap:2px;color:{{ profileColor }};cursor:pointer;padding:5px 14px">
+          <svg width="19" height="19" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="6.5" r="3.5" stroke="currentColor" stroke-width="1.6"/><path d="M3 17c1.5-4 4.5-6 7-6s5.5 2 7 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span style="font-size:10px">Profile</span>
+        </button>
+      </div>
+    </sc-if>
+    <sc-if value="{{ navCollapsed }}" hint-placeholder-val="{{ false }}">
+      <button onClick="{{ expandNav }}" style="pointer-events:auto;width:46px;height:46px;border-radius:50%;background:var(--color-surface);box-shadow:var(--shadow-md);border:none;display:flex;align-items:center;justify-content:center;color:var(--color-accent);cursor:pointer">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M4 12l6-6 6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </sc-if>
+  </div>
+
+  <!-- ═══ OVERLAYS ═══ -->
+  <sc-if value="{{ overlaySidebar }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;z-index:40;display:flex">
+      <div style="width:80%;max-width:280px;height:100%;background:var(--color-surface);box-shadow:var(--shadow-lg);display:flex;flex-direction:column;padding:58px 0 20px">
+        <div style="display:flex;align-items:center;gap:8px;padding:0 20px 16px">
+          <svg width="22" height="22" viewBox="0 0 130 130" fill="none" style="flex:none">
+            <g stroke="#009966" stroke-width="6" stroke-linejoin="round"><path d="M65 25L99.6 45L99.6 85L65 105L30.4 85L30.4 45z"/></g>
+            <g stroke="#E0771A" stroke-width="5.6" stroke-dasharray="8 5.8"><path d="M65 49L65 33M79.8 57.5L92.7 50.1M79.8 72.5L92.2 79.7M65 81L65 97M50.2 72.5L37.8 79.7M50.2 57.5L37.3 50.1"/></g>
+            <circle cx="99.6" cy="85" r="9" fill="#00714c"/><circle cx="65" cy="105" r="10.5" fill="#00402c"/><circle cx="30.4" cy="85" r="8" fill="#009966"/>
+            <circle cx="65" cy="65" r="15" fill="#00593b"/>
+          </svg>
+          <span style="font-family:var(--font-heading);font-weight:600;font-size:14px;letter-spacing:-0.01em">NODELOC</span>
+        </div>
+        <div class="hr" style="margin:0 0 14px"></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:0 20px 18px">
+          <div style="width:40px;height:40px;border-radius:50%;background:var(--color-accent-800);color:var(--color-accent-100);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;flex:none">R</div>
+          <div>
+            <div style="font-family:var(--font-heading);font-weight:600;font-size:14px">rowan.codes</div>
+            <div style="font-size:11px;opacity:0.55">2,481 karma</div>
+          </div>
+        </div>
+        <div class="hr"></div>
+        <div style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.5;padding:12px 20px 6px">Your nodes</div>
+        <div style="flex:1;overflow:auto">
+          <sc-for list="{{ communities }}" as="c" hint-placeholder-count="5">
+            <div style="display:flex;align-items:center;gap:10px;padding:9px 20px;cursor:pointer" style-hover="background:var(--color-hover)">
+              <div style="width:26px;height:26px;border-radius:8px;background:{{ c.avatarBg }};color:{{ c.avatarColor }};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex:none">{{ c.letter }}</div>
+              <span style="font-size:13px;flex:1">{{ c.name }}</span>
+              <svg width="7" height="12" viewBox="0 0 8 14" style="flex:none;opacity:0.35"><path d="M1 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+          </sc-for>
+        </div>
+        <div class="hr"></div>
+        <div onClick="{{ openNotificationsFromSidebar }}" style="padding:12px 20px;font-size:13px;cursor:pointer;position:relative" style-hover="background:var(--color-hover)">
+          Notifications
+          <sc-if value="{{ hasUnreadNotif }}" hint-placeholder-val="{{ true }}"><span style="position:absolute;top:14px;left:98px;width:7px;height:7px;border-radius:50%;background:var(--color-accent)"></span></sc-if>
+        </div>
+        <div onClick="{{ openSettingsFromSidebar }}" style="padding:12px 20px;font-size:13px;cursor:pointer" style-hover="background:var(--color-hover)">Settings</div>
+        <div onClick="{{ openProFromSidebar }}" style="padding:0 20px;font-size:13px;color:var(--color-accent-600);cursor:pointer">Upgrade to Pro</div>
+      </div>
+      <div onClick="{{ closeOverlay }}" style="flex:1;background:color-mix(in srgb, var(--color-neutral-900) 55%, transparent)"></div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ overlayPost }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:var(--color-bg);display:flex;flex-direction:column;z-index:30">
+      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:58px 16px 12px">
+        <button onClick="{{ closeOverlay }}" class="btn btn-icon btn-secondary"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M12 4l-7 6 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span style="font-size:14px;font-weight:500">{{ selectedPost.node }}</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:0 20px 24px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <div style="width:22px;height:22px;border-radius:7px;background:{{ selectedPost.avatarBg }};color:{{ selectedPost.avatarColor }};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600">{{ selectedPost.avatarLetter }}</div>
+          <span style="font-size:12px;opacity:0.7">{{ selectedPost.node }} · {{ selectedPost.time }}</span>
+        </div>
+        <h3 style="margin-bottom:8px">{{ selectedPost.title }}</h3>
+        <p style="font-size:14px;opacity:0.85;margin-bottom:16px">{{ selectedPost.excerpt }}</p>
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">
+          <div style="display:flex;align-items:center;gap:6px;background:var(--color-surface);border-radius:999px;padding:6px 12px">
+            <button onClick="{{ selectedPost.like }}" style="background:none;border:none;padding:0;display:flex;align-items:center;gap:6px;color:{{ selectedPost.likeColor }};cursor:pointer">
+              <svg width="15" height="15" viewBox="0 0 20 20" fill="{{ selectedPost.likeFill }}"><path d="M10 17s-6.5-4.1-6.5-9A3.8 3.8 0 0110 5.8 3.8 3.8 0 0116.5 8c0 4.9-6.5 9-6.5 9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+              <span style="font-size:13px;font-weight:600">{{ selectedPost.voteCount }}</span>
+            </button>
+          </div>
+          <span style="font-size:12px;opacity:0.6">{{ selectedPost.comments }} comments</span>
+        </div>
+        <div class="hr"></div>
+        <sc-for list="{{ postComments }}" as="cm" hint-placeholder-count="4">
+          <div style="padding:12px 0;border-bottom:1px solid var(--color-divider)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span style="font-size:12px;font-weight:500">{{ cm.author }}</span>
+              <span style="font-size:11px;opacity:0.5">{{ cm.time }}</span>
+            </div>
+            <p style="font-size:13px;opacity:0.85;margin:0 0 6px">{{ cm.text }}</p>
+            <div style="display:flex;gap:14px;font-size:11px;opacity:0.55">
+              <span>▲ {{ cm.votes }}</span><span>Reply</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="flex:none;display:flex;gap:8px;padding:10px 16px 20px;border-top:1px solid var(--color-divider)">
+        <input class="input" placeholder="Add a comment…" style="flex:1"/>
+        <button class="btn btn-primary">Post</button>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ overlayNotifications }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:var(--color-bg);display:flex;flex-direction:column;z-index:30">
+      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:58px 16px 12px">
+        <button onClick="{{ closeOverlay }}" class="btn btn-icon btn-secondary"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M12 4l-7 6 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span style="font-size:15px;font-weight:500">Notifications</span>
+      </div>
+      <div style="flex:1;overflow:auto">
+        <sc-for list="{{ notifications }}" as="n" hint-placeholder-count="6">
+          <div style="display:flex;gap:12px;padding:12px 20px;background:{{ n.bg }};border-bottom:1px solid var(--color-divider)" style-hover="background:var(--color-hover)">
+            <div style="width:32px;height:32px;border-radius:50%;background:{{ n.iconBg }};display:flex;align-items:center;justify-content:center;flex:none;color:{{ n.iconColor }}">
+              <sc-if value="{{ n.isLike }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M10 17s-6.5-4.1-6.5-9A3.8 3.8 0 0110 5.8 3.8 3.8 0 0116.5 8c0 4.9-6.5 9-6.5 9z"/></svg></sc-if>
+              <sc-if value="{{ n.isComment }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 20 20" fill="none"><path d="M3 4h14v9H8l-4 3v-3H3V4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></sc-if>
+              <sc-if value="{{ n.isSuccess }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+              <sc-if value="{{ n.isStar }}" hint-placeholder-val="{{ false }}"><svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2l2.2 5.8 6.2.3-4.9 4 1.7 6-5.2-3.6L4.8 18l1.7-6-4.9-4 6.2-.3z"/></svg></sc-if>
+            </div>
+            <div style="flex:1">
+              <div style="font-size:13px"><strong>{{ n.name }}</strong> {{ n.text }}</div>
+              <div style="font-size:11px;opacity:0.5;margin-top:2px">{{ n.time }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ overlaySettings }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:var(--color-bg);display:flex;flex-direction:column;z-index:30">
+      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:58px 16px 12px">
+        <button onClick="{{ closeOverlay }}" class="btn btn-icon btn-secondary"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M12 4l-7 6 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span style="font-size:15px;font-weight:500">Settings</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:4px 4px 24px">
+        <sc-for list="{{ settingsRows }}" as="s" hint-placeholder-count="6">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--color-divider);cursor:pointer" style-hover="background:var(--color-hover)">
+            <span style="font-size:14px;color:{{ s.color }}">{{ s.label }}</span>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:12px;opacity:0.4">{{ s.detail }}</span>
+              <svg width="7" height="12" viewBox="0 0 8 14" style="opacity:0.3"><path d="M1 1l6 6-6 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ overlayPro }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:var(--color-bg);display:flex;flex-direction:column;z-index:30">
+      <div style="flex:none;display:flex;align-items:center;gap:10px;padding:58px 16px 12px">
+        <button onClick="{{ closeOverlay }}" class="btn btn-icon btn-secondary"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M12 4l-7 6 7 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span style="font-size:15px;font-weight:500">Nodeloc Pro</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:8px 20px 24px">
+        <h2 style="margin-bottom:6px">Go further on NODELOC.</h2>
+        <p style="font-size:13px;opacity:0.75;margin-bottom:18px">No ads, custom badges, and priority in the queue.</p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+          <div style="display:flex;gap:8px;font-size:13px;align-items:center"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-9" stroke="var(--color-success)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Ad-free browsing</div>
+          <div style="display:flex;gap:8px;font-size:13px;align-items:center"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-9" stroke="var(--color-success)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Animated profile badge</div>
+          <div style="display:flex;gap:8px;font-size:13px;align-items:center"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M4 10l4 4 8-9" stroke="var(--color-success)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Early access to new Nodes</div>
+        </div>
+        <div class="seg" style="width:100%;margin-bottom:16px">
+          <label class="seg-opt" style="flex:1;justify-content:center"><input type="radio" name="plan" checked="{{ isMonthly }}" onChange="{{ selectMonthly }}"/><span class="dot" style="display:none"></span>Monthly</label>
+          <label class="seg-opt" style="flex:1;justify-content:center"><input type="radio" name="plan" checked="{{ isYearly }}" onChange="{{ selectYearly }}"/><span class="dot" style="display:none"></span>Yearly · save 33%</label>
+        </div>
+        <div class="card" style="margin-bottom:18px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-family:var(--font-heading);font-size:26px;font-weight:600">{{ planPrice }}</span><span style="font-size:12px;opacity:0.55">{{ planPeriod }}</span></div>
+        </div>
+        <div class="card" style="flex-direction:row;align-items:center;margin-bottom:18px">
+          <svg width="26" height="18" viewBox="0 0 26 18" style="flex:none"><rect x="0.5" y="0.5" width="25" height="17" rx="3" stroke="var(--color-divider)" fill="var(--color-surface)"/><rect x="3" y="6" width="20" height="2.5" fill="var(--color-neutral-500)"/></svg>
+          <span style="flex:1;font-size:13px">•••• 4242</span>
+          <button class="btn btn-ghost" style="font-size:12px">Edit</button>
+        </div>
+        <button class="btn btn-primary btn-block">Subscribe</button>
+        <p style="font-size:11px;opacity:0.45;margin-top:10px;text-align:center">Cancel anytime. Renews automatically.</p>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</sc-if>
+
+</div>
+</x-import>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = {
+    authed: false,
+    authMode: 'login',
+    onboardingDone: false,
+    interests: new Set(),
+    tab: 'home',
+    overlay: null,
+    selectedPostId: 1,
+    votes: {},
+    plan: 'yearly',
+    navCollapsed: false,
+  };
+
+  _lastScrollTop = 0;
+
+  handleFeedScroll = (e) => {
+    const top = e.target.scrollTop;
+    const last = this._lastScrollTop;
+    this._lastScrollTop = top;
+    if (top > last && top > 32 && !this.state.navCollapsed) this.setState({ navCollapsed: true });
+    else if (top < last && this.state.navCollapsed) this.setState({ navCollapsed: false });
+  };
+
+  postsBase = [
+    { id: 1, node: 'n/indiehackers', avatarLetter: 'I', variant: 0, time: '2h', title: 'Shipped my first paid feature after 40 rejections', excerpt: 'Small win, but it finally clicked — here is what changed in how I talked to users.', baseVotes: 214, comments: 38, hasImage: false },
+    { id: 2, node: 'n/houseplants', avatarLetter: 'H', variant: 1, time: '4h', title: 'My monstera finally split a leaf after 2 years', excerpt: 'Patience is apparently a fertilizer.', baseVotes: 89, comments: 12, hasImage: true },
+    { id: 3, node: 'n/retrogaming', avatarLetter: 'R', variant: 0, time: '6h', title: 'Found a sealed copy of the original cart at a garage sale', excerpt: 'Paid $4. Still shaking.', baseVotes: 512, comments: 74, hasImage: true },
+    { id: 4, node: 'n/climbing', avatarLetter: 'C', variant: 1, time: '9h', title: 'Sent my first 5.11 today', excerpt: 'Six months of Tuesday nights at the gym finally paid off.', baseVotes: 156, comments: 21, hasImage: false },
+  ];
+
+  commentsData = [
+    { id: 1, author: 'juno_v', time: '1h', text: 'This is such a good reminder to actually talk to users instead of guessing.', votes: 24 },
+    { id: 2, author: 'petra.k', time: '45m', text: 'Congrats! What was the one change that mattered most?', votes: 11 },
+    { id: 3, author: 'devrel_marcus', time: '30m', text: 'Saving this thread for later, going through the same thing right now.', votes: 6 },
+    { id: 4, author: 'lil_amber', time: '12m', text: 'Rejections are just data. Love seeing this pay off.', votes: 3 },
+  ];
+
+  chatsData = [
+    { id: 1, name: 'petra.k', letter: 'P', variant: 0, lastMsg: 'sent you the plant care doc', time: '2m', unread: true },
+    { id: 2, name: 'n/climbing mods', letter: 'C', variant: 1, lastMsg: 'Your post was approved ✓', time: '1h', unread: true },
+    { id: 3, name: 'juno_v', letter: 'J', variant: 0, lastMsg: 'haha yes exactly that', time: '3h', unread: false },
+    { id: 4, name: 'devrel_marcus', letter: 'D', variant: 1, lastMsg: 'let’s hop on a call next week', time: '1d', unread: false },
+    { id: 5, name: 'retro_sam', letter: 'S', variant: 0, lastMsg: 'deal, meet at the flea market?', time: '2d', unread: false },
+  ];
+
+  notificationsData = [
+    { id: 1, kind: 'like', name: 'juno_v', text: 'liked your post in n/indiehackers', time: '10m', unread: true },
+    { id: 2, kind: 'comment', name: 'petra.k', text: 'commented on your post', time: '32m', unread: true },
+    { id: 3, kind: 'success', name: 'n/climbing', text: 'approved your membership request', time: '2h', unread: false },
+    { id: 4, kind: 'like', name: 'lil_amber', text: 'liked your comment', time: '5h', unread: false },
+    { id: 5, kind: 'star', name: 'NODELOC', text: 'Your weekly recap is ready', time: '1d', unread: false },
+  ];
+
+  notifIcon = {
+    like: { bg: 'color-mix(in srgb, var(--color-love) 15%, var(--color-surface))', color: 'var(--color-love)' },
+    comment: { bg: 'color-mix(in srgb, var(--color-accent) 15%, var(--color-surface))', color: 'var(--color-accent-700)' },
+    success: { bg: 'color-mix(in srgb, var(--color-success) 15%, var(--color-surface))', color: 'var(--color-success)' },
+    star: { bg: 'color-mix(in srgb, var(--color-accent-2-500) 18%, var(--color-surface))', color: 'var(--color-accent-2-600)' },
+  };
+
+  communitiesData = [
+    { id: 1, name: 'n/design', letter: 'D', variant: 0, members: '84k', desc: 'Craft & critique' },
+    { id: 2, name: 'n/indiehackers', letter: 'I', variant: 1, members: '61k', desc: 'Build in public' },
+    { id: 3, name: 'n/houseplants', letter: 'H', variant: 0, members: '47k', desc: 'Leaf gang' },
+    { id: 4, name: 'n/retrogaming', letter: 'R', variant: 1, members: '92k', desc: 'Cartridges & consoles' },
+    { id: 5, name: 'n/climbing', letter: 'C', variant: 0, members: '33k', desc: 'Send it' },
+  ];
+
+  interestNames = ['Design', 'Tech', 'Gaming', 'Fitness', 'Plants', 'Music', 'Cooking', 'Travel', 'Books', 'Startups'];
+  activityData = [30, 55, 40, 80, 60, 25, 45];
+  settingsData = [
+    { label: 'Account', detail: 'rowan.codes' },
+    { label: 'Notifications', detail: 'On' },
+    { label: 'Privacy & Safety', detail: '' },
+    { label: 'Appearance', detail: 'Light' },
+    { label: 'Help', detail: '' },
+    { label: 'Log out', detail: '', danger: true },
+  ];
+
+  voteColor(dir, active) { return active ? 'var(--color-accent)' : 'var(--color-neutral-500)'; }
+
+  renderVals() {
+    const st = this.state;
+    const avatarPalette = [
+      { bg: 'var(--color-accent-800)', color: 'var(--color-accent-100)' },
+      { bg: 'var(--color-neutral-800)', color: 'var(--color-neutral-200)' },
+    ];
+
+    const posts = this.postsBase.map((p, idx) => {
+      const liked = !!st.votes[p.id];
+      const pal = avatarPalette[p.variant];
+      return {
+        ...p, ...pal, avatarBg: pal.bg, avatarColor: pal.color,
+        pinned: idx === 0,
+        cardBg: idx === 0 ? 'color-mix(in srgb, var(--color-highlight) 18%, var(--color-surface))' : 'var(--color-surface)',
+        voteCount: p.baseVotes + (liked ? 1 : 0),
+        likeColor: liked ? 'var(--color-love)' : 'var(--color-neutral-600)',
+        likeFill: liked ? 'var(--color-love)' : 'none',
+        open: () => this.setState({ overlay: 'post', selectedPostId: p.id }),
+        like: (e) => { e.stopPropagation(); this.setState(s => ({ votes: { ...s.votes, [p.id]: !s.votes[p.id] } })); },
+      };
+    });
+
+    const selectedPost = posts.find(p => p.id === st.selectedPostId) || posts[0];
+
+    const chats = this.chatsData.map(c => ({ ...c, ...avatarPalette[c.variant], avatarBg: avatarPalette[c.variant].bg, avatarColor: avatarPalette[c.variant].color }));
+    const communities = this.communitiesData.map(c => ({ ...c, avatarBg: avatarPalette[c.variant].bg, avatarColor: avatarPalette[c.variant].color }));
+    const notifications = this.notificationsData.map(n => ({
+      ...n,
+      bg: n.unread ? 'color-mix(in srgb, var(--color-accent) 6%, transparent)' : 'transparent',
+      iconBg: this.notifIcon[n.kind].bg, iconColor: this.notifIcon[n.kind].color,
+      isLike: n.kind === 'like', isComment: n.kind === 'comment', isSuccess: n.kind === 'success', isStar: n.kind === 'star',
+    }));
+    const settingsRows = this.settingsData.map(s => ({ ...s, color: s.danger ? 'var(--color-danger)' : 'var(--color-text)' }));
+    const interestsList = this.interestNames.map(name => {
+      const selected = st.interests.has(name);
+      return {
+        name, selected,
+        bg: selected ? 'var(--color-accent-800)' : 'transparent',
+        color: selected ? 'var(--color-accent-100)' : 'var(--color-text)',
+        border: selected ? 'var(--color-accent)' : 'var(--color-divider)',
+        toggle: () => this.setState(s => { const n = new Set(s.interests); n.has(name) ? n.delete(name) : n.add(name); return { interests: n }; }),
+      };
+    });
+    const activityBars = this.activityData.map(h => ({ h }));
+
+    return {
+      showAuth: !st.authed,
+      showOnboarding: st.authed && !st.onboardingDone,
+      showMain: st.authed && st.onboardingDone,
+      isLoginMode: st.authMode === 'login',
+      isSignupMode: st.authMode === 'signup',
+      setLoginMode: () => this.setState({ authMode: 'login' }),
+      setSignupMode: () => this.setState({ authMode: 'signup' }),
+      authTitle: st.authMode === 'login' ? 'Welcome back.' : 'Create your account.',
+      authSubtitle: st.authMode === 'login' ? 'Log in to keep up with your Nodes.' : 'Join NODELOC — it takes a minute.',
+      authCta: st.authMode === 'login' ? 'Log in' : 'Create account',
+      completeAuth: (e) => { if (e && e.preventDefault) e.preventDefault(); this.setState({ authed: true }); },
+      interestsList,
+      selectedCount: st.interests.size,
+      cannotContinue: st.interests.size === 0,
+      finishOnboarding: () => this.setState({ onboardingDone: true }),
+
+      tabHome: st.tab === 'home' && !st.overlay,
+      tabSearch: st.tab === 'search' && !st.overlay,
+      tabChat: st.tab === 'chat' && !st.overlay,
+      tabProfile: st.tab === 'profile' && !st.overlay,
+      homeColor: st.tab === 'home' ? 'var(--color-accent-700)' : 'var(--color-neutral-600)',
+      searchColor: st.tab === 'search' ? 'var(--color-accent-700)' : 'var(--color-neutral-600)',
+      chatColor: st.tab === 'chat' ? 'var(--color-accent-700)' : 'var(--color-neutral-600)',
+      profileColor: st.tab === 'profile' ? 'var(--color-accent-700)' : 'var(--color-neutral-600)',
+      homeBg: st.tab === 'home' ? 'var(--color-selected)' : 'none',
+      chatBg: st.tab === 'chat' ? 'var(--color-selected)' : 'none',
+      profileBg: st.tab === 'profile' ? 'var(--color-selected)' : 'none',
+      selectHome: () => this.setState({ tab: 'home', overlay: null }),
+      selectSearch: () => this.setState({ tab: 'search', overlay: null }),
+      selectChat: () => this.setState({ tab: 'chat', overlay: null }),
+      selectProfile: () => this.setState({ tab: 'profile', overlay: null }),
+      handleFeedScroll: this.handleFeedScroll,
+      headerExpanded: !st.navCollapsed,
+      headerCollapsed: st.navCollapsed,
+      navExpanded: !st.navCollapsed,
+      navCollapsed: st.navCollapsed,
+      expandNav: () => this.setState({ navCollapsed: false }),
+      feedPadTop: st.navCollapsed ? 60 : 0,
+
+      posts, chats, communities, notifications, settingsRows,
+      tags: ['#buildinpublic', '#firstascent', '#retro', '#plantcare', '#launchweek', '#gearcheck'],
+      hasUnreadNotif: this.notificationsData.some(n => n.unread),
+      postComments: this.commentsData,
+      selectedPost,
+      activityBars,
+
+      openNotifications: () => this.setState({ overlay: 'notifications' }),
+      openSettings: () => this.setState({ overlay: 'settings' }),
+      openPro: () => this.setState({ overlay: 'pro' }),
+      openSidebar: () => this.setState({ overlay: 'sidebar' }),
+      openSettingsFromSidebar: () => this.setState({ overlay: 'settings' }),
+      openNotificationsFromSidebar: () => this.setState({ overlay: 'notifications' }),
+      openProFromSidebar: () => this.setState({ overlay: 'pro' }),
+      closeOverlay: () => this.setState({ overlay: null }),
+      overlayPost: st.overlay === 'post',
+      overlayNotifications: st.overlay === 'notifications',
+      overlaySettings: st.overlay === 'settings',
+      overlayPro: st.overlay === 'pro',
+      overlaySidebar: st.overlay === 'sidebar',
+
+      isMonthly: st.plan === 'monthly',
+      isYearly: st.plan === 'yearly',
+      selectMonthly: () => this.setState({ plan: 'monthly' }),
+      selectYearly: () => this.setState({ plan: 'yearly' }),
+      planPrice: st.plan === 'monthly' ? '$4.99' : '$39.99',
+      planPeriod: st.plan === 'monthly' ? 'per month' : 'per year',
+    };
+  }
+}
+
+</script>
+</body>
+</html>
