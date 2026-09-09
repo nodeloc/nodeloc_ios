@@ -3952,7 +3952,12 @@ final class ChatConversationStore {
 
     /// Re-reads the queue for this channel and redraws the optimistic rows.
     private func refreshPending(channelID: Int) async {
-        pending = (try? await ChatStorage.shared.queued(channelID: channelID)) ?? []
+        // Keeps what is in memory if the read fails. `?? []` would have wiped
+        // the queue on any database hiccup — and the row on screen with it,
+        // making a message the reader can still see vanish for no stated
+        // reason. In-memory is the weaker copy but never the emptier one.
+        guard let stored = try? await ChatStorage.shared.queued(channelID: channelID) else { return }
+        pending = stored
     }
 
     func load(
@@ -4165,8 +4170,14 @@ final class ChatConversationStore {
     ///
     /// Sequentially and in order: two messages sent together must not arrive
     /// swapped, which is exactly what parallel requests would allow.
-    func drainOutbox(channelID: Int) async {
-        let queue = pending.filter { $0.channelID == channelID && !$0.hasFailed }
+    func drainOutbox(channelID: Int, includingFailed: Bool = false) async {
+        // A previously failed message is included on reopen, not excluded:
+        // filtering it out is what left a message stuck after a single dropped
+        // request. The attempt cap is what stops that becoming a hot loop.
+        let queue = pending.filter {
+            $0.channelID == channelID
+                && (includingFailed || $0.mayRetryAutomatically)
+        }
         guard !queue.isEmpty else { return }
 
         isSending = true
@@ -4215,7 +4226,7 @@ final class ChatConversationStore {
         try? await ChatStorage.shared.enqueue(reset)
         await refreshPending(channelID: item.channelID)
         redrawOptimisticRows(threadID: item.threadID)
-        await drainOutbox(channelID: item.channelID)
+        await drainOutbox(channelID: item.channelID, includingFailed: true)
     }
 
     /// Throws a failed message away, at the reader's request.

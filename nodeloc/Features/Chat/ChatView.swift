@@ -1218,6 +1218,8 @@ private struct ChatConversationView: View {
     @State private var deleteTargetMessage: ChatConversationMessage?
     /// A message the server refused, awaiting the reader's decision.
     @State private var failedMessage: ChatConversationMessage?
+    /// Watched so the outbox sends itself the moment a network path returns.
+    @State private var reachability = NetworkReachability.shared
     /// Set by the pinned bar; consumed by the transcript's scroll.
     @State private var pinJumpTarget: Int?
     @State private var isShowingAddMembers = false
@@ -1372,6 +1374,13 @@ private struct ChatConversationView: View {
             if let latest = store.messages.map(\.id).max() {
                 await MessageCenterStore.shared.markChatChannelRead(channelID: chat.id, messageID: latest)
             }
+        }
+        // Coming back online is the event a queued message is waiting for.
+        // Only the transition, and only towards online: `NetworkReachability`
+        // filters repeats, so this fires once per reconnection.
+        .onChange(of: reachability.isOnline) { _, isOnline in
+            guard isOnline else { return }
+            Task { await store.drainOutbox(channelID: chat.id, includingFailed: true) }
         }
         .onDisappear {
             store.stopLiveUpdates()

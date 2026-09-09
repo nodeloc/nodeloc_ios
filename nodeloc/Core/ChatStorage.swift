@@ -376,9 +376,22 @@ struct OutboxItem: Sendable, Identifiable, Equatable {
 
     var id: UUID { localID }
 
-    /// Shown as failed rather than sending once the server has refused it more
-    /// than twice — at that point retrying silently is just hiding it.
-    var hasFailed: Bool { attempts >= 3 }
+    /// Whether the last attempt failed.
+    ///
+    /// Any failure counts, from the first. The threshold used to be three
+    /// attempts, which assumed an automatic retry loop that does not exist —
+    /// so a message that failed once sat behind a "sending" clock forever,
+    /// with no way for the reader to retry it and nothing retrying on their
+    /// behalf. One failure is something to say out loud.
+    var hasFailed: Bool { attempts > 0 }
+
+    /// Beyond this many failures the queue stops retrying by itself.
+    ///
+    /// The manual button ignores it: the reader asking again is new
+    /// information, where reopening a channel is not.
+    static let maximumAutomaticAttempts = 5
+
+    var mayRetryAutomatically: Bool { attempts < Self.maximumAutomaticAttempts }
 
     init(
         localID: UUID = UUID(),
