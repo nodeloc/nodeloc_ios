@@ -386,6 +386,17 @@ struct ChatReaction: Identifiable, Hashable {
 }
 
 struct ChatConversationMessage: Identifiable, Hashable {
+    /// Where a message is on its way to the server.
+    ///
+    /// Anything the server sent is `.sent`. The other two belong to rows this
+    /// device invented so the transcript could show your message the instant
+    /// you pressed send, rather than after a round trip.
+    enum Delivery: Hashable {
+        case sent
+        case sending
+        case failed
+    }
+
     let id: Int
     let authorName: String
     let username: String
@@ -415,6 +426,11 @@ struct ChatConversationMessage: Identifiable, Hashable {
     /// different rendering, and lumping them together made a sent clip show up
     /// as a broken picture.
     var videos: [URL] = []
+    /// Server-acknowledged unless this row came from the outbox.
+    var delivery: Delivery = .sent
+    /// The queued item behind an optimistic row, so retrying or discarding it
+    /// can find the record on disk. Nil on everything from the server.
+    var outboxID: UUID?
 
     var authorProfileTarget: UserProfileTarget? {
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)

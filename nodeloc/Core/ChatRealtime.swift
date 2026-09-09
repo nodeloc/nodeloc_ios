@@ -9,9 +9,11 @@
 //    are treated purely as "this channel changed" signals; the store refetches
 //    through its existing mappers, which keeps this client tiny.
 //
-//  - ChatDiskCache: per-channel snapshots of the raw messages JSON, so a
-//    conversation opens instantly from disk and the network fetch only
-//    reconciles. Lives in Caches (purgeable); no database by design.
+//  Per-channel snapshots used to live here too. They were replaced by
+//  `ChatStorage`, which keeps message history and the send queue in SQLite —
+//  a snapshot of the newest page could open a conversation instantly and
+//  nothing else: no scrolling back, and nothing to hold a message that failed
+//  to send.
 //
 
 import Foundation
@@ -107,24 +109,3 @@ final class MessageBusClient {
     }
 }
 
-actor ChatDiskCache {
-    static let shared = ChatDiskCache()
-
-    private var directory: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appending(path: "ChatMessages", directoryHint: .isDirectory)
-    }
-
-    func load(channelID: Int) -> Data? {
-        try? Data(contentsOf: fileURL(channelID))
-    }
-
-    func store(_ data: Data, channelID: Int) {
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: fileURL(channelID), options: .atomic)
-    }
-
-    private func fileURL(_ channelID: Int) -> URL {
-        directory.appending(path: "channel-\(channelID).json")
-    }
-}

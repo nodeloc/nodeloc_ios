@@ -61,6 +61,13 @@ actor ChatStorage {
 
     // MARK: Lifecycle
 
+    /// Opens on first use, so no caller can forget and silently get "no cache"
+    /// for the life of the process.
+    private func prepareIfNeeded() throws {
+        guard !isReady else { return }
+        try prepare()
+    }
+
     /// Opens and prepares the database. Safe to call repeatedly.
     ///
     /// Failure is reported by throwing, but every caller in the app treats it
@@ -160,7 +167,7 @@ actor ChatStorage {
     /// Everything, for sign-out. The outbox goes too: unsent messages belong to
     /// the account that wrote them.
     func clearAll() throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         try database.execute("DELETE FROM message; DELETE FROM outbox;")
     }
 
@@ -176,7 +183,7 @@ actor ChatStorage {
     /// - Parameter before: exclusive upper bound — the oldest id already on
     ///   screen — for scrolling further back. Nil asks for the newest page.
     func page(channelID: Int, threadID: Int? = nil, before: Int? = nil, limit: Int = 50) throws -> Data? {
-        guard isReady else { return nil }
+        try prepareIfNeeded()
 
         var sql = "SELECT payload FROM message WHERE channel_id = ?"
         var parameters: [SQLValue] = [.int(Int64(channelID))]
@@ -208,7 +215,7 @@ actor ChatStorage {
     /// The newest stored id, for deciding whether a fetched page continues the
     /// stored history or starts a new one.
     func newestMessageID(channelID: Int) throws -> Int? {
-        guard isReady else { return nil }
+        try prepareIfNeeded()
         let rows = try database.rows(
             "SELECT MAX(id) AS newest FROM message WHERE channel_id = ?;",
             [.int(Int64(channelID))]
@@ -228,7 +235,8 @@ actor ChatStorage {
         channelID: Int,
         isContiguous: Bool
     ) throws {
-        guard isReady, !messages.isEmpty else { return }
+        guard !messages.isEmpty else { return }
+        try prepareIfNeeded()
 
         try database.transaction { db in
             if !isContiguous {
@@ -254,7 +262,7 @@ actor ChatStorage {
 
     /// Drops one message, for a deletion arriving over the bus.
     func delete(messageID: Int) throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         try database.run("DELETE FROM message WHERE id = ?;", [.int(Int64(messageID))])
     }
 
@@ -263,7 +271,7 @@ actor ChatStorage {
     /// Called after a fetch rather than on a timer: the point is to stop one
     /// very busy channel growing without limit, not to expire history by age.
     func trim(channelID: Int, keeping limit: Int = 500) throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         try database.run(
             """
             DELETE FROM message
@@ -280,7 +288,7 @@ actor ChatStorage {
 
     /// Records a message before it is sent, so a failure can't lose it.
     func enqueue(_ item: OutboxItem) throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         let uploads = (try? JSONEncoder().encode(item.uploadIDs)).flatMap { String(data: $0, encoding: .utf8) }
         try database.run(
             """
@@ -305,7 +313,7 @@ actor ChatStorage {
     /// Everything still unsent, oldest first — the order it must be retried in,
     /// or messages would arrive shuffled.
     func queued(channelID: Int? = nil) throws -> [OutboxItem] {
-        guard isReady else { return [] }
+        try prepareIfNeeded()
         var sql = "SELECT * FROM outbox"
         var parameters: [SQLValue] = []
         if let channelID {
@@ -317,7 +325,7 @@ actor ChatStorage {
     }
 
     func markAttempt(localID: UUID, error: String?) throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         try database.run(
             "UPDATE outbox SET attempts = attempts + 1, last_error = ? WHERE local_id = ?;",
             [error.map { .text($0) } ?? .null, .text(localID.uuidString)]
@@ -326,7 +334,7 @@ actor ChatStorage {
 
     /// Removes a queued message, on success or on the reader discarding it.
     func dequeue(localID: UUID) throws {
-        guard isReady else { return }
+        try prepareIfNeeded()
         try database.run("DELETE FROM outbox WHERE local_id = ?;", [.text(localID.uuidString)])
     }
 
@@ -427,5 +435,57 @@ struct OutboxItem: Sendable, Identifiable, Equatable {
             attempts: row["attempts"]?.intValue ?? 0,
             lastError: row["last_error"]?.stringValue
         )
+    }
+}
+
+extension ChatStorage {
+    /// Splits one raw messages page into per-message rows.
+    ///
+    /// `JSONSerialization` rather than the app's models: every field the server
+    /// sent is kept, including ones no model knows about yet. Re-encoding
+    /// through `ChatConversationMessage` would silently drop those, and a
+    /// stored copy that has less in it than the response it came from is a trap
+    /// for the next release that starts reading one of them.
+    ///
+    /// Fields are preserved; byte order is not, since the dictionary is
+    /// re-serialised. That distinction matters only for a signature, and there
+    /// isn't one here.
+    nonisolated static func rows(fromRawPage data: Data) -> [StoredMessage] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let messages = root["messages"] as? [[String: Any]]
+        else { return [] }
+
+        return messages.compactMap { message in
+            guard let id = message["id"] as? Int,
+                  let payload = try? JSONSerialization.data(withJSONObject: message),
+                  let text = String(data: payload, encoding: .utf8)
+            else { return nil }
+
+            return StoredMessage(
+                id: id,
+                threadID: message["thread_id"] as? Int,
+                createdAt: message["created_at"] as? String,
+                payload: text
+            )
+        }
+    }
+
+    /// Stores a fetched page, working out for itself whether it continues the
+    /// stored history.
+    ///
+    /// A page whose oldest message is newer than everything stored means the
+    /// app missed messages in between — so the old rows go, rather than
+    /// leaving a gap that paging up would step over without saying anything.
+    func absorb(rawPage data: Data, channelID: Int) throws {
+        let rows = Self.rows(fromRawPage: data)
+        guard !rows.isEmpty else { return }
+
+        let storedNewest = try newestMessageID(channelID: channelID)
+        let isContiguous = storedNewest.map { newest in
+            rows.contains { $0.id <= newest }
+        } ?? true
+
+        try store(messages: rows, channelID: channelID, isContiguous: isContiguous)
+        try trim(channelID: channelID)
     }
 }

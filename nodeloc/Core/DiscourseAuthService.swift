@@ -164,6 +164,10 @@ final class DiscourseLogin {
         // server for anything, so leaving this behind would show the previous
         // account's name, avatar and 能量 to whoever signs in next.
         ProfileSnapshot.clearAll()
+        // Same reasoning, and more serious: chat history is private
+        // correspondence, and the outbox may hold a message the previous
+        // account never managed to send.
+        Task { try? await ChatStorage.shared.clearAll() }
     }
 
     // MARK: Username/password auth

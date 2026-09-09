@@ -3890,10 +3890,70 @@ final class ChatConversationStore {
     var members: [UserProfileTarget] = []
     var memberTotal = 0
     var isLoadingMembers = false
+    /// Messages written on this device that the server hasn't acknowledged.
+    ///
+    /// Mirrors the `outbox` table rather than being the truth: the table is,
+    /// so a message survives the app being killed between pressing send and
+    /// the request completing.
+    private(set) var pending: [OutboxItem] = []
+    /// Optimistic rows are given negative ids so they can never collide with a
+    /// server id, which makes `id > 0` the test for "acknowledged".
     private var loadedChannelID: Int?
     private var loadedChannelTargetMessageID: Int?
     private var loadedThreadID: Int?
     private var loadedThreadTargetMessageID: Int?
+
+    /// Sets the channel transcript, keeping the optimistic rows at the end.
+    ///
+    /// Every assignment to `messages` goes through here. A server response
+    /// replaces the list wholesale, and doing that directly is what would drop
+    /// the message you just wrote — it isn't in the response yet, because the
+    /// server hasn't got it.
+    private func applyChannelMessages(_ serverMessages: [ChatConversationMessage]) {
+        messages = serverMessages + optimisticRows(threadID: nil)
+    }
+
+    private func applyThreadMessages(_ serverMessages: [ChatConversationMessage], threadID: Int?) {
+        threadMessages = serverMessages + optimisticRows(threadID: threadID)
+    }
+
+    /// The queued items, as rows the existing transcript can draw.
+    ///
+    /// Synthesised as ordinary `ChatConversationMessage`s so there is one row
+    /// renderer, not two: the only difference a reader sees is the state mark
+    /// `delivery` drives.
+    private func optimisticRows(threadID: Int?) -> [ChatConversationMessage] {
+        let mine = pending.filter { $0.threadID == threadID }
+        guard !mine.isEmpty else { return [] }
+
+        let me = ProfileTabAvatarStore.shared
+        return mine.enumerated().map { offset, item in
+            ChatConversationMessage(
+                id: -(offset + 1),
+                authorName: me.displayName.isEmpty ? me.username : me.displayName,
+                username: me.username,
+                text: item.body,
+                time: DiscourseFormat.relative(ISO8601DateFormatter().string(from: item.createdAt)),
+                avatarLetter: me.initial,
+                variant: me.variant,
+                avatarURL: me.avatarURL,
+                isMine: true,
+                thread: nil,
+                // One plain fragment: this row lives for a single round trip
+                // and the text is exactly what was typed. Emoji shortcodes
+                // resolve when the server's own copy replaces it, which is
+                // the same moment the sending mark disappears.
+                content: [ChatContentFragment(id: "pending-\(item.localID)", kind: .text(item.body))],
+                delivery: item.hasFailed ? .failed : .sending,
+                outboxID: item.localID
+            )
+        }
+    }
+
+    /// Re-reads the queue for this channel and redraws the optimistic rows.
+    private func refreshPending(channelID: Int) async {
+        pending = (try? await ChatStorage.shared.queued(channelID: channelID)) ?? []
+    }
 
     func load(
         chat: Chat,
@@ -3918,15 +3978,29 @@ final class ChatConversationStore {
         loadedChannelID = chat.id
         loadedChannelTargetMessageID = channelTargetMessageID
         errorText = nil
+        // Per channel, not per store. Reaching the top of one conversation
+        // used to leave every conversation opened afterwards unable to page.
+        hasMoreHistory = true
 
-        // Cache first, messenger-style: the stored snapshot renders instantly
-        // and the network fetch below only reconciles. Skipped when jumping to
-        // a specific message, which the snapshot may not contain.
+        // Anything this device still owes the server comes back first, so a
+        // message written offline is on screen before the network is even
+        // asked — and stays there if the network says no.
+        await refreshPending(channelID: chat.id)
+        // And is sent. Without this, a message queued in a dead spot would sit
+        // there until the reader typed another one — the queue would be
+        // durable but never drained, which is the wrong half of the promise.
+        if !pending.isEmpty {
+            Task { await drainOutbox(channelID: chat.id) }
+        }
+
+        // Then the stored history, messenger-style: it renders instantly and
+        // the fetch below only reconciles. Skipped when jumping to a specific
+        // message, which the stored page may not contain.
         var showedCache = false
         if channelTargetMessageID == nil,
-           let cached = await ChatDiskCache.shared.load(channelID: chat.id),
+           let cached = try? await ChatStorage.shared.page(channelID: chat.id),
            let response = Self.decodeSnapshot(cached) {
-            messages = ChatMessageMapper.messages(from: response)
+            applyChannelMessages(ChatMessageMapper.messages(from: response))
             channelInitialScrollMessageID = messages.last?.id
             channelInitialScrollIsUnread = false
             showedCache = !messages.isEmpty
@@ -3941,9 +4015,9 @@ final class ChatConversationStore {
                 targetMessageID: channelTargetMessageID
             )
             guard loadedChannelID == chat.id else { return }
-            messages = ChatMessageMapper.messages(from: response)
+            applyChannelMessages(ChatMessageMapper.messages(from: response))
             if channelTargetMessageID == nil {
-                await ChatDiskCache.shared.store(raw, channelID: chat.id)
+                try? await ChatStorage.shared.absorb(rawPage: raw, channelID: chat.id)
             }
             let target = initialScrollTarget(
                 for: messages,
@@ -4025,29 +4099,140 @@ final class ChatConversationStore {
         loadedThreadTargetMessageID = nil
     }
 
-    func send(_ text: String, chat: Chat, inReplyToID: Int? = nil, uploadIDs: [Int] = []) async {
-        await send(
-            text,
-            channelID: chat.id,
-            threadID: nil,
-            inReplyToID: inReplyToID,
-            uploadIDs: uploadIDs
-        )
-        // A light reconcile, not the old full channel reload: the latest page
-        // replaces the list in place, so the conversation doesn't blink.
-        await refreshLatest(channelID: chat.id)
+    /// Records a message and shows it immediately; the network happens after.
+    ///
+    /// Returns as soon as the message is on disk, which is what lets the caller
+    /// clear the input box safely. Before this, the draft was cleared *first*
+    /// and a failed request simply lost what the reader had typed — the only
+    /// place in the app that destroyed user data.
+    ///
+    /// The row appears at once instead of after two round trips (the POST, then
+    /// the refetch that used to follow it). That delay was the single most
+    /// visible reason chat didn't feel like a messenger.
+    func enqueue(_ text: String, chat: Chat, inReplyToID: Int? = nil, uploadIDs: [Int] = []) async {
+        await enqueue(text, channelID: chat.id, threadID: nil, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
     }
 
-    func sendToSelectedThread(_ text: String, inReplyToID: Int? = nil, uploadIDs: [Int] = []) async {
+    func enqueueToSelectedThread(_ text: String, inReplyToID: Int? = nil, uploadIDs: [Int] = []) async {
         guard let selectedThread else { return }
-        await send(
+        await enqueue(
             text,
             channelID: selectedThread.channelID,
             threadID: selectedThread.id,
             inReplyToID: inReplyToID,
             uploadIDs: uploadIDs
         )
-        await refreshLatest(channelID: selectedThread.channelID)
+    }
+
+    private func enqueue(
+        _ text: String,
+        channelID: Int,
+        threadID: Int?,
+        inReplyToID: Int?,
+        uploadIDs: [Int]
+    ) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Uploads alone are a message; only both being empty is nothing to send.
+        guard !trimmed.isEmpty || !uploadIDs.isEmpty else { return }
+
+        let item = OutboxItem(
+            channelID: channelID,
+            threadID: threadID,
+            body: trimmed,
+            inReplyToID: inReplyToID,
+            uploadIDs: uploadIDs
+        )
+
+        // Disk before pixels: if this throws there is nothing durable, so the
+        // send still happens but the reader is told rather than being shown a
+        // bubble that could vanish.
+        do {
+            try await ChatStorage.shared.enqueue(item)
+        } catch {
+            errorText = AppString("消息暂时无法保存到本地，正在直接发送。")
+        }
+
+        pending.append(item)
+        redrawOptimisticRows(threadID: threadID)
+
+        // Not awaited. This function's promise is "it is safe to clear the
+        // input box now", and awaiting the network would hold the text on
+        // screen for the whole round trip — the very delay being removed.
+        Task { await drainOutbox(channelID: channelID) }
+    }
+
+    /// Sends every queued message for a channel, oldest first.
+    ///
+    /// Sequentially and in order: two messages sent together must not arrive
+    /// swapped, which is exactly what parallel requests would allow.
+    func drainOutbox(channelID: Int) async {
+        let queue = pending.filter { $0.channelID == channelID && !$0.hasFailed }
+        guard !queue.isEmpty else { return }
+
+        isSending = true
+        defer { isSending = false }
+
+        var didSendAny = false
+        for item in queue {
+            do {
+                _ = try await client.createChatMessage(
+                    channelID: item.channelID,
+                    message: item.body,
+                    threadID: item.threadID,
+                    inReplyToID: item.inReplyToID,
+                    uploadIDs: item.uploadIDs
+                )
+                try? await ChatStorage.shared.dequeue(localID: item.localID)
+                pending.removeAll { $0.localID == item.localID }
+                didSendAny = true
+            } catch {
+                // Stays queued. The count is what turns the row red after a
+                // few tries — a message that keeps failing has to become
+                // visible rather than retrying forever in silence.
+                let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                try? await ChatStorage.shared.markAttempt(localID: item.localID, error: description)
+                await refreshPending(channelID: channelID)
+                redrawOptimisticRows(threadID: item.threadID)
+                errorText = description
+                // Later messages wait: sending them now would reorder the
+                // conversation around the one that failed.
+                return
+            }
+        }
+
+        if didSendAny {
+            // One reconcile for the batch, which also replaces the optimistic
+            // rows with the server's own copies.
+            await refreshLatest(channelID: channelID)
+        }
+    }
+
+    /// Retries one failed message, at the reader's request.
+    func retry(_ item: OutboxItem) async {
+        var reset = item
+        reset.attempts = 0
+        reset.lastError = nil
+        try? await ChatStorage.shared.enqueue(reset)
+        await refreshPending(channelID: item.channelID)
+        redrawOptimisticRows(threadID: item.threadID)
+        await drainOutbox(channelID: item.channelID)
+    }
+
+    /// Throws a failed message away, at the reader's request.
+    func discard(_ item: OutboxItem) async {
+        try? await ChatStorage.shared.dequeue(localID: item.localID)
+        pending.removeAll { $0.localID == item.localID }
+        redrawOptimisticRows(threadID: item.threadID)
+    }
+
+    /// Re-attaches the optimistic rows after `pending` changes.
+    private func redrawOptimisticRows(threadID: Int?) {
+        let serverChannel = messages.filter { $0.id > 0 }
+        applyChannelMessages(serverChannel)
+        if threadID != nil || selectedThread != nil {
+            let serverThread = threadMessages.filter { $0.id > 0 }
+            applyThreadMessages(serverThread, threadID: selectedThread?.id)
+        }
     }
 
     /// Uploads one picked image or video into chat's own bucket and answers the
@@ -4384,6 +4569,64 @@ final class ChatConversationStore {
         }
     }
 
+    /// Whether there is more history above what is on screen.
+    ///
+    /// Optimistic by design: it only turns false once a fetch comes back with
+    /// nothing older, because guessing "no more" from an empty local page
+    /// would hide history that is on the server.
+    private(set) var hasMoreHistory = true
+    private(set) var isLoadingHistory = false
+
+    /// Loads older messages, disk first.
+    ///
+    /// The transcript had no way to scroll back at all before this: `load`
+    /// fetched the newest page and that was the entire conversation as far as
+    /// the app was concerned.
+    func loadOlderMessages(channelID: Int) async {
+        guard !isLoadingHistory, hasMoreHistory else { return }
+        guard let oldest = messages.first(where: { $0.id > 0 })?.id else { return }
+
+        isLoadingHistory = true
+        defer { isLoadingHistory = false }
+
+        // Stored history first — scrolling back through what has already been
+        // fetched should not touch the network.
+        if let cached = try? await ChatStorage.shared.page(channelID: channelID, before: oldest),
+           let response = Self.decodeSnapshot(cached) {
+            let older = ChatMessageMapper.messages(from: response)
+            if !older.isEmpty {
+                applyChannelMessages(older + messages.filter { $0.id > 0 })
+                return
+            }
+        }
+
+        do {
+            let (response, raw) = try await client.chatMessagesWithRaw(
+                channelID: channelID,
+                targetMessageID: oldest
+            )
+            guard loadedChannelID == channelID else { return }
+
+            let fetched = ChatMessageMapper.messages(from: response)
+            let older = fetched.filter { $0.id < oldest }
+            guard !older.isEmpty else {
+                hasMoreHistory = false
+                return
+            }
+            // Contiguous by construction: this page was asked for around a
+            // message already on screen.
+            let rows = ChatStorage.rows(fromRawPage: raw)
+            try? await ChatStorage.shared.store(messages: rows, channelID: channelID, isContiguous: true)
+
+            let existing = messages.filter { $0.id > 0 }
+            let known = Set(existing.map(\.id))
+            applyChannelMessages(older.filter { !known.contains($0.id) } + existing)
+        } catch {
+            // Left as "maybe more": a transient failure is not an end of
+            // history, and the next scroll can try again.
+        }
+    }
+
     func stopLiveUpdates() {
         bus.stop()
         liveChannelID = nil
@@ -4396,9 +4639,9 @@ final class ChatConversationStore {
             let (response, raw) = try await client.chatMessagesWithRaw(channelID: channelID)
             // The user may have switched channels while this was in flight.
             guard loadedChannelID == channelID else { return }
-            let previousLast = messages.last?.id
-            messages = ChatMessageMapper.messages(from: response)
-            await ChatDiskCache.shared.store(raw, channelID: channelID)
+            let previousLast = messages.last(where: { $0.id > 0 })?.id
+            applyChannelMessages(ChatMessageMapper.messages(from: response))
+            try? await ChatStorage.shared.absorb(rawPage: raw, channelID: channelID)
             if let last = messages.last?.id, last != previousLast {
                 channelInitialScrollMessageID = last
                 channelInitialScrollIsUnread = false
@@ -4428,33 +4671,6 @@ final class ChatConversationStore {
         return try? decoder.decode(ChatMessagesResponse.self, from: data)
     }
 
-    private func send(
-        _ text: String,
-        channelID: Int,
-        threadID: Int?,
-        inReplyToID: Int?,
-        uploadIDs: [Int]
-    ) async {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Uploads alone are a message; only both being empty is nothing to send.
-        guard !trimmed.isEmpty || !uploadIDs.isEmpty else { return }
-
-        isSending = true
-        errorText = nil
-        defer { isSending = false }
-
-        do {
-            _ = try await client.createChatMessage(
-                channelID: channelID,
-                message: trimmed,
-                threadID: threadID,
-                inReplyToID: inReplyToID,
-                uploadIDs: uploadIDs
-            )
-        } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-    }
 
     private func initialScrollTarget(
         for messages: [ChatConversationMessage],

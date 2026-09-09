@@ -1216,6 +1216,8 @@ private struct ChatConversationView: View {
     @State private var reactionTarget: ChatConversationMessage?
     @State private var flagTargetMessage: ChatConversationMessage?
     @State private var deleteTargetMessage: ChatConversationMessage?
+    /// A message the server refused, awaiting the reader's decision.
+    @State private var failedMessage: ChatConversationMessage?
     /// Set by the pinned bar; consumed by the transcript's scroll.
     @State private var pinJumpTarget: Int?
     @State private var isShowingAddMembers = false
@@ -1303,6 +1305,34 @@ private struct ChatConversationView: View {
                 ),
                 allowedNameKeys: target.availableFlags
             )
+        }
+        // Retry or throw away. Deliberately not automatic: a message that has
+        // failed three times is failing for a reason, and silently retrying
+        // forever is how a chat app ends up sending something an hour late.
+        .confirmationDialog(
+            AppString("这条消息没有发送成功"),
+            isPresented: Binding(get: { failedMessage != nil }, set: { if !$0 { failedMessage = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button(AppString("重新发送")) {
+                guard let outboxID = failedMessage?.outboxID,
+                      let item = store.pending.first(where: { $0.localID == outboxID })
+                else { return }
+                failedMessage = nil
+                Task { await store.retry(item) }
+            }
+            Button(AppString("删除"), role: .destructive) {
+                guard let outboxID = failedMessage?.outboxID,
+                      let item = store.pending.first(where: { $0.localID == outboxID })
+                else { return }
+                failedMessage = nil
+                Task { await store.discard(item) }
+            }
+            Button(AppString("取消"), role: .cancel) { failedMessage = nil }
+        } message: {
+            if let text = failedMessage?.text, !text.isEmpty {
+                Text(text)
+            }
         }
         .confirmationDialog(
             AppString("删除这条消息？"),
@@ -1618,6 +1648,23 @@ private struct ChatConversationView: View {
                             .padding(.top, 24)
                     }
 
+                    // Paging trigger, above the oldest row. Its own view
+                    // rather than an `onAppear` on the first bubble: the first
+                    // bubble changes identity every time a page lands, which
+                    // re-fires `onAppear` and would page again immediately.
+                    if store.selectedThread == nil, store.hasMoreHistory, !activeMessages.isEmpty {
+                        Color.clear
+                            .frame(height: 1)
+                            .onAppear {
+                                Task { await store.loadOlderMessages(channelID: chat.id) }
+                            }
+                        if store.isLoadingHistory {
+                            ProgressView()
+                                .tint(Theme.accent)
+                                .padding(.vertical, 8)
+                        }
+                    }
+
                     ForEach(activeMessages) { message in
                         ChatMessageBubble(
                             message: message,
@@ -1669,7 +1716,8 @@ private struct ChatConversationView: View {
                                 }
                                 : nil,
                             isPinned: store.pins.contains { $0.messageID == message.id },
-                            onQuoteToPost: { quoteToPost(message) }
+                            onQuoteToPost: { quoteToPost(message) },
+                            onRetryFailed: { failedMessage = message }
                         )
                         .id(message.id)
                     }
@@ -2242,15 +2290,18 @@ private struct ChatConversationView: View {
         let text = draft
         let uploadIDs = attachments.compactMap(\.uploadID)
         let inReplyToID = replyTarget?.id
-        draft = ""
-        attachments = []
-        replyTarget = nil
         Task {
+            // Cleared *after* the message is recorded on disk, not before.
+            // Clearing first is what used to lose the text outright when the
+            // request failed; the wait is a local write, not the network.
             if store.selectedThread == nil {
-                await store.send(text, chat: chat, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
+                await store.enqueue(text, chat: chat, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
             } else {
-                await store.sendToSelectedThread(text, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
+                await store.enqueueToSelectedThread(text, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
             }
+            draft = ""
+            attachments = []
+            replyTarget = nil
             // Your own message should always land in view, gap included. The
             // draft clearing also shrinks the input bar, which moves the floor
             // a second time — hence scrolling after the send resolves.
@@ -2371,6 +2422,9 @@ private struct ChatMessageBubble: View {
     var isPinned = false
     /// Quotes this message into a forum post.
     var onQuoteToPost: (() -> Void)?
+    /// Offers to resend or discard a message the server refused. Only reached
+    /// from a `.failed` row.
+    var onRetryFailed: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
@@ -2398,6 +2452,34 @@ private struct ChatMessageBubble: View {
                         Text("已编辑")
                             .font(Theme.body(10))
                             .foregroundStyle(Theme.muted(0.38))
+                    }
+
+                    // Only ever on your own rows, and only until the server
+                    // acknowledges them. A message shown with no mark at all
+                    // is a claim that it was delivered — which is exactly what
+                    // this used to do before there was an outbox behind it.
+                    switch message.delivery {
+                    case .sent:
+                        EmptyView()
+                    case .sending:
+                        Image(systemName: "clock")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.muted(0.42))
+                            .accessibilityLabel(AppString("发送中"))
+                    case .failed:
+                        Button {
+                            onRetryFailed?()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("未发送")
+                                    .font(Theme.body(10, weight: .semibold))
+                            }
+                            .foregroundStyle(Theme.danger)
+                        }
+                        .buttonStyle(.pressable)
+                        .accessibilityLabel(AppString("未发送，点击重试"))
                     }
                 }
 
