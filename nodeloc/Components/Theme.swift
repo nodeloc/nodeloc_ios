@@ -10,6 +10,15 @@ import SwiftUI
 
 extension Color {
     /// Create a color from a packed 0xRRGGBB hex value.
+    /// A CSS colour as a plugin writes it: "#e4cb72" or "e4cb72". Nil for
+    /// anything else, so a malformed value falls back rather than drawing black.
+    nonisolated init?(cssHex: String) {
+        let cleaned = cssHex.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else { return nil }
+        self.init(hex: value)
+    }
+
     nonisolated init(hex: UInt32, alpha: Double = 1) {
         let r = Double((hex >> 16) & 0xFF) / 255
         let g = Double((hex >> 8) & 0xFF) / 255
@@ -132,11 +141,21 @@ enum Theme {
         .system(size: scaled(size), weight: weight)
     }
 
+    /// UIKit counterpart of `body`, for the TextKit post renderer. Shares
+    /// `scaled` so a reader's text size lands identically on both paths — a
+    /// separate multiplication here would drift from the ~400 SwiftUI call
+    /// sites at some sizes.
+    static func uiBody(_ size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+        .systemFont(ofSize: scaledSize(size), weight: weight)
+    }
+
     /// Rounded so text lands on whole points. The scale is a stored property,
     /// cheap enough to read on every font construction.
-    private static func scaled(_ size: CGFloat) -> CGFloat {
+    static func scaledSize(_ size: CGFloat) -> CGFloat {
         (size * UserPreferencesStore.shared.textScale).rounded()
     }
+
+    private static func scaled(_ size: CGFloat) -> CGFloat { scaledSize(size) }
 
     /// Two-variant avatar palette used across posts, chats, communities.
     static func avatarColors(_ variant: Int) -> (bg: Color, fg: Color) {

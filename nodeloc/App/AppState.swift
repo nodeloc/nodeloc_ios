@@ -19,9 +19,26 @@ struct Post: Identifiable {
     let title: String
     let excerpt: String
     let baseVotes: Int
+    /// discourse-vote on the topic's first post, which is what a row votes on.
+    /// `voteScore` nil means the plugin didn't serialize a score for this row —
+    /// draw no control rather than a like count pretending to be one.
+    var voteScore: Int? = nil
+    var voteDirection: VoteDirection = .none
+    var canVoteDown: Bool = true
+    /// The first post's id, which is what the vote call needs.
+    var opPostID: Int? = nil
+    /// This user's topic notification level, and whether it's bookmarked — for
+    /// the row's 更多操作 sheet.
+    var notificationLevel: Int? = nil
+    var isBookmarked: Bool = false
     let comments: Int
     let hasImage: Bool
+    /// Pinned *for this reader*: false once they dismiss it, which is what the
+    /// list serializer's `pinned` already accounts for.
     var pinned: Bool = false
+    /// A global pin tops every list, a plain one only its own node — worth
+    /// distinguishing on the badge, since the first is site-wide news.
+    var pinnedGlobally: Bool = false
     /// New or has-unread-posts for the signed-in user — shows the read dot.
     var isUnread: Bool = false
     /// Real topic image (when loaded from Discourse); nil falls back to the hatch placeholder.
@@ -37,6 +54,12 @@ struct Post: Identifiable {
     var tags: [String] = []
     /// First post's video, when the topic has one. Card mode autoplays it.
     var videoURL: URL? = nil
+
+    /// The topic this row points at. The id-only form redirects to the
+    /// canonical slug URL, which is all a repost or a report needs.
+    var topicURL: URL {
+        DiscourseConfig.baseURL.appending(path: "t/topic/\(id)")
+    }
 
     /// Target for opening the author's public profile from the feed.
     var authorProfileTarget: UserProfileTarget? {
@@ -113,10 +136,39 @@ struct PostComment: Identifiable {
     /// The author's worn title and flair badge icon.
     let authorTitle: String?
     let flairURL: URL?
-    /// Whether the current user has liked this reply.
+    /// Whether the current user has liked this reply — an upvote, in
+    /// discourse-vote's terms.
     var isLiked: Bool
+    /// The faces this reply collected, for the summary in its action bar.
+    let reactions: [PostReaction]
+    /// discourse-vote. Nil score means voting doesn't apply to this topic.
+    var voteScore: Int?
+    var voteDirection: VoteDirection
+    var canVoteDown: Bool
     /// discourse-reward rewards this reply has received.
     let rewards: [PostReward]
+    /// The 小尾巴 the author's app reported at posting time, e.g. "iPhone" —
+    /// decoration only, since a client asserts its own hardware.
+    let mobileSource: String?
+    /// Pinned to the top of the thread by staff (discourse-community).
+    let isPinned: Bool
+    /// The reply is deleted, or its author is on this viewer's ignore list. Its
+    /// row still has to exist: the nested view hangs surviving children off it,
+    /// and dropping it would orphan them.
+    let isDeletedPlaceholder: Bool
+    let isIgnoredPlaceholder: Bool
+    /// A reveal request is in flight for this reply.
+    let isRevealing: Bool
+    /// Staff may undelete it (`can_recover`).
+    let canRecover: Bool
+    /// Either placeholder state: nothing to read, nothing to act on.
+    var isPlaceholder: Bool { isDeletedPlaceholder || isIgnoredPlaceholder }
+
+    /// What the viewer may do to this reply, as the server reported it. A node
+    /// moderator has these on their own node's posts and not on others'.
+    let canEdit: Bool
+    let canDelete: Bool
+    let isMine: Bool
 
     init(
         id: Int,
@@ -141,7 +193,20 @@ struct PostComment: Identifiable {
         authorTitle: String? = nil,
         flairURL: URL? = nil,
         isLiked: Bool = false,
-        rewards: [PostReward] = []
+        reactions: [PostReaction] = [],
+        voteScore: Int? = nil,
+        voteDirection: VoteDirection = .none,
+        canVoteDown: Bool = true,
+        rewards: [PostReward] = [],
+        mobileSource: String? = nil,
+        isPinned: Bool = false,
+        isDeletedPlaceholder: Bool = false,
+        isIgnoredPlaceholder: Bool = false,
+        isRevealing: Bool = false,
+        canRecover: Bool = false,
+        canEdit: Bool = false,
+        canDelete: Bool = false,
+        isMine: Bool = false
     ) {
         self.id = id
         self.author = author
@@ -165,7 +230,20 @@ struct PostComment: Identifiable {
         self.authorTitle = authorTitle
         self.flairURL = flairURL
         self.isLiked = isLiked
+        self.reactions = reactions
+        self.voteScore = voteScore
+        self.voteDirection = voteDirection
+        self.canVoteDown = canVoteDown
         self.rewards = rewards
+        self.mobileSource = mobileSource
+        self.isPinned = isPinned
+        self.isDeletedPlaceholder = isDeletedPlaceholder
+        self.isIgnoredPlaceholder = isIgnoredPlaceholder
+        self.isRevealing = isRevealing
+        self.canRecover = canRecover
+        self.canEdit = canEdit
+        self.canDelete = canDelete
+        self.isMine = isMine
     }
 
     /// Convenience for sample data and previews, where the body is a literal
@@ -220,7 +298,7 @@ struct ChatThreadListItem: Identifiable, Hashable {
     var avatarURL: URL? = nil
 }
 
-struct ChatCustomEmoji: Identifiable, Hashable {
+struct ChatEmojiImage: Identifiable, Hashable {
     let shortcode: String
     let url: URL
     let width: Int?
@@ -232,7 +310,7 @@ struct ChatCustomEmoji: Identifiable, Hashable {
 struct ChatContentFragment: Identifiable, Hashable {
     enum Kind: Hashable {
         case text(String)
-        case customEmoji(ChatCustomEmoji)
+        case emojiImage(ChatEmojiImage)
         case lineBreak
     }
 
@@ -240,11 +318,71 @@ struct ChatContentFragment: Identifiable, Hashable {
     let kind: Kind
 }
 
+/// The three shapes a chat can take.
+///
+/// Discourse models the first two the same way — a `DirectMessage` chatable —
+/// and only `chatable.group` tells them apart, which is why a group chat used to
+/// behave like a one-to-one one and show a single person's profile.
+enum ChatChannelKind {
+    /// One other person.
+    case direct
+    /// A direct message with several people in it.
+    case groupDirect
+    /// A category channel.
+    case category
+
+    init(_ channel: ChatChannel) {
+        guard channel.isDirectMessage else {
+            self = .category
+            return
+        }
+        self = channel.chatable?.group == true ? .groupDirect : .direct
+    }
+
+    /// Whether a member list makes sense; a one-to-one chat just has the one
+    /// person, and their profile is the more direct answer.
+    var hasMemberList: Bool { self != .direct }
+
+    var memberListTitle: String {
+        self == .category ? AppString("频道成员") : AppString("群成员")
+    }
+}
+
 struct ChatSearchResult: Identifiable, Hashable {
     let id: Int
     let chat: Chat
     let message: ChatConversationMessage
     let thread: ChatThreadListItem?
+}
+
+/// The message a chat message replies to, as `in_reply_to` carries it.
+struct ChatQuotedMessage: Identifiable, Hashable {
+    let id: Int
+    let authorName: String
+    let username: String
+    /// One line of the original. Discourse's own `excerpt_for_display`.
+    let excerpt: String
+}
+
+/// One pinned chat message, as the pinned bar shows it.
+struct ChatPinnedMessage: Identifiable, Hashable {
+    let id: Int
+    let messageID: Int
+    let authorName: String
+    let excerpt: String
+    let pinnedBy: String?
+}
+
+/// An emoji tally under a chat bubble.
+struct ChatReaction: Identifiable, Hashable {
+    /// Bare emoji name, e.g. `heart` or a custom `ac01`.
+    let emoji: String
+    let count: Int
+    /// Whether the current user is one of them — the tap toggles accordingly.
+    let reacted: Bool
+
+    var id: String { emoji }
+    var shortcode: String { ":\(emoji):" }
 }
 
 struct ChatConversationMessage: Identifiable, Hashable {
@@ -258,8 +396,25 @@ struct ChatConversationMessage: Identifiable, Hashable {
     let avatarURL: URL?
     let isMine: Bool
     let thread: ChatThreadListItem?
+    /// Set when this message quotes another (`in_reply_to`).
+    var replyTo: ChatQuotedMessage?
+    /// Emoji tallies, newest server state.
+    var reactions: [ChatReaction] = []
+    /// Shown as a marker beside the time.
+    var isEdited = false
+    /// Which flag types the server will take for this message; empty means it
+    /// can't be flagged (already flagged, or your own).
+    var availableFlags: [String] = []
+    /// Whether this reader may edit or delete it. The chat API has no `can_*`
+    /// per message, so authorship is the client-side rule and the server is the
+    /// real gate — a refusal surfaces as an error.
+    var canModify: Bool { isMine }
     var content: [ChatContentFragment] = []
     var media: [PostMedia] = []
+    /// Video uploads. Separate from `media`, which is images: the two need
+    /// different rendering, and lumping them together made a sent clip show up
+    /// as a broken picture.
+    var videos: [URL] = []
 
     var authorProfileTarget: UserProfileTarget? {
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -279,7 +434,8 @@ struct AppNotification: Identifiable {
     let name: String
     let text: String
     let time: String
-    let unread: Bool
+    /// `var` so 全部已读 can clear the rows' dots without refetching.
+    var unread: Bool
     /// Where tapping the row goes. Routed through `LinkRouter`, so topics/PMs
     /// open natively and badge/group/chat notifications open in the in-app
     /// browser. `nil` means the row isn't tappable.
@@ -307,14 +463,75 @@ struct Community: Identifiable {
     let desc: String
 }
 
+/// One 用户组 chip on a profile.
+///
+/// The label is localised (see `DiscourseRoleNames`), so the *kind* has to travel
+/// with it: colouring by the displayed text worked only while the text was
+/// hardcoded English, and would have quietly turned every chip blue the moment
+/// it became 管理员 or 活跃用户.
+/// One figure in the profile's stats row.
+///
+/// Same lesson as `ProfileRole` above: which two figures draw in the accent
+/// colour used to be decided by `label == "能量" || label == "声望"`, which stops
+/// being true the moment the label is translated. `isAccented` carries the
+/// intent instead of re-deriving it from the display string.
+struct ProfileStat: Identifiable, Hashable {
+    let value: String
+    let label: String
+    let isAccented: Bool
+
+    var id: String { label }
+
+    init(value: String, label: String, isAccented: Bool = false) {
+        self.value = value
+        self.label = label
+        self.isAccented = isAccented
+    }
+
+    /// The row in its fixed order, which is also the order the placeholders use.
+    static func row(
+        points: String,
+        likes: String,
+        topics: String,
+        posts: String,
+        accountAge: String
+    ) -> [ProfileStat] {
+        [
+            ProfileStat(value: points, label: AppString("能量"), isAccented: true),
+            ProfileStat(value: likes, label: AppString("声望"), isAccented: true),
+            ProfileStat(value: topics, label: AppString("主题")),
+            ProfileStat(value: posts, label: AppString("回复")),
+            ProfileStat(value: accountAge, label: AppString("账户年龄"))
+        ]
+    }
+
+    /// Shown while the summary endpoint is still in flight.
+    static var placeholders: [ProfileStat] {
+        row(points: "--", likes: "--", topics: "--", posts: "--", accountAge: "--")
+    }
+}
+
+struct ProfileRole: Identifiable, Hashable {
+    enum Kind: Hashable {
+        case admin
+        case moderator
+        case trustLevel(Int)
+        case guest
+    }
+
+    let kind: Kind
+    let label: String
+
+    var id: String { "\(kind)-\(label)" }
+}
+
 // MARK: - Navigation
 
 enum Tab: Hashable { case home, nodes, search, chat, profile }
-enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, pro, appsDirectory, appDetail, auth
+enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, appsDirectory, appDetail, auth
     var id: Int { hashValue }
 }
 enum AuthMode { case login, signup }
-enum ProPlan { case monthly, yearly }
 
 // MARK: - App State
 
@@ -340,16 +557,51 @@ final class AppState {
     /// App chosen from the directory, shown by the app detail overlay.
     var selectedApp: DirectoryApp?
     var likedPosts: Set<Int> = []
-    var plan: ProPlan = .yearly
     var navCollapsed = false
     /// Node the composer should open with already selected, set by whoever
     /// opens it (the node page). Cleared by the composer once read, so a later
     /// compose started elsewhere doesn't inherit it.
     var composePreselectedNode: SidebarNodeSummary?
-    /// Title/body the composer opens pre-filled with, set when reposting a topic.
+    /// Title the composer opens pre-filled with, set when reposting a topic.
     /// Cleared by the composer once read.
     var composePrefillTitle: String?
+    /// Body the composer opens with. Set when quoting a chat transcript, which
+    /// the server renders as markdown — so it must go in verbatim, and the
+    /// composer opens in source mode for it.
     var composePrefillBody: String?
+    /// A topic being edited in the composer. The same screen as posting, so
+    /// changing a node, a title and a body is one flow rather than three
+    /// half-forms.
+    var composeEditTarget: TopicEdit?
+
+    struct TopicEdit: Identifiable, Equatable {
+        let topicID: Int
+        /// The first post, which is what carries the body.
+        let postID: Int
+        let title: String
+        let raw: String
+        let categoryID: Int?
+        /// The post as it renders now, shown read-only above the editor: while
+        /// editing source there is nothing else to compare against.
+        let rendered: PostContent?
+
+        var id: Int { topicID }
+    }
+
+    /// The topic a repost quotes. Held as its own thing rather than a URL typed
+    /// into the body: the composer shows it as the card it will become, and the
+    /// link is prepended to the raw at submit time.
+    var composeRepostTopic: RepostTopic?
+
+    struct RepostTopic: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let url: URL
+        var node: String?
+        var author: String?
+        var excerpt: String?
+        var imageURL: URL?
+    }
     /// Text the search overlay opens with, e.g. "#slug " to scope to one node.
     /// Cleared by the search view once read.
     var searchInitialQuery = ""
@@ -360,16 +612,57 @@ final class AppState {
     /// The search tab's scope row (全部/节点/帖子/…), rendered by the system
     /// at the top while search is presented.
     var searchScope: SearchScope = .all
-    /// One-shot ask to present/focus the system search field, e.g. after a
-    /// tapped history term fills `searchQuery` — without presentation the
-    /// scope row stays hidden. MainView consumes it.
-    var searchActivationRequested = false
+
 
     // MARK: Derived
 
     func isPinned(_ post: Post) -> Bool { post.pinned }
 
     func isLiked(_ post: Post) -> Bool { likedPosts.contains(post.id) }
+
+    /// A row's standing vote. Local overrides win, so a tap answers at once and
+    /// survives the list being remapped from a later fetch.
+    func voteDirection(for post: Post) -> VoteDirection {
+        voteOverrides[post.id] ?? post.voteDirection
+    }
+
+    /// The score with this session's own change folded in: the server's number
+    /// plus the difference between where the vote is now and where it started.
+    func voteScore(for post: Post) -> Int? {
+        guard let base = post.voteScore else { return nil }
+        guard let override = voteOverrides[post.id] else { return base }
+        return base + weight(override) - weight(post.voteDirection)
+    }
+
+    private func weight(_ direction: VoteDirection) -> Int {
+        switch direction {
+        case .up: return 1
+        case .down: return -1
+        case .none: return 0
+        }
+    }
+
+    /// Votes cast in this session, keyed by topic id. Kept here rather than in
+    /// the feed store because the same row is drawn by the home feed, the node
+    /// page and search, and all three should agree the moment one is tapped.
+    var voteOverrides: [Int: VoteDirection] = [:]
+
+    func castVote(_ direction: VoteDirection, on post: Post, reaction: String? = nil) {
+        guard let postID = post.opPostID else { return }
+        voteOverrides[post.id] = direction
+        Task {
+            do {
+                try await DiscourseClient().castVote(
+                    postID: postID,
+                    direction: direction,
+                    reaction: reaction
+                )
+            } catch {
+                voteOverrides[post.id] = nil
+                ToastCenter.shared.showError(error)
+            }
+        }
+    }
 
     func voteCount(_ post: Post) -> Int {
         post.baseVotes + (isLiked(post) ? 1 : 0)
@@ -389,7 +682,21 @@ final class AppState {
 
     /// Profile requested by a `/u/<name>` link. The post detail and feed watch
     /// this so a tapped mention lands on the native profile.
+    ///
+    /// A full-screen cover, presented by `ContentView`. That means it rises
+    /// from the bottom, which reads as a modal for something that is really a
+    /// page — but it is also what makes it work from *any* depth, including
+    /// from the post reader, which draws in `MainView` below the covers. See
+    /// the note on `Overlay`.
     var routedProfile: UserProfileTarget?
+
+    /// An `@user` / `#node` / `#tag` badge tapped inside a post body.
+    ///
+    /// Deliberately separate from `routedProfile` and `routedNodeSlug`: a
+    /// reference opens as a half sheet over what you were reading, while those
+    /// two still take the whole screen when they come from the sidebar, an
+    /// author row, or a notification.
+    var routedReference: PostReference?
 
     /// A reply's post number to scroll to once the topic's replies load, set
     /// when a notification (or a deep link with a post anchor) opens a topic.
@@ -405,6 +712,19 @@ final class AppState {
 
     func markTopicOpened(id: Int) {
         locallyReadTopicIDs.insert(id)
+    }
+
+    /// Opens an app's page from a slug alone — the form `/apps/{slug}` carries,
+    /// which is the universal link guideline 4.7.4 requires for each mini app.
+    /// The directory opens first so there is something on screen while the
+    /// payload loads.
+    func openApp(slug: String) {
+        overlay = .appsDirectory
+        Task {
+            guard let fetched = try? await DiscourseClient().app(slug: slug).directoryApp else { return }
+            selectedApp = fetched
+            overlay = .appDetail
+        }
     }
 
     func openTopic(id: Int, postNumber: Int? = nil) {
@@ -429,8 +749,31 @@ final class AppState {
         }
     }
 
+    /// Opens the composer prefilled to quote a topic — the 转发 every surface
+    /// offers. `url` is passed in because the canonical `/t/{slug}/{id}` is only
+    /// known where the topic has been loaded; elsewhere the id-only form works.
+    func startRepost(of post: Post, url: URL, author: String? = nil) {
+        composePrefillTitle = post.title
+        composeRepostTopic = RepostTopic(
+            id: post.id,
+            title: post.title,
+            url: url,
+            node: post.node,
+            author: author ?? post.authorUsername,
+            excerpt: post.excerpt.isEmpty ? nil : post.excerpt,
+            imageURL: post.imageURL
+        )
+        withAnimation(.overlayPush) { overlay = .compose }
+    }
+
     func openProfile(username: String) {
         routedProfile = UserProfileTarget(username: username)
+    }
+
+    /// When the caller already has a name and avatar, so the page draws its
+    /// header before the request lands.
+    func openProfile(_ target: UserProfileTarget) {
+        routedProfile = target
     }
 
     /// Node requested by a `/n/<slug>` or `/c/<slug>/<id>` link. The slug is
@@ -441,9 +784,30 @@ final class AppState {
         routedNodeSlug = slug
     }
 
+    /// A custom feed requested by an `/f/<username>/<slug>` link, by the
+    /// drawer, or from someone's profile. Presented natively — the whole point
+    /// is not to fall out to the web page.
+    var routedCustomFeed: CustomFeedTarget?
+
+    func openCustomFeed(username: String, slug: String, name: String? = nil) {
+        routedCustomFeed = CustomFeedTarget(username: username, slug: slug, name: name)
+    }
+
     /// A group whose PM inbox a notification asked to open. The inbox watches
     /// this to switch to the 私信 pane and select that group's filter.
     var inboxRequestedGroup: String?
+
+    /// Person whose chat a profile asked to open. The chat tab watches this,
+    /// resolves the direct-message channel and pushes the conversation.
+    var chatRequestedUsername: String?
+
+    /// 聊天 from a profile. The profile is presented above the tabs, so its own
+    /// screen still has to dismiss itself.
+    func openDirectMessage(username: String) {
+        overlay = nil
+        tab = .chat
+        chatRequestedUsername = username
+    }
 
     func openGroupInbox(group: String) {
         overlay = nil
@@ -457,10 +821,6 @@ final class AppState {
         authMode == .login ? "Log in to keep up with your Nodes." : "Join NODELOC — it takes a minute."
     }
     var authCta: String { authMode == .login ? "Log in" : "Create account" }
-
-    // Pro copy
-    var planPrice: String { plan == .monthly ? "$4.99" : "$39.99" }
-    var planPeriod: String { plan == .monthly ? "per month" : "per year" }
 }
 
 // MARK: - Sample Data

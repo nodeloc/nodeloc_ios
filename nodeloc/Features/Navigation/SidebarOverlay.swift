@@ -7,16 +7,37 @@
 
 import SwiftUI
 
+extension EnvironmentValues {
+    /// True while the sidebar is a permanent column rather than a drawer.
+    ///
+    /// Decided in one place (`MainView`) and read from here, so the layout and
+    /// the menu button can't disagree. Checking the size class at each site
+    /// instead would get this wrong: an iPhone Max in landscape reports a
+    /// *regular* horizontal size class, so `horizontalSizeClass` alone would
+    /// hide the menu button on a phone that still needs it.
+    @Entry var sidebarIsPinned: Bool = false
+}
+
+/// The width of the sidebar when it's pinned open beside the content.
+///
+/// Fixed rather than a fraction: as a permanent column it should stay put while
+/// the window resizes, and the drawer's 86%-of-width would be absurd on iPad.
+let pinnedSidebarWidth: CGFloat = 320
+
 // MARK: - Sidebar
 
 struct SidebarOverlay: View {
     @Environment(AppState.self) private var app
     @Environment(\.openURL) private var openURL
     let panelWidth: CGFloat?
+    /// Pinned beside the content instead of sliding over it.
+    let isPinned: Bool
     @State private var store = SidebarStore()
+    @State private var showsCustomFeedForm = false
 
-    init(panelWidth: CGFloat? = nil) {
+    init(panelWidth: CGFloat? = nil, isPinned: Bool = false) {
         self.panelWidth = panelWidth
+        self.isPinned = isPinned
     }
 
     var body: some View {
@@ -31,6 +52,18 @@ struct SidebarOverlay: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .task { await store.load(isSignedIn: isSignedIn) }
+        .sheet(isPresented: $showsCustomFeedForm) {
+            CustomFeedFormSheet(mode: .create) { created in
+                // Reload so the new feed appears in this list, then open it —
+                // there is nothing in an empty feed, so the reader lands where
+                // the nodes get added.
+                await store.load(isSignedIn: isSignedIn)
+                guard let username = created.username else { return }
+                app.overlay = nil
+                app.openCustomFeed(username: username, slug: created.slug, name: created.name)
+            }
+            .standardSheet()
+        }
     }
 
     private func sidebarPanel(width: CGFloat, topInset: CGFloat, bottomInset: CGFloat) -> some View {
@@ -39,7 +72,7 @@ struct SidebarOverlay: View {
                 VStack(alignment: .leading, spacing: 20) {
                     topShortcuts
 
-                    sidebarSection("推荐应用") {
+                    sidebarSection(AppString("推荐应用")) {
                         appsSection
                     }
 
@@ -49,7 +82,7 @@ struct SidebarOverlay: View {
                         }
                     }
 
-                    sidebarSection("最近访问") {
+                    sidebarSection(AppString("最近访问")) {
                         recentNodesSection
                     }
 
@@ -71,7 +104,9 @@ struct SidebarOverlay: View {
                 .fill(Theme.divider)
                 .frame(width: 1)
         }
-        .shadow(color: .black.opacity(0.16), radius: 28, x: 10, y: 0)
+        // A drawer casts a shadow because it floats over the content; a pinned
+        // column sits flush beside it, where the divider alone reads correctly.
+        .shadow(color: isPinned ? .clear : .black.opacity(0.16), radius: 28, x: 10, y: 0)
         .ignoresSafeArea(edges: .vertical)
     }
 
@@ -99,7 +134,7 @@ struct SidebarOverlay: View {
                             .strokeBorder(item.isPrimary ? Theme.accent.opacity(0.34) : Theme.divider, lineWidth: 1)
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
     }
@@ -109,7 +144,7 @@ struct SidebarOverlay: View {
             ForEach(store.apps.prefix(5)) { item in
                 sidebarImageRow(
                     title: item.name,
-                    subtitle: "应用",
+                    subtitle: AppString("应用"),
                     imageURL: item.logoURL,
                     fallbackIcon: "cube.fill",
                     tint: Theme.accent,
@@ -119,7 +154,7 @@ struct SidebarOverlay: View {
                 }
             }
             sidebarMenuRow(
-                SidebarMenuItem(title: "浏览全部应用", subtitle: "Apps On NodeLoc", icon: "gamecontroller.fill", action: .browseApps)
+                SidebarMenuItem(title: AppString("浏览全部应用"), subtitle: "Apps On NodeLoc", icon: "gamecontroller.fill", action: .browseApps)
             )
         }
     }
@@ -127,7 +162,7 @@ struct SidebarOverlay: View {
     private var customFeedsSection: some View {
         VStack(spacing: 3) {
             if store.customFeeds.isEmpty {
-                emptySidebarRow("还没有 Custom Feed", icon: "rectangle.stack.badge.plus")
+                emptySidebarRow(AppString("还没有 Custom Feed"), icon: "rectangle.stack.badge.plus")
             } else {
                 ForEach(store.customFeeds.prefix(6)) { feed in
                     sidebarColorRow(
@@ -137,13 +172,25 @@ struct SidebarOverlay: View {
                         icon: "line.3.horizontal.decrease.circle.fill",
                         badge: feed.nodeCount.map { "\($0)" }
                     ) {
-                        perform(.open(feed.url ?? "/custom-feeds"))
+                        // Native page, not the web one. A feed is addressed by
+                        // owner + slug, which is why the summary carries both.
+                        guard let username = feed.username else { return }
+                        app.overlay = nil
+                        app.openCustomFeed(username: username, slug: feed.slug, name: feed.name)
                     }
                 }
             }
 
+            // The plugin has no create *page* — its web client does this in a
+            // modal, which is why the `/custom-feeds` this used to open was a
+            // 404.
             sidebarMenuRow(
-                SidebarMenuItem(title: "创建 Custom Feed", subtitle: "把多个节点组合成一个流", icon: "plus.circle.fill", action: .open("/custom-feeds"))
+                SidebarMenuItem(
+                    title: AppString("创建 Custom Feed"),
+                    subtitle: AppString("把多个节点组合成一个流"),
+                    icon: "plus.circle.fill",
+                    action: .createCustomFeed
+                )
             )
         }
     }
@@ -157,14 +204,14 @@ struct SidebarOverlay: View {
                     imageURL: node.logoURL,
                     fallbackIcon: "circle.grid.2x2.fill",
                     tint: sidebarColor(node.colorHex),
-                    badge: node.isCreator ? "主理" : (node.memberCount.isEmpty ? nil : node.memberCount)
+                    badge: node.isCreator ? AppString("主理") : (node.memberCount.isEmpty ? nil : node.memberCount)
                 ) {
                     perform(.open(node.url ?? "/n/\(node.slug)"))
                 }
             }
 
             sidebarMenuRow(
-                SidebarMenuItem(title: "浏览全部节点", subtitle: "Nodes", icon: "list.bullet", action: .browseNodes)
+                SidebarMenuItem(title: AppString("浏览全部节点"), subtitle: "Nodes", icon: "list.bullet", action: .browseNodes)
             )
         }
     }
@@ -236,7 +283,7 @@ struct SidebarOverlay: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func sidebarImageRow(
@@ -279,7 +326,7 @@ struct SidebarOverlay: View {
             .padding(.vertical, 9)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func sidebarColorRow(
@@ -373,21 +420,16 @@ struct SidebarOverlay: View {
                 app.overlay = .appsDirectory
             case .openApp(let slug):
                 openApp(slug: slug)
+            case .createCustomFeed:
+                showsCustomFeedForm = true
             }
         }
     }
 
-    /// The sidebar row only carries a slug, so the app is fetched before the
-    /// detail page opens.
+    /// The sidebar row only carries a slug. Shared with the universal-link
+    /// route so both resolve an app the same way.
     private func openApp(slug: String) {
-        app.overlay = .appsDirectory
-        Task {
-            guard let fetched = try? await DiscourseClient().app(slug: slug).directoryApp else { return }
-            app.selectedApp = fetched
-            withAnimation(.quick) {
-                app.overlay = .appDetail
-            }
-        }
+        app.openApp(slug: slug)
     }
 
     private var isSignedIn: Bool {
@@ -396,10 +438,10 @@ struct SidebarOverlay: View {
 
     private var shortcutItems: [SidebarMenuItem] {
         [
-            SidebarMenuItem(title: "首页", subtitle: nil, icon: "house.fill", isPrimary: app.tab == .home, action: .home),
-            SidebarMenuItem(title: "热门", subtitle: nil, icon: "flame.fill", action: .hot),
-            SidebarMenuItem(title: "浏览节点", subtitle: nil, icon: "square.grid.2x2.fill", action: .browseNodes),
-            SidebarMenuItem(title: "创建节点", subtitle: nil, icon: "plus.circle.fill", isPrimary: store.canCreateNode, action: .createNode)
+            SidebarMenuItem(title: AppString("首页"), subtitle: nil, icon: "house.fill", isPrimary: app.tab == .home, action: .home),
+            SidebarMenuItem(title: AppString("热门"), subtitle: nil, icon: "flame.fill", action: .hot),
+            SidebarMenuItem(title: AppString("浏览节点"), subtitle: nil, icon: "square.grid.2x2.fill", action: .browseNodes),
+            SidebarMenuItem(title: AppString("创建节点"), subtitle: nil, icon: "plus.circle.fill", isPrimary: store.canCreateNode, action: .createNode)
         ]
     }
 
@@ -453,4 +495,6 @@ private enum SidebarAction {
     case browseApps
     /// Opens one app's detail page by slug.
     case openApp(String)
+    /// Creating a custom feed is a form, not a page — see `customFeedsSection`.
+    case createCustomFeed
 }

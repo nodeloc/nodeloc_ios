@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Shared overlay header
 
@@ -25,8 +26,7 @@ struct OverlayHeader: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
             Text(title).font(Theme.body(15, weight: titleWeight))
             Spacer()
         }
@@ -74,13 +74,66 @@ struct GuestLoginButton: View {
             Text("登录")
                 .font(Theme.body(13, weight: .semibold))
                 .foregroundStyle(Theme.headerText)
+                // Never let a tight header squeeze the label to nothing —
+                // an empty pill is worse than a crowded row.
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 14)
                 .frame(height: FloatingHeader.controlHeight)
         }
-        .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
-        .buttonBorderShape(.capsule)
+        .glassButton(tint: FloatingHeader.glassTint, shape: .capsule)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
     }
+}
+
+/// Copies a link as *both* a URL and plain text, then says so.
+///
+/// `UIPasteboard.url = …` writes only the `public.url` representation. A chat
+/// box, a `UITextField`, or anything else that reads `public.utf8-plain-text`
+/// then pastes nothing at all — which is what made 复制链接 look broken. One
+/// pasteboard item carrying both types satisfies either reader.
+func copyLink(_ url: URL, message: String = AppString("链接已复制")) {
+    UIPasteboard.general.setItems([[
+        UTType.url.identifier: url,
+        UTType.utf8PlainText.identifier: url.absoluteString,
+    ]])
+    ToastCenter.shared.show(message)
+}
+
+/// Opens a place name in Maps.
+///
+/// `UIApplication.shared.open`, not the SwiftUI environment's `openURL`: the app
+/// funnels every link through one root handler that keeps nodeloc URLs native and
+/// sends the rest to the in-app browser, and a map belongs in Maps.
+func openInMaps(_ place: String) {
+    let trimmed = place.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty,
+          let query = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+          let url = URL(string: "https://maps.apple.com/?q=\(query)")
+    else { return }
+    UIApplication.shared.open(url)
+}
+
+/// Opens a profile's website in the in-app browser.
+///
+/// `websiteName` is only a host — "example.com" — so it needs the scheme back
+/// before it is a URL at all.
+func openProfileWebsite(url: URL?, displayText: String?) {
+    if let url {
+        BrowserState.shared.open(url)
+        return
+    }
+    guard let displayText, !displayText.isEmpty else { return }
+    // Only when it looks like a host. `URL(string:)` accepts far more than it
+    // should — "我的博客" comes back as `https://xn--9krq6qeqfkxx`, a valid URL
+    // pointing at nothing — so a dot and no whitespace are the gate.
+    let candidate = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+    let looksLikeHost = candidate.contains("://")
+        || (candidate.contains(".") && !candidate.contains(where: \.isWhitespace))
+    guard looksLikeHost else { return }
+    let normalized = candidate.contains("://") ? candidate : "https://\(candidate)"
+    guard let url = URL(string: normalized), url.host != nil else { return }
+    BrowserState.shared.open(url)
 }
 
 func nodelocSiteURL(_ path: String) -> URL? {
@@ -105,6 +158,14 @@ extension UIApplication {
         shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.top }
             .max() ?? 47
+    }
+
+    /// The home-indicator inset. Zero on a device with a button, so anything
+    /// reaching into this space has to cope with it being absent.
+    static var bottomSafeAreaInset: CGFloat {
+        shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
+            .max() ?? 0
     }
 }
 
@@ -142,9 +203,7 @@ struct NodeAvatar: View {
     }
 
     private var fallback: some View {
-        Text(node.name.first.map(String.init) ?? "#")
-            .font(Theme.heading(size * 0.4, weight: .bold))
-            .foregroundStyle(nodeAccentColor(node.colorHex))
+        NodeGlyph(node: node, size: size, letterRatio: 0.4)
     }
 }
 
@@ -178,10 +237,71 @@ struct NodeSummaryIcon: View {
     }
 
     private var fallback: some View {
+        NodeGlyph(node: node, size: size, letterRatio: 0.36)
+    }
+}
+
+/// What a node shows when it has no uploaded logo.
+///
+/// Discourse's own ladder: `style_type: "icon"` draws a Font Awesome / Lucide
+/// glyph named by `icon`, `"emoji"` draws that emoji, and `"square"` is just the
+/// colour. Only 82 of nodeloc's 176 categories have a logo, so without this most
+/// nodes came out as an initial on a coloured tile — which is what made 常去节点
+/// look wrong.
+struct NodeGlyph: View {
+    let node: SidebarNodeSummary
+    let size: CGFloat
+    let letterRatio: CGFloat
+
+    var body: some View {
+        Group {
+            if let asset = node.iconName.flatMap(Self.assetName) {
+                Image(asset)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(size * 0.26)
+                    .foregroundStyle(nodeAccentColor(node.colorHex))
+            } else if let emojiURL = node.emoji.flatMap(Self.emojiImageURL) {
+                CachedRemoteImage(url: emojiURL) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    letter
+                }
+                .padding(size * 0.22)
+            } else {
+                letter
+            }
+        }
+        .frame(width: size, height: size)
+    }
+
+    private var letter: some View {
         Text(node.name.first.map(String.init) ?? "#")
-            .font(Theme.heading(size * 0.36, weight: .bold))
+            .font(Theme.heading(size * letterRatio, weight: .bold))
             .foregroundStyle(nodeAccentColor(node.colorHex))
-            .frame(width: size, height: size)
+    }
+
+    /// `laptop-code` → `FaLaptopCode`, `lc-rss` → `LucideRss`. Only names whose
+    /// glyph was extracted from the site's SVG sprite resolve; anything else
+    /// falls through to the initial rather than drawing a blank tile.
+    static func assetName(_ icon: String) -> String? {
+        let parts = icon.split(separator: "-").map { $0.capitalized }
+        guard !parts.isEmpty else { return nil }
+        let name = parts.first == "Lc"
+            ? "Lucide" + parts.dropFirst().joined()
+            : "Fa" + parts.joined()
+        return UIImage(named: name) == nil ? nil : name
+    }
+
+    /// A category's `emoji` is a shortcode; Discourse serves the standard set at
+    /// a predictable path. The site's *custom* emoji (`xhj001`) live under
+    /// `/uploads` instead and 404 here, which the placeholder handles by drawing
+    /// the initial.
+    static func emojiImageURL(_ shortcode: String) -> URL? {
+        let cleaned = shortcode.trimmingCharacters(in: CharacterSet(charactersIn: ": "))
+        guard !cleaned.isEmpty else { return nil }
+        return nodelocSiteURL("/images/emoji/twemoji/\(cleaned).png")
     }
 }
 

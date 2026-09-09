@@ -33,19 +33,19 @@ enum PushCategory: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .replies: return "回复与提及"
-        case .likes: return "点赞"
-        case .privateMessages: return "私信"
-        case .system: return "徽章与系统通知"
+        case .replies: return AppString("回复与提及")
+        case .likes: return AppString("点赞")
+        case .privateMessages: return AppString("私信")
+        case .system: return AppString("徽章与系统通知")
         }
     }
 
     var detail: String {
         switch self {
-        case .replies: return "有人回复、引用或提及你"
-        case .likes: return "有人点赞你的帖子或回复"
-        case .privateMessages: return "收到新的私信"
-        case .system: return "徽章授予、群组消息等"
+        case .replies: return AppString("有人回复、引用或提及你")
+        case .likes: return AppString("有人点赞你的帖子或回复")
+        case .privateMessages: return AppString("收到新的私信")
+        case .system: return AppString("徽章授予、群组消息等")
         }
     }
 

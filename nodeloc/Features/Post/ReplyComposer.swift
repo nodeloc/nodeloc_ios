@@ -62,7 +62,13 @@ struct ReplyComposer: View {
 
     // Rich text is the source of truth while composing.
     @State private var rich = AttributedString()
-    @State private var selection = AttributedTextSelection()
+    /// The rich editor's selection, boxed because its type is iOS 26 only.
+    @State private var selectionBox = RichSelectionBox()
+    /// The plain editor's selection. `TextSelection` is iOS 18, so this one
+    /// needs no box.
+    @State private var plainSelection: TextSelection?
+    /// `@user` / `#node` completion for this field.
+    @State private var mentions = MentionAutocompleteStore()
     /// Editable images (tap to open the editor), like the topic composer.
     @State private var imageAttachments: [ComposeImageAttachment] = []
     @State private var editingImageID: UUID?
@@ -78,6 +84,13 @@ struct ReplyComposer: View {
     @State private var tall = false
     @State private var isDragging = false
     @State private var previewHeight: CGFloat = 0
+    /// The height the drag started from, captured once.
+    ///
+    /// Recomputing it per frame is what made the sheet shake: `naturalHeight` is
+    /// measured by a `GeometryReader` *inside* the editor, whose frame the drag
+    /// is driving — so each new height changed the measurement, which changed
+    /// the anchor, which moved the height again.
+    @State private var dragBaseHeight: CGFloat = 0
     @State private var naturalHeight: CGFloat = 44
     private let minHeight: CGFloat = 44
     private let maxHeight: CGFloat = 320
@@ -94,12 +107,63 @@ struct ReplyComposer: View {
     private enum Mode { case plain, formatting }
 
     private var plainText: String { String(rich.characters) }
+
+    /// The caret as a character offset into `plainText`, from whichever
+    /// editor is running.
+    private var caretOffset: Int? {
+        if #available(iOS 26.0, *) {
+            return selectionBox.caretOffset(in: rich)
+        }
+        return plainSelection?.caretOffset(in: plainText)
+    }
+
+    /// Puts the caret at a character offset, in whichever editor is running.
+    private func setCaret(to offset: Int) {
+        if #available(iOS 26.0, *) {
+            let characters = rich.characters
+            let caret = min(offset, characters.count)
+            selectionBox.selection = AttributedTextSelection(
+                insertionPoint: characters.index(characters.startIndex, offsetBy: caret)
+            )
+        } else {
+            let plain = plainText
+            let caret = min(offset, plain.count)
+            plainSelection = TextSelection(
+                insertionPoint: plain.index(plain.startIndex, offsetBy: caret)
+            )
+        }
+    }
+
+    private func refreshMentions() {
+        guard isAuthenticated, let caretOffset else {
+            mentions.clear()
+            return
+        }
+        mentions.update(text: plainText, caretOffset: caretOffset)
+    }
+
+    /// Replaces the token with the chosen name and puts the caret after it.
+    /// Spliced into the attributed draft, so formatting elsewhere survives.
+    private func pick(_ suggestion: MentionSuggestion) {
+        guard let insertion = mentions.insertion(for: suggestion, in: plainText) else { return }
+        let characters = rich.characters
+        let lower = characters.index(characters.startIndex, offsetBy: insertion.range.lowerBound)
+        let upper = characters.index(characters.startIndex, offsetBy: insertion.range.upperBound)
+        rich.replaceSubrange(lower..<upper, with: AttributedString(insertion.replacement))
+        text = plainText
+        setCaret(to: insertion.caretOffset)
+    }
     private var hasImage: Bool { !imageAttachments.isEmpty }
     private var hasAttachments: Bool { !imageAttachments.isEmpty || !gifAttachments.isEmpty }
 
     private var currentHeight: CGFloat {
-        if isDragging { return previewHeight }
-        return tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
+        isDragging ? previewHeight : restingHeight
+    }
+
+    /// Where the editor sits when nothing is being dragged: the text's own
+    /// height, or the full sheet once expanded.
+    private var restingHeight: CGFloat {
+        tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
     }
 
     private var canSubmit: Bool {
@@ -110,12 +174,15 @@ struct ReplyComposer: View {
     var body: some View {
         Group {
             if expanded {
+                // Opaque: it's a full editor with a toolbar under it.
                 expandedComposer
+                    .background(Theme.bg)
             } else {
+                // Deliberately no background — the capsule floats, and an
+                // opaque strip behind it would undo that.
                 collapsedBar
             }
         }
-        .background(Theme.bg)
         .onChange(of: expanded) { _, isExpanded in
             focused = isExpanded
             if !isExpanded {
@@ -134,7 +201,8 @@ struct ReplyComposer: View {
                 rich = AttributedString()
                 imageAttachments = []
                 gifAttachments = []
-                selection = AttributedTextSelection()
+                selectionBox.clear()
+                plainSelection = nil
                 withAnimation(.quicker) { expanded = false }
             }
         }
@@ -151,40 +219,52 @@ struct ReplyComposer: View {
 
     // MARK: Collapsed bar
 
+    /// A floating glass capsule, not a docked bar: the same treatment as the
+    /// reader's own header pills, so the two ends of the screen match and the
+    /// content stays visible behind it. Tapping still just expands.
     private var collapsedBar: some View {
         Button {
             if isAuthenticated { withAnimation(.quicker) { expanded = true } }
         } label: {
-            HStack {
+            HStack(spacing: 10) {
+                // Leading glyph, as on the reference: it says "add something"
+                // before the placeholder has to.
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.55))
+
                 Text(collapsedText)
                     .font(Theme.body(15))
-                    .foregroundStyle(plainText.isEmpty ? Theme.muted(0.45) : Theme.text)
+                    .foregroundStyle(plainText.isEmpty ? Theme.muted(0.5) : Theme.text)
                     .lineLimit(1)
+
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 44)
-            .frame(maxWidth: .infinity)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Theme.divider, lineWidth: 1)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.leading, 16)
+            .padding(.trailing, 18)
+            .frame(height: FloatingHeader.controlHeight)
+            .padding(.vertical, 7)
+            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(!isAuthenticated)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
-        }
+        // `.interactive()` is what gives the glass its press response, the same
+        // as the header capsules.
+        .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
+        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        .padding(.horizontal, FloatingHeader.horizontalInset)
+        // Reaches down into the home-indicator strip, the way a floating bar
+        // does — but only part of the way, so the capsule never sits under the
+        // indicator itself. Clamped, because a device with a home button has no
+        // inset to borrow and a negative padding there would clip the capsule.
+        .padding(.bottom, -min(UIApplication.bottomSafeAreaInset * 0.55, 14))
     }
 
     private var collapsedText: String {
         if !plainText.isEmpty { return plainText }
         let count = imageAttachments.count + gifAttachments.count
-        if count > 0 { return "已添加 \(count) 个附件" }
-        return isAuthenticated ? "加入对话" : "登录后参与讨论"
+        if count > 0 { return AppString("已添加 \(count) 个附件") }
+        return isAuthenticated ? AppString("加入对话") : AppString("登录后参与讨论")
     }
 
     // MARK: Expanded composer
@@ -195,6 +275,9 @@ struct ReplyComposer: View {
             dragHandle
             if let replyingTo { replyTargetHeader(replyingTo) }
             hintLine
+            if !mentions.suggestions.isEmpty {
+                MentionSuggestionBar(suggestions: mentions.suggestions) { pick($0) }
+            }
             editor
             if !imageAttachments.isEmpty {
                 ComposeAttachmentStrip(
@@ -230,19 +313,21 @@ struct ReplyComposer: View {
                     .font(.system(size: 15))
                     .foregroundStyle(Theme.muted(0.4))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
     }
 
     private var hintLine: some View {
-        HStack(spacing: 0) {
-            Text("请在评论时遵守 ")
-            Text("社区规则").foregroundStyle(Theme.accent)
-            Text(" 评论时。")
-        }
-        .font(Theme.body(12))
+        // One string rather than three Texts in an HStack: split across
+        // separate views the words cannot be reordered, and every language
+        // places "community guidelines" differently in the sentence. The
+        // middle span was only tinted, never tappable, so inlining it loses
+        // nothing — and the three-part version read as a duplicated
+        // "请在评论时遵守 社区规则 评论时。".
+        Text("请在评论时遵守社区规则。")
+            .font(Theme.body(12))
         .foregroundStyle(Theme.muted(0.5))
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -261,10 +346,15 @@ struct ReplyComposer: View {
                     .onChanged { value in
                         if !isDragging {
                             isDragging = true
-                            previewHeight = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
+                            dragBaseHeight = restingHeight
+                            previewHeight = dragBaseHeight
                         }
-                        let base = tall ? maxHeight : min(max(minHeight, naturalHeight), maxHeight)
-                        previewHeight = min(max(minHeight - 30, base - value.translation.height), maxHeight + 20)
+                        // Against the captured anchor, never a freshly measured
+                        // one, so the height follows the finger exactly.
+                        previewHeight = min(
+                            max(minHeight - 30, dragBaseHeight - value.translation.height),
+                            maxHeight + 20
+                        )
                     }
                     .onEnded { value in
                         let travel = value.translation.height
@@ -281,22 +371,45 @@ struct ReplyComposer: View {
             )
     }
 
+    /// Rich where the system has it, plain where it doesn't.
+    @ViewBuilder
+    private var bodyEditor: some View {
+        if #available(iOS 26.0, *) {
+            TextEditor(text: $rich, selection: selectionBox.binding)
+        } else {
+            // Writes back through the same `rich` storage the rest of the view
+            // reads, so nothing else here has to know which editor is running.
+            // Flattening loses no attributes: below 26 none can be applied.
+            TextEditor(
+                text: Binding(
+                    get: { plainText },
+                    set: { rich = AttributedString($0) }
+                ),
+                selection: $plainSelection
+            )
+        }
+    }
+
     private var editor: some View {
         ZStack(alignment: .topLeading) {
             if plainText.isEmpty {
-                Text(isAuthenticated ? "加入对话" : "登录后参与讨论")
+                Text(isAuthenticated ? AppString("加入对话") : AppString("登录后参与讨论"))
                     .font(Theme.body(15))
                     .foregroundStyle(Theme.muted(0.4))
                     .padding(.horizontal, 5)
                     .padding(.vertical, 8)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $rich, selection: $selection)
+            bodyEditor
                 .font(Theme.body(15))
                 .tint(Theme.accent)
                 .scrollContentBackground(.hidden)
                 .focused($focused)
                 .disabled(!isAuthenticated)
+                // Both, because a token depends on the caret as much as on the
+                // text: moving into an existing `@name` should offer it again.
+                .onChange(of: rich) { _, _ in refreshMentions() }
+                .onChange(of: caretOffset) { _, _ in refreshMentions() }
         }
         .frame(height: currentHeight)
         .padding(.horizontal, 12)
@@ -313,7 +426,13 @@ struct ReplyComposer: View {
                 )
                 .hidden()
         }
-        .onPreferenceChange(EditorHeightKey.self) { naturalHeight = $0 }
+        .onPreferenceChange(EditorHeightKey.self) { measured in
+            // Ignored mid-drag: this is measured inside the frame the drag is
+            // driving, so letting it through would fight the gesture. The next
+            // resting state picks up whatever the text needs.
+            guard !isDragging else { return }
+            naturalHeight = measured
+        }
     }
 
     // MARK: Attachments
@@ -345,7 +464,7 @@ struct ReplyComposer: View {
                                 .background(Color.black.opacity(0.72), in: Circle())
                                 .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1.5))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                         .offset(x: 8, y: -8)
                     }
                 }
@@ -365,7 +484,8 @@ struct ReplyComposer: View {
         HStack(spacing: 4) {
             switch mode {
             case .plain: plainTools
-            case .formatting: formattingTools
+            case .formatting:
+                if #available(iOS 26.0, *) { formattingTools }
             }
             Spacer(minLength: 8)
             submitButton
@@ -388,7 +508,7 @@ struct ReplyComposer: View {
                     .frame(height: 34)
                     .padding(.horizontal, 8)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .disabled(!isAuthenticated || DiscourseConfig.klipyAPIKey.isEmpty)
 
             PhotosPicker(selection: $pickerItem, matching: .images) {
@@ -407,19 +527,24 @@ struct ReplyComposer: View {
 
             toolDivider
 
-            Button {
-                withAnimation(.quicker) { mode = .formatting }
-            } label: {
-                Text("Aa")
-                    .font(Theme.body(16, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 40, height: 34)
+            // Live emphasis needs the rich editor, so the way into it is only
+            // offered where that exists.
+            if ComposerFormatting.isAvailable {
+                Button {
+                    withAnimation(.quicker) { mode = .formatting }
+                } label: {
+                    Text("Aa")
+                        .font(Theme.body(16, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .frame(width: 40, height: 34)
+                }
+                .buttonStyle(.pressable)
+                .disabled(!isAuthenticated)
             }
-            .buttonStyle(.plain)
-            .disabled(!isAuthenticated)
         }
     }
 
+    @available(iOS 26.0, *)
     private var formattingTools: some View {
         let active = currentEmphasis
         return HStack(spacing: 2) {
@@ -447,7 +572,7 @@ struct ReplyComposer: View {
             .frame(height: 34)
             .background(canSubmit ? Theme.accent : Theme.surface, in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(!canSubmit)
     }
 
@@ -459,7 +584,7 @@ struct ReplyComposer: View {
                 .frame(width: 38, height: 34)
                 .background(isActive ? Theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private var toolDivider: some View {
@@ -471,12 +596,15 @@ struct ReplyComposer: View {
 
     // MARK: Rich-text formatting
 
+    @available(iOS 26.0, *)
     private var currentEmphasis: Int {
-        selection.typingAttributes(in: rich).emphasis ?? 0
+        selectionBox.selection.typingAttributes(in: rich).emphasis ?? 0
     }
 
+    @available(iOS 26.0, *)
     private func toggleEmphasis(_ flag: Int) {
         let active = (currentEmphasis & flag) != 0
+        var selection = selectionBox.selection
         rich.transformAttributes(in: &selection) { container in
             var mask = container.emphasis ?? 0
             mask = active ? (mask & ~flag) : (mask | flag)
@@ -488,6 +616,7 @@ struct ReplyComposer: View {
             container.font = font
             container.strikethroughStyle = (mask & Emphasis.strike != 0) ? Text.LineStyle.single : nil
         }
+        selectionBox.selection = selection
         focused = true
     }
 
@@ -546,7 +675,7 @@ struct ReplyComposer: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.muted(0.5))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             .padding(.horizontal, 14)
             .frame(height: 40)
@@ -565,7 +694,7 @@ struct ReplyComposer: View {
                             .frame(width: 130, height: 130)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -574,7 +703,7 @@ struct ReplyComposer: View {
             .frame(height: 138)
 
             if gifs.isEmpty, !isSearchingGifs {
-                Text(gifQuery.count < 2 ? "输入关键词搜索 GIF" : "没有找到 GIF")
+                Text(gifQuery.count < 2 ? AppString("输入关键词搜索 GIF") : AppString("没有找到 GIF"))
                     .font(Theme.body(12))
                     .foregroundStyle(Theme.muted(0.5))
                     .frame(maxWidth: .infinity)
@@ -627,7 +756,7 @@ struct ReplyComposer: View {
             if let previousURL {
                 imageAttachments[current].upload = .ready(previousURL)
             } else {
-                imageAttachments[current].upload = .failed("上传失败，点按重试")
+                imageAttachments[current].upload = .failed(AppString("上传失败，点按重试"))
             }
         }
     }

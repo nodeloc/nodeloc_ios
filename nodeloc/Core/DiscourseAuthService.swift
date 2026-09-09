@@ -2,32 +2,24 @@
 //  DiscourseAuthService.swift
 //  nodeloc
 //
-//  Implements Discourse's "User API Key" login flow — the same mechanism the
-//  official Discourse mobile app uses:
-//    1. generate an RSA keypair on device
-//    2. open /user-api-key/new in a web-auth session
-//    3. the user logs in & authorizes; Discourse redirects to nodeloc://auth
-//       with an RSA-encrypted payload
-//    4. decrypt with the private key → per-user `User-Api-Key`, stored in Keychain
+//  Website-session auth, the way the site itself does it:
+//    * username/password (with 2FA) through POST /session
+//    * signup through POST /users
+//    * social sign-in through Discourse's own auth providers — the app hosts
+//      /auth/<provider> in a web view (SocialLoginView) and adopts the session
+//      cookies it comes back with (`completeProviderLogin`)
 //
-//  Requires the site admin to have added `nodeloc://auth` to
-//  `allowed user api auth redirects` and enabled `allow user api keys`.
+//  Every path ends in the same place: Discourse's session cookies in
+//  URLSession's jar, a matching CSRF token, and both mirrored to the Keychain.
+//  No User API Key is involved, so nothing depends on the admin whitelisting a
+//  redirect scheme.
 //
 
 import Foundation
-import AuthenticationServices
 import Security
 import UIKit
 
-enum DiscourseScopes {
-    static let value = "session_info,read,write,notifications,push,message_bus,chat"
-}
-
 enum AuthError: Error, LocalizedError {
-    case keyGeneration
-    case missingPayload
-    case decryptFailed
-    case nonceMismatch
     case cancelled
     case missingCredentials
     case loginFailed(String)
@@ -39,16 +31,15 @@ enum AuthError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .keyGeneration: return "Couldn't generate the security keys."
-        case .missingPayload: return "The login response was incomplete."
-        case .decryptFailed: return "Couldn't verify the login response."
-        case .nonceMismatch: return "Login verification failed. Please try again."
         case .cancelled: return "Login was cancelled."
         case .missingCredentials: return "Please fill in all required fields."
-        case .loginFailed(let message): return message
-        case .secondFactorRequired: return "此账号已开启两步验证，请输入验证码。"
-        case .signupFailed(let message): return message
-        case .signupNeedsActivation(let message): return message
+        // The server's messages arrive as HTML — Discourse's own strings carry
+        // `<p>` and `<b>` — and these reach toasts and inline error labels, so
+        // they are decoded here rather than at each display site.
+        case .loginFailed(let message): return DiscourseFormat.plainTextParagraphs(message)
+        case .secondFactorRequired: return AppString("此账号已开启两步验证，请输入验证码。")
+        case .signupFailed(let message): return DiscourseFormat.plainTextParagraphs(message)
+        case .signupNeedsActivation(let message): return DiscourseFormat.plainTextParagraphs(message)
         }
     }
 }
@@ -59,12 +50,8 @@ enum SignupResult {
 }
 
 @MainActor
-final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProviding {
+final class DiscourseLogin {
     static let shared = DiscourseLogin()
-
-    private var session: ASWebAuthenticationSession?
-    private var privateKey: SecKey?
-    private var nonce = ""
 
     private let keychainKey = "nodeloc.user_api_key"
     private let keychainSession = "nodeloc.session_cookie"
@@ -89,6 +76,32 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
             injectCookiesIntoJar(cookie)
         }
         return true
+    }
+
+    /// Fills in a missing username from the server, and persists it.
+    ///
+    /// A restored credential can arrive without one: the User API Key flow
+    /// never asks for a name (it reads it back from `session/current` once, at
+    /// sign-in), and anything signed in before that read-back existed has a key
+    /// in the Keychain with no `nodeloc.username` beside it.
+    ///
+    /// That state is worse than it sounds. Every screen keyed on the username
+    /// — the profile page above all — has nothing to ask for and no way to
+    /// recover, so it stays empty for the life of the install. Asking the
+    /// server once repairs it permanently.
+    @discardableResult
+    func resolveUsernameIfNeeded() async -> String? {
+        if let existing = DiscourseAuth.shared.username, !existing.isEmpty {
+            return existing
+        }
+        guard DiscourseAuth.shared.isAuthenticated,
+              let response = try? await DiscourseClient().currentUser()
+        else { return nil }
+
+        let username = response.currentUser.username
+        DiscourseAuth.shared.username = username
+        Keychain.set(username, for: keychainUser)
+        return username
     }
 
     /// Snapshots the (possibly rotated) session cookies back into the Keychain
@@ -121,6 +134,23 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
     }
 
     func signOut() {
+        resetAuthState()
+        // The interface language followed the account; without one, fall back
+        // to the device again.
+        AppLanguage.accountChoice = nil
+    }
+
+    /// Drops every trace of the current session: the cookie jar, the keychain
+    /// copies, and the in-memory fields `applyAuth` reads.
+    ///
+    /// All of it, together, always. Clearing the jar but leaving
+    /// `sessionCookie` / `csrfToken` set is not a half-measure but an actively
+    /// broken state: `applyAuth` still believes there is a session, so it
+    /// attaches a CSRF token belonging to a session that no longer exists and
+    /// `isAuthenticated` still answers true. A server that behaves differently
+    /// for authenticated callers — the Apple endpoint links instead of signing
+    /// in — then takes the wrong branch.
+    private func resetAuthState() {
         Keychain.delete(keychainKey)
         Keychain.delete(keychainSession)
         Keychain.delete(keychainCSRF)
@@ -130,6 +160,10 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         DiscourseAuth.shared.sessionCookie = nil
         DiscourseAuth.shared.csrfToken = nil
         DiscourseAuth.shared.username = nil
+        // The profile page renders last launch's payload before asking the
+        // server for anything, so leaving this behind would show the previous
+        // account's name, avatar and 能量 to whoever signs in next.
+        ProfileSnapshot.clearAll()
     }
 
     // MARK: Username/password auth
@@ -173,23 +207,27 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
             if secondFactorToken == nil {
                 throw AuthError.secondFactorRequired
             }
-            throw AuthError.loginFailed(result?.error ?? "验证码不正确，请重试。")
+            throw AuthError.loginFailed(result?.error ?? AppString("验证码不正确，请重试。"))
         }
         if let message = result?.error ?? result?.failed {
             throw AuthError.loginFailed(message)
         }
         guard let username = result?.user?.username else {
-            throw AuthError.loginFailed("登录未完成，请重试。")
+            throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
 
         try persistWebsiteSession(csrf: csrf, username: username)
     }
 
+    /// `userFields` carries the admin's custom profile fields, keyed by field
+    /// id. The ones the server marks required at registration must be present
+    /// or `POST /users` rejects the whole thing — see `DiscourseUserField`.
     func signup(
         username rawUsername: String,
         name rawName: String,
         email rawEmail: String,
-        password rawPassword: String
+        password rawPassword: String,
+        userFields: [Int: String] = [:]
     ) async throws -> SignupResult {
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -201,6 +239,10 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
 
         signOut()
         let csrf = try await fetchCSRFToken()
+        // Fetched *after* the CSRF call, because the server keeps the expected
+        // answer in the session that call establishes — a honeypot from some
+        // other session fails the check just as surely as none at all.
+        let honeypot = try await fetchSignupChallenge()
         let (data, response) = try await postForm(
             "users",
             form: [
@@ -209,7 +251,35 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
                 "email": email,
                 "password": password,
                 "timezone": TimeZone.current.identifier,
-            ],
+                // Discourse's anti-spam pair, and the reason signups appeared
+                // to work while no mail was ever sent. Getting these wrong is
+                // not an error: `UsersController#create` opens with
+                //
+                //   if honeypot_or_challenge_fails?(params) || invite_only?
+                //     render json: { success: true, active: false,
+                //                    message: t("login.activate_email", …) }
+                //
+                // — a deliberate lie to spam bots. It creates no account and
+                // queues no mail, which is exactly what we were seeing: a
+                // convincing check-your-inbox screen, an empty mail log, and no
+                // such user.
+                //
+                // `password_confirmation` carries the honeypot value (it is not
+                // the password), and the challenge goes back reversed.
+                "password_confirmation": honeypot.value,
+                "challenge": String(honeypot.challenge.reversed()),
+            ].merging(
+                // `user_fields[3]=Male`, the shape Rails parses back into a
+                // hash. Blank answers are dropped rather than sent empty: an
+                // empty string fails a required field's validation just as a
+                // missing key does, but reads as a deliberate answer.
+                userFields
+                    .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    .reduce(into: [:]) { form, entry in
+                        form["user_fields[\(entry.key)]"] = entry.value
+                    },
+                uniquingKeysWith: { _, custom in custom }
+            ),
             csrf: csrf
         )
         let signup = try? decode(SignupResponse.self, from: data)
@@ -224,7 +294,50 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
             return .signedIn
         }
 
+        // No check for "did that really work?" is possible here, and it isn't
+        // worth trying again. Discourse's own source settles it — a real
+        // success renders
+        //
+        //   { success: true, active: user.active?, message: activation.message }
+        //     .merge(SiteSetting.hide_email_address_taken ? {} : { user_id: user.id })
+        //
+        // and the anti-spam decoy renders
+        //
+        //   { success: true, active: false, message: t("login.activate_email") }
+        //
+        // With `hide_email_address_taken` on — as it is on nodeloc — those are
+        // the same three keys with the same kinds of values. The concealment of
+        // an already-registered email takes the same shape too. Being
+        // indistinguishable is the point: a spam bot must not be able to tell
+        // either. A `user_id` guard was tried here and rejected *real*
+        // registrations, which is worse than the silence it was meant to catch.
+        //
+        // So the honeypot above is the whole defence: get it right and this
+        // path means what it says.
+        #if DEBUG
+        if signup?.userId == nil {
+            print("[Signup] no user_id — expected when hide_email_address_taken is on. Body: \(String(decoding: data, as: UTF8.self))")
+        }
+        #endif
+
         throw AuthError.signupNeedsActivation(message)
+    }
+
+    /// `/session/hp.json` — the honeypot value and challenge that
+    /// `POST /users` checks. Both are per-session and short-lived
+    /// (`expires_in` is an hour), so this is fetched per signup attempt.
+    private func fetchSignupChallenge() async throws -> SignupChallenge {
+        var request = URLRequest(url: DiscourseConfig.baseURL.appending(path: "session/hp.json"))
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw AuthError.signupFailed("Couldn't start the signup session.")
+        }
+        guard let challenge = try? decode(SignupChallenge.self, from: data) else {
+            throw AuthError.signupFailed("Couldn't start the signup session.")
+        }
+        return challenge
     }
 
     private func fetchCSRFToken() async throws -> String {
@@ -321,142 +434,106 @@ final class DiscourseLogin: NSObject, ASWebAuthenticationPresentationContextProv
         return try decoder.decode(type, from: data)
     }
 
-    // MARK: Website app authorization
+    // MARK: Social login (Discourse auth providers)
 
-    func start() async throws {
-        guard let keyPair = Self.generateKeyPair() else { throw AuthError.keyGeneration }
-        privateKey = keyPair.private
-        nonce = Self.randomNonce()
-
-        guard let publicPEM = Self.publicKeyPEM(keyPair.public) else { throw AuthError.keyGeneration }
-
-        var components = URLComponents(
-            url: DiscourseConfig.baseURL.appending(path: "user-api-key/new"),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            .init(name: "application_name", value: DiscourseConfig.appName),
-            .init(name: "client_id", value: DiscourseConfig.clientID),
-            .init(name: "scopes", value: DiscourseScopes.value),
-            .init(name: "public_key", value: publicPEM),
-            .init(name: "nonce", value: nonce),
-            .init(name: "auth_redirect", value: DiscourseConfig.authRedirect),
-        ]
-
-        let callback: URL = try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: components.url!,
-                callbackURLScheme: "nodeloc"
-            ) { url, error in
-                if let url {
-                    continuation.resume(returning: url)
-                } else if let error = error as? ASWebAuthenticationSessionError,
-                          error.code == .canceledLogin {
-                    continuation.resume(throwing: AuthError.cancelled)
-                } else {
-                    continuation.resume(throwing: error ?? AuthError.missingPayload)
-                }
-            }
-            session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false
-            self.session = session
-            session.start()
+    /// Completes a `/auth/<provider>` sign-in performed in `SocialLoginWebView`.
+    ///
+    /// Discourse's own OAuth routes are used rather than a User API Key: the
+    /// provider round-trip ends with the site setting its normal session
+    /// cookies in the web view, so the only work left is to move those cookies
+    /// into URLSession's jar and pick up a matching CSRF token. From there the
+    /// app is in exactly the state a username/password login leaves it in.
+    func completeProviderLogin(cookies: [HTTPCookie]) async throws {
+        guard cookies.contains(where: { $0.name == "_t" }) else {
+            throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
 
-        try handleCallback(callback)
-        await fetchUsername()
-    }
-
-    private func handleCallback(_ url: URL) throws {
-        guard
-            let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "payload" })?.value,
-            let priv = privateKey
-        else { throw AuthError.missingPayload }
-
-        // Base64 may arrive with '+' turned into spaces by URL decoding.
-        let base64 = raw.replacingOccurrences(of: " ", with: "+")
-        guard
-            let encrypted = Data(base64Encoded: base64),
-            let clear = SecKeyCreateDecryptedData(priv, .rsaEncryptionPKCS1, encrypted as CFData, nil) as Data?
-        else { throw AuthError.decryptFailed }
-
-        struct Payload: Decodable { let key: String; let nonce: String }
-        guard let payload = try? JSONDecoder().decode(Payload.self, from: clear) else {
-            throw AuthError.decryptFailed
+        // Start from a clean slate so a previous account's cookies can't mix
+        // with the new session, then adopt the web view's. `adoptSessionCookies`
+        // fetches a fresh CSRF token, so dropping the old one here costs
+        // nothing and keeps this from being the broken half-state described on
+        // `resetAuthState`.
+        resetAuthState()
+        for cookie in cookies {
+            HTTPCookieStorage.shared.setCookie(cookie)
         }
-        guard payload.nonce == nonce else { throw AuthError.nonceMismatch }
 
-        Keychain.set(payload.key, for: keychainKey)
-        DiscourseAuth.shared.userApiKey = payload.key
+        try await adoptSessionCookies()
     }
 
-    private func fetchUsername() async {
-        guard let current = try? await DiscourseClient().currentUser() else { return }
-        DiscourseAuth.shared.username = current.currentUser.username
-        Keychain.set(current.currentUser.username, for: keychainUser)
-    }
+    /// Signs in with Discourse's User API Key flow, run in the system browser.
+    ///
+    /// The other paths all end with a session *cookie*; this one ends with a
+    /// key that goes in the `User-Api-Key` header instead. `applyAuth` already
+    /// prefers that header when it is set and `isAuthenticated` already counts
+    /// it, so nothing downstream changes — the request layer has always
+    /// supported this, only the acquisition was missing.
+    ///
+    /// The username is read back from `session/current` because the flow never
+    /// asks for one: the reader may have signed in with any provider, and the
+    /// app needs the name for its own screens.
+    func loginWithUserAPIKey() async throws {
+        let key = try await UserAPIKeyAuth.authorize()
 
-    // MARK: Identifiers
+        // A clean slate first, for the reason spelled out on `resetAuthState`:
+        // leaving a previous session's cookie and CSRF token in place alongside
+        // a new key is the half-authenticated state that makes the server take
+        // the wrong branch.
+        resetAuthState()
+        DiscourseAuth.shared.userApiKey = key
+        Keychain.set(key, for: keychainKey)
 
-    private static func randomNonce() -> String {
-        var bytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-    }
-
-    // MARK: Presentation
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        if let keyWindow = scenes.flatMap(\.windows).first(where: \.isKeyWindow) {
-            return keyWindow
+        guard let response = try? await DiscourseClient().currentUser() else {
+            // The key didn't work, so don't keep it — otherwise the app looks
+            // signed in and every request fails.
+            resetAuthState()
+            throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
-        if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first {
-            return ASPresentationAnchor(windowScene: scene)
+        let username = response.currentUser.username
+        DiscourseAuth.shared.username = username
+        Keychain.set(username, for: keychainUser)
+        AppLanguage.accountChoice = nil
+    }
+
+    /// Completes a native Sign in with Apple.
+    ///
+    /// The endpoint answers by setting the same session cookie a web login
+    /// would, so once it returns there is nothing provider-specific left — the
+    /// tail is shared with `completeProviderLogin`.
+    ///
+    /// Rethrows the transport error untouched so the caller can tell "endpoint
+    /// not deployed" (404 / 501) from a real failure and fall back to the web
+    /// flow.
+    func completeNativeAppleLogin(_ credential: AppleSignInCredential) async throws {
+        // Everything, not just the cookies: the endpoint decides between
+        // *signing in* and *linking to the caller* by whether the request looks
+        // authenticated, so any leftover CSRF token would send it down the
+        // linking path against a session that is already gone.
+        resetAuthState()
+
+        try await DiscourseClient().nativeAppleLogin(credential)
+
+        guard HTTPCookieStorage.shared.cookies(for: DiscourseConfig.baseURL)?
+            .contains(where: { $0.name == "_t" }) == true
+        else {
+            throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
-        preconditionFailure("ASWebAuthenticationSession requires an active window scene.")
+
+        try await adoptSessionCookies()
     }
 
-    // MARK: RSA
+    /// Turns session cookies already in the jar into a persisted login.
+    private func adoptSessionCookies() async throws {
+        // The CSRF token is per-session, so it has to be fetched *after* the
+        // session cookies are in place.
+        let csrf = try await fetchCSRFToken()
+        DiscourseAuth.shared.sessionCookie = currentCookieHeader()
+        DiscourseAuth.shared.csrfToken = csrf
 
-    private static func generateKeyPair() -> (private: SecKey, public: SecKey)? {
-        let attributes: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-            kSecAttrKeySizeInBits as String: 2048,
-        ]
-        guard
-            let priv = SecKeyCreateRandomKey(attributes as CFDictionary, nil),
-            let pub = SecKeyCopyPublicKey(priv)
-        else { return nil }
-        return (priv, pub)
-    }
-
-    /// Discourse expects an X.509 SubjectPublicKeyInfo ("PUBLIC KEY") PEM, but
-    /// SecKey exports RSA keys as PKCS#1; wrap it in the SPKI header.
-    private static func publicKeyPEM(_ key: SecKey) -> String? {
-        guard let pkcs1 = SecKeyCopyExternalRepresentation(key, nil) as Data? else { return nil }
-
-        let rsaOID: [UInt8] = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
-                               0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00]
-        var bitString = Data([0x00]) + pkcs1
-        bitString = Data([0x03]) + encodeLength(bitString.count) + bitString
-        var sequence = Data(rsaOID) + bitString
-        sequence = Data([0x30]) + encodeLength(sequence.count) + sequence
-
-        let base64 = sequence.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
-        return "-----BEGIN PUBLIC KEY-----\n\(base64)\n-----END PUBLIC KEY-----\n"
-    }
-
-    private static func encodeLength(_ length: Int) -> Data {
-        if length < 128 { return Data([UInt8(length)]) }
-        var value = length
-        var bytes: [UInt8] = []
-        while value > 0 {
-            bytes.insert(UInt8(value & 0xff), at: 0)
-            value >>= 8
+        guard let current = try? await DiscourseClient().currentUser() else {
+            throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
-        return Data([0x80 | UInt8(bytes.count)] + bytes)
+        try persistWebsiteSession(csrf: csrf, username: current.currentUser.username)
     }
 }
 
@@ -486,6 +563,16 @@ private struct SignupResponse: Decodable {
     let success: Bool?
     let active: Bool?
     let message: String?
+    /// Present only when `hide_email_address_taken` is off, so its absence
+    /// means nothing — see the note at the end of `signup`. Kept for the DEBUG
+    /// log and for the day that setting changes.
+    let userId: Int?
+}
+
+/// `/session/hp.json` — Discourse's signup honeypot.
+private struct SignupChallenge: Decodable {
+    let value: String
+    let challenge: String
 }
 
 private struct AuthMessageResponse: Decodable {

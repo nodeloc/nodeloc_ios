@@ -214,6 +214,57 @@ final class SecurityStore {
 
     // MARK: Associated accounts
 
+    var hasAppleAccount: Bool {
+        associatedAccounts.contains { $0.name.lowercased() == "apple" }
+    }
+
+    /// Binds a native Apple credential to the *signed-in* account.
+    ///
+    /// The same endpoint the login button uses — what changes its meaning is
+    /// the session travelling with the request. Cookies are deliberately left
+    /// alone here: they are how the server knows which account to attach the
+    /// Apple id to. (`DiscourseLogin.completeNativeAppleLogin` clears them
+    /// first, which is right for signing *in* and wrong for linking.)
+    ///
+    /// Returns false when the endpoint isn't deployed, so the caller can fall
+    /// back to the web preferences page.
+    func linkApple(_ credential: AppleSignInCredential) async -> Bool {
+        errorText = nil
+        do {
+            try await client.nativeAppleLogin(credential)
+            await load()
+
+            // The server can answer 200 without having bound anything — that is
+            // what a login-only implementation does with a session-bearing
+            // request. Reporting success on the status code alone hid exactly
+            // that, so confirm against the reloaded list instead.
+            guard hasAppleAccount else {
+                errorText = AppString("服务端没有返回绑定结果，请稍后重试。")
+                ToastCenter.shared.show(errorText!)
+                return true
+            }
+
+            ToastCenter.shared.show(AppString("已绑定 Apple 账号"))
+            return true
+        } catch let error as DiscourseError {
+            if case .badResponse(let code, _) = error {
+                // Not deployed — the caller falls back to the web page.
+                if code == 404 || code == 501 { return false }
+                // The generic copy for 403/409 talks about *logging in*, which
+                // is misleading here; the code is what makes this diagnosable.
+                errorText = AppString("绑定失败（\(code)）")
+            } else {
+                errorText = error.errorDescription
+            }
+            ToastCenter.shared.show(errorText ?? AppString("绑定失败"))
+            return true
+        } catch {
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            ToastCenter.shared.show(errorText ?? AppString("绑定失败"))
+            return true
+        }
+    }
+
     func revoke(_ account: AssociatedAccount) async {
         guard let username else { return }
         let snapshot = associatedAccounts
@@ -232,7 +283,7 @@ final class SecurityStore {
         guard let login = username else { return }
         do {
             try await client.requestPasswordReset(login: login)
-            infoText = "重置密码的邮件已发送，请查收。"
+            infoText = AppString("重置密码的邮件已发送，请查收。")
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -257,7 +308,7 @@ final class SecurityStore {
         do {
             try await client.revokeAuthToken(username: username, tokenID: nil)
             sessions = sessions.filter { $0.isActive == true }
-            infoText = "已注销其它设备。"
+            infoText = AppString("已注销其它设备。")
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -273,7 +324,7 @@ final class SecurityStore {
     func confirm(password: String) async -> Bool {
         guard let result = try? await client.confirmSession(password: password) else { return false }
         if !result.isTrusted {
-            errorText = "密码不正确。"
+            errorText = AppString("密码不正确。")
         }
         return result.isTrusted
     }
@@ -294,7 +345,7 @@ final class SecurityStore {
             totpEnabled = true
             return true
         } catch {
-            errorText = "验证码无效，请重试。"
+            errorText = AppString("验证码无效，请重试。")
             return false
         }
     }

@@ -2,7 +2,7 @@
 //  SettingsOverlay.swift
 //  nodeloc
 //
-//  Settings and the Nodeloc Pro upsell.
+//  Settings.
 //
 
 import SwiftUI
@@ -18,7 +18,7 @@ struct SettingsOverlay: View {
     @State private var openAccountPage: AccountPage?
 
     private enum AccountPage: String, Identifiable {
-        case profile, associatedAccounts, security, pushNotifications
+        case profile, associatedAccounts, security, pushNotifications, postSource, blockedUsers, deleteAccount
         var id: String { rawValue }
     }
 
@@ -54,58 +54,80 @@ struct SettingsOverlay: View {
         case .associatedAccounts: AssociatedAccountsPage(onClose: onClose)
         case .security: SecurityPage(onClose: onClose)
         case .pushNotifications: PushSettingsPage(onClose: onClose)
+        case .postSource: PostSourcePage(onClose: onClose)
+        case .blockedUsers: BlockedUsersPage(onClose: onClose)
+        case .deleteAccount: DeleteAccountPage(onClose: onClose)
         }
     }
 
     private var settingsList: some View {
         VStack(spacing: 0) {
-            OverlayHeader(title: "设置")
+            OverlayHeader(title: AppString("设置"))
             ScrollView {
                 LazyVStack(spacing: 0) {
                     // Account editing + preferences, shown only to a real
                     // account: these fields are owner-serialized, so there is
                     // nothing to edit as a guest.
                     if isSignedIn {
-                        SettingsSection(title: "账户") {
-                            SettingsNavRow(title: "个人资料", icon: "person.crop.circle") {
+                        SettingsSection(title: AppString("账户")) {
+                            SettingsNavRow(title: AppString("个人资料"), icon: "person.crop.circle") {
                                 withAnimation(.panelSlide) { openAccountPage = .profile }
                             }
-                            SettingsNavRow(title: "关联账户", icon: "link") {
+                            SettingsNavRow(title: AppString("关联账户"), icon: "link") {
                                 withAnimation(.panelSlide) { openAccountPage = .associatedAccounts }
                             }
-                            SettingsNavRow(title: "安全性", icon: "lock.shield") {
+                            SettingsNavRow(title: AppString("安全性"), icon: "lock.shield") {
                                 withAnimation(.panelSlide) { openAccountPage = .security }
                             }
                         }
 
-                        SettingsSection(title: "偏好设置") {
+                        SettingsSection(title: AppString("偏好设置")) {
                             ForEach(PreferenceGroup.allCases) { group in
                                 SettingsNavRow(title: group.title, icon: group.icon) {
                                     withAnimation(.panelSlide) { openGroup = group }
                                 }
                             }
+                            // Server-side like the rest of this section, but its
+                            // own endpoint rather than a user_option — hence a
+                            // page instead of a row in one of the groups.
+                            // Guideline 1.2: a block has to be reversible, and
+                            // Discourse already keeps the list — see
+                            // `BlockedUsersPage`.
+                            SettingsNavRow(title: AppString("屏蔽的用户"), icon: "hand.raised") {
+                                withAnimation(.panelSlide) { openAccountPage = .blockedUsers }
+                            }
+                            SettingsNavRow(title: AppString("发帖来源"), icon: "iphone.gen3") {
+                                withAnimation(.panelSlide) { openAccountPage = .postSource }
+                            }
                         }
                     }
 
-                    SettingsSection(title: "账号") {
-                        SettingsNavRow(title: "通知", icon: "bell.fill") {
+                    SettingsSection(title: AppString("账号")) {
+                        SettingsNavRow(title: AppString("通知"), icon: "bell.fill") {
                             app.overlay = .notifications
                         }
                         if isSignedIn {
-                            SettingsNavRow(title: "推送通知", icon: "bell.badge") {
+                            SettingsNavRow(title: AppString("推送通知"), icon: "bell.badge") {
                                 withAnimation(.panelSlide) { openAccountPage = .pushNotifications }
                             }
                         }
-                        SettingsNavRow(title: "Nodeloc Pro", icon: "sparkle") {
-                            app.overlay = .pro
-                        }
                         if isSignedIn {
                             SettingsNavRow(
-                                title: "退出登录",
+                                title: AppString("退出登录"),
                                 icon: "rectangle.portrait.and.arrow.right",
                                 isDestructive: true
                             ) {
                                 signOut()
+                            }
+                            // Required by App Store guideline 5.1.1(v): an app
+                            // that creates accounts has to let them be deleted
+                            // from inside the app.
+                            SettingsNavRow(
+                                title: AppString("注销账号"),
+                                icon: "person.crop.circle.badge.xmark",
+                                isDestructive: true
+                            ) {
+                                withAnimation(.panelSlide) { openAccountPage = .deleteAccount }
                             }
                         }
                     }
@@ -122,90 +144,5 @@ struct SettingsOverlay: View {
         app.onboardingDone = false
         app.isGuest = false
         app.authed = false
-    }
-}
-
-// MARK: - Nodeloc Pro
-
-struct ProOverlay: View {
-    @Environment(AppState.self) private var app
-
-    var body: some View {
-        @Bindable var app = app
-
-        VStack(spacing: 0) {
-            OverlayHeader(title: "Nodeloc Pro")
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Go further on NODELOC.").font(Theme.heading(32)).padding(.bottom, 6)
-                    Text("No ads, custom badges, and priority in the queue.")
-                        .font(Theme.body(13)).foregroundStyle(Theme.muted(0.75))
-                        .padding(.bottom, 18)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        proFeature("Ad-free browsing")
-                        proFeature("Animated profile badge")
-                        proFeature("Early access to new Nodes")
-                    }
-                    .padding(.bottom, 18)
-
-                    SegmentedControl(
-                        selection: $app.plan,
-                        options: [(.monthly, "Monthly"), (.yearly, "Yearly · save 33%")]
-                    )
-                    .padding(.bottom, 16)
-
-                    // Price
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(app.planPrice).font(Theme.heading(26, weight: .semibold))
-                        Spacer()
-                        Text(app.planPeriod).font(Theme.body(12)).foregroundStyle(Theme.muted(0.55))
-                    }
-                    .padding(Theme.space3)
-                    .frame(maxWidth: .infinity)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
-                    .padding(.bottom, 18)
-
-                    // Payment method
-                    HStack(spacing: Theme.space3) {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .strokeBorder(Theme.divider, lineWidth: 1)
-                            .background(Theme.surface)
-                            .frame(width: 26, height: 18)
-                            .overlay(Rectangle().fill(Theme.neutral500).frame(height: 2.5).padding(.horizontal, 3), alignment: .center)
-                        Text("•••• 4242").font(Theme.body(13))
-                        Spacer()
-                        Button("Edit") {}.buttonStyle(GhostButtonStyle())
-                    }
-                    .padding(Theme.space3)
-                    .frame(maxWidth: .infinity)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
-                    .padding(.bottom, 18)
-
-                    Button("Subscribe") {}
-                        .buttonStyle(PrimaryButtonStyle(block: true))
-
-                    Text("Cancel anytime. Renews automatically.")
-                        .font(Theme.body(11)).foregroundStyle(Theme.muted(0.45))
-                        .frame(maxWidth: .infinity)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 10)
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
-            }
-            .scrollIndicators(.hidden)
-        }
-        .background(Theme.bg.ignoresSafeArea())
-    }
-
-    private func proFeature(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Theme.success)
-            Text(text).font(Theme.body(13))
-        }
     }
 }

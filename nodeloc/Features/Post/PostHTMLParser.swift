@@ -61,10 +61,89 @@ nonisolated enum PostHTMLParser {
 
     static func parseSync(_ html: String?) -> PostContent {
         guard let html, !html.isEmpty else { return .empty }
-        let tokens = tokenize(html)
+        let tokens = tokenize(promotePermissionPlaceholders(in: html))
         var index = 0
         let blocks = parseBlocks(tokens, index: &index, until: nil)
         return PostContent(blocks: normalize(blocks))
+    }
+
+    /// Rewrites discourse-permission's locked placeholders from a `<span>` into
+    /// a block element.
+    ///
+    /// The plugin emits them inline — `<span class='permission-reply-placeholder'>`
+    /// — usually inside whatever paragraph the BBCode sat in. But a locked
+    /// section has to be *framed* so the reader can see the post continues
+    /// behind a requirement, and a frame is a block. Rewriting the element here
+    /// is far less invasive than teaching the inline path to emit blocks and
+    /// then unwrapping the paragraph around it.
+    ///
+    /// The whole element is replaced, opening and closing tag together: turning
+    /// only the `<span>` into a `<div>` would leave a stray `</span>` and throw
+    /// the nesting out for the rest of the post. Their content is a plain
+    /// locale string with no nested markup, so a reluctant match to `</span>`
+    /// is safe.
+    ///
+    /// The unlocked form already arrives as `<div class='permission-content'>`
+    /// and needs none of this.
+    private static func promotePermissionPlaceholders(in html: String) -> String {
+        guard html.contains("-placeholder") else { return html }
+        // One pass for all three kinds; the kind itself is captured, along with
+        // any remaining attributes (the pay placeholder carries `data-amount`
+        // and `data-content-id`) and the notice text.
+        let pattern = /<span class='permission-(reply|login|pay)-placeholder'([^>]*)>(.*?)<\/span>/
+            .dotMatchesNewlines()
+        return html.replacing(pattern) { match in
+            let kind = match.output.1
+            let attributes = match.output.2
+            let notice = match.output.3
+            return "<div class='permission-locked' data-type='\(kind)'\(attributes)>\(notice)</div>"
+        }
+    }
+
+    /// Which requirement a permission element describes.
+    ///
+    /// `data-type` is on both forms; the amount only on pay. A missing or
+    /// unparseable amount still yields `.pay`, because the *requirement* is
+    /// what the frame communicates — the number is decoration on top.
+    private static func permissionRequirement(from tag: HTMLTag) -> PostPermissionBlock.Requirement {
+        let amount = Int(tag.attributes["data-amount"] ?? "") ?? 0
+        switch tag.attributes["data-type"] {
+        case "login": return .login
+        case "reply": return .reply
+        case "pay": return .pay(amount: amount)
+        default:
+            // Fall back to the class name, which carries the type too.
+            let classes = classList(tag)
+            if classes.contains("permission-login-content") { return .login }
+            if classes.contains("permission-reply-content") { return .reply }
+            return .pay(amount: amount)
+        }
+    }
+
+    /// The buyer count from an unlocked pay block's
+    /// `<span class='buyers-count'>N …</span>` header.
+    ///
+    /// Read from the token stream rather than an attribute because the plugin
+    /// only puts it in the header text. Nil when absent, which is every
+    /// non-pay block.
+    private static func permissionBuyersCount(_ tokens: [HTMLToken], from start: Int) -> Int? {
+        var index = start
+        // The header is the first child, so this only ever looks a few tokens
+        // ahead — bounded so a malformed body can't turn into a scan of the
+        // whole post.
+        let limit = min(tokens.count, start + 24)
+        while index < limit {
+            if case .tag(let tag) = tokens[index],
+               tag.name == "span",
+               classList(tag).contains("buyers-count"),
+               index + 1 < tokens.count,
+               case .text(let value) = tokens[index + 1] {
+                let digits = value.prefix { $0.isNumber }
+                return Int(digits)
+            }
+            index += 1
+        }
+        return nil
     }
 
     // MARK: Scanning
@@ -353,7 +432,7 @@ nonisolated enum PostHTMLParser {
         switch tag.name {
         case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li",
              "blockquote", "aside", "pre", "hr", "table", "details", "figure",
-             "section", "article", "video":
+             "section", "article", "video", "iframe":
             return true
         case "img":
             // A bare image is a block; an emoji is inline.
@@ -477,12 +556,92 @@ nonisolated enum PostHTMLParser {
                     posterSrc: tag.attributes["data-thumbnail-src"]
                 ))]
             }
+            // `<div class="youtube-onebox lazy-video-container" data-video-id=…>`.
+            // There is no iframe to find: Discourse ships a thumbnail and builds
+            // the player in JS on click, so the embed address has to be
+            // reconstructed from the data attributes. Parsing the children
+            // instead would yield the bare thumbnail image and lose the video.
+            if classes.contains("lazy-video-container") || classes.contains("youtube-onebox"),
+               let embed = lazyVideoEmbed(from: tag) {
+                skipSubtree(tokens, index: &index, name: tag.name)
+                return [.embed(embed)]
+            }
             if classes.contains("spoiler") || classes.contains("spoiled") {
                 let inner = parseBlocks(tokens, index: &index, until: tag.name)
                 return [.spoiler(inner)]
             }
+            // The plugin's own header inside an unlocked block. Dropped:
+            // `PostPermissionView` draws the frame's header from the
+            // requirement, so keeping this would print the same words twice —
+            // once as the frame's title and once as the first line of content.
+            if classes.contains("permission-header") {
+                skipSubtree(tokens, index: &index, name: tag.name)
+                return nil
+            }
+            // discourse-permission, unlocked: the server already decided this
+            // reader may see it and cooked the content inside
+            // `<div class="permission-body">`. Framed anyway, so the reader can
+            // tell the author had gated it — see `PostPermissionView`.
+            if classes.contains("permission-content") {
+                let requirement = permissionRequirement(from: tag)
+                let buyers = permissionBuyersCount(tokens, from: index)
+                let inner = parseBlocks(tokens, index: &index, until: tag.name)
+                return [.permission(PostPermissionBlock(
+                    requirement: requirement,
+                    isUnlocked: true,
+                    // The header sits inside the same container, so drop it —
+                    // the view draws its own from `requirement`.
+                    blocks: inner,
+                    notice: "",
+                    buyersCount: buyers
+                ))]
+            }
+            // Locked — normalised from a `<span>` by
+            // `promotePermissionPlaceholders`. The notice is the server's own
+            // wording, already in the site's language and already carrying the
+            // amount and buyer count the plugin chose to disclose.
+            if classes.contains("permission-locked") {
+                let requirement = permissionRequirement(from: tag)
+                let notice = flattenedText(tokens, index: &index, closing: tag.name)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return [.permission(PostPermissionBlock(
+                    requirement: requirement,
+                    isUnlocked: false,
+                    blocks: [],
+                    notice: notice,
+                    buyersCount: nil
+                ))]
+            }
+            // The pay block whose amount exceeded the site maximum. Nothing to
+            // reveal and nothing to buy; the server's message explains it.
+            if classes.contains("permission-pay-error") {
+                let text = flattenedText(tokens, index: &index, closing: tag.name)
+                return [.permission(PostPermissionBlock(
+                    requirement: .pay(amount: 0),
+                    isUnlocked: false,
+                    blocks: [],
+                    notice: text,
+                    buyersCount: nil
+                ))]
+            }
             let inner = parseBlocks(tokens, index: &index, until: tag.name)
             return inner.isEmpty ? nil : inner
+
+        case "iframe":
+            // TikTok and every other provider Discourse embeds directly. The
+            // element used to fall through to the default branch, which parsed
+            // its (empty) children and dropped the video without a trace.
+            let source = tag.attributes["src"] ?? ""
+            // `index` already sits past the opening tag here, so a self-closing
+            // iframe needs no advance at all — only a paired one has a subtree
+            // to discard.
+            if !tag.isSelfClosing {
+                skipSubtree(tokens, index: &index, name: "iframe")
+            }
+            guard !source.isEmpty, let embed = iframeEmbed(from: tag, source: source) else {
+                return nil
+            }
+            return [.embed(embed)]
 
         case "h1", "h2", "h3", "h4", "h5", "h6":
             let level = Int(tag.name.dropFirst()) ?? 1
@@ -909,7 +1068,20 @@ nonisolated enum PostHTMLParser {
             let href = tag.attributes["href"] ?? ""
             if classes.contains("mention") {
                 let username = children.plainText.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
-                return username.isEmpty ? children : [.mention(username: username)]
+                guard !username.isEmpty else { return children }
+                return [.reference(PostReference(
+                    kind: .user,
+                    // The href is authoritative for the slug: the label carries
+                    // display casing (`@James`) that `/u/james` does not.
+                    slug: Self.mentionSlug(fromHref: href) ?? username,
+                    label: username,
+                    href: href.isEmpty ? "/u/\(username)" : href
+                ))]
+            }
+            if classes.contains("hashtag-cooked") || classes.contains("hashtag") {
+                if let reference = Self.hashtagReference(tag: tag, href: href, children: children) {
+                    return [reference]
+                }
             }
             if children.isEffectivelyEmpty { return [] }
             return href.isEmpty ? children : [.link(href: href, children: children)]
@@ -962,7 +1134,132 @@ nonisolated enum PostHTMLParser {
         }
     }
 
+    // MARK: Embeds
+
+    /// Rebuilds a YouTube embed from the lazy container's data attributes.
+    ///
+    /// Only YouTube is reconstructed by hand, because it is the only provider
+    /// that cooks *without* a src. Anything else arriving in this shape without
+    /// a recognisable id is left alone rather than guessed at.
+    private static func lazyVideoEmbed(from tag: HTMLTag) -> PostEmbed? {
+        guard let videoID = tag.attributes["data-video-id"], !videoID.isEmpty else {
+            return nil
+        }
+        let provider = tag.attributes["data-provider-name"]?.lowercased() ?? "youtube"
+        guard provider == "youtube" else { return nil }
+
+        var embedURL = "https://www.youtube.com/embed/\(videoID)?playsinline=1"
+        // Discourse keeps the `?t=` a reader linked with; honour it.
+        if let start = tag.attributes["data-video-start-time"], !start.isEmpty, Int(start) != nil {
+            embedURL += "&start=\(start)"
+        }
+        if let list = tag.attributes["data-video-list-id"], !list.isEmpty {
+            embedURL += "&list=\(list)"
+        }
+
+        return PostEmbed(
+            embedURL: embedURL,
+            pageURL: "https://www.youtube.com/watch?v=\(videoID)",
+            provider: "YouTube",
+            title: tag.attributes["data-video-title"].flatMap { $0.isEmpty ? nil : $0 },
+            thumbnailURL: "https://img.youtube.com/vi/\(videoID)/hqdefault.jpg"
+        )
+    }
+
+    /// A provider Discourse embedded directly, e.g.
+    /// `<iframe class="tiktok-onebox" src="https://www.tiktok.com/embed/v2/…">`.
+    private static func iframeEmbed(from tag: HTMLTag, source: String) -> PostEmbed? {
+        let url = URL(string: source)
+        let host = url?.host?.replacingOccurrences(of: "www.", with: "")
+        // `class="tiktok-onebox"` names the provider more precisely than the
+        // host of an embed subdomain would.
+        let fromClass = (tag.attributes["class"] ?? "")
+            .split(separator: " ")
+            .first { $0.hasSuffix("-onebox") }
+            .map { $0.replacingOccurrences(of: "-onebox", with: "") }
+
+        return PostEmbed(
+            embedURL: source,
+            // An embed address is not something to hand a reader as "open in
+            // browser"; only use it when it is clearly the watch page too.
+            pageURL: nil,
+            provider: providerDisplayName(fromClass ?? host),
+            title: tag.attributes["title"].flatMap { $0.isEmpty ? nil : $0 },
+            thumbnailURL: nil,
+            aspectRatio: embedAspectRatio(tag: tag, provider: fromClass ?? host ?? "")
+        )
+    }
+
+    /// House styling for the names readers recognise; anything else is just
+    /// capitalised, which is right for a bare host.
+    private static func providerDisplayName(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        switch raw.lowercased().replacingOccurrences(of: ".com", with: "") {
+        case "tiktok": return "TikTok"
+        case "youtube", "youtu.be": return "YouTube"
+        case "bilibili": return "Bilibili"
+        case "twitter", "x": return "X"
+        case "vimeo": return "Vimeo"
+        default: return raw.capitalized
+        }
+    }
+
+    /// Declared dimensions when the markup has them, else a per-provider guess.
+    /// TikTok is portrait and would be badly letterboxed at 16:9.
+    private static func embedAspectRatio(tag: HTMLTag, provider: String) -> CGFloat {
+        if let width = tag.attributes["width"].flatMap(Double.init),
+           let height = tag.attributes["height"].flatMap(Double.init),
+           width > 0, height > 0 {
+            return CGFloat(width / height)
+        }
+        return provider.contains("tiktok") ? 9 / 16 : 16 / 9
+    }
+
     // MARK: Helpers
+
+    /// Slug out of `/u/{username}`, ignoring anything deeper.
+    private static func mentionSlug(fromHref href: String) -> String? {
+        let segments = href.split(separator: "/").map(String.init)
+        guard let index = segments.firstIndex(of: "u"), index + 1 < segments.count else {
+            return nil
+        }
+        let slug = segments[index + 1]
+        return slug.isEmpty ? nil : slug
+    }
+
+    /// `<a class="hashtag-cooked" href="/tag/aff/39" data-type="tag"
+    /// data-slug="AFF">…<span>AFF</span></a>`, and the `data-type="category"`
+    /// variant pointing at `/c/{slug}/{id}`.
+    ///
+    /// The label comes from the children rather than `data-slug` so it keeps the
+    /// author's casing. Those children also hold an icon placeholder —
+    /// `<span class="hashtag-icon-placeholder"><svg><use/></svg></span>` — which
+    /// contributes no text, so flattening them is enough to isolate the name.
+    private static func hashtagReference(
+        tag: HTMLTag,
+        href: String,
+        children: [PostInline]
+    ) -> PostInline? {
+        let kind: PostReference.Kind = tag.attributes["data-type"] == "category" ? .node : .tag
+        let dataSlug = tag.attributes["data-slug"]
+        let flattened = children.plainText.trimmingCharacters(in: CharacterSet(charactersIn: "# \n\t"))
+        // Prefer the href's slug: it is the lowercased, route-ready form.
+        let slug = hashtagSlug(fromHref: href, kind: kind) ?? dataSlug ?? flattened
+        let label = flattened.isEmpty ? (dataSlug ?? slug) : flattened
+
+        guard !slug.isEmpty, !label.isEmpty else { return nil }
+        return .reference(PostReference(kind: kind, slug: slug, label: label, href: href))
+    }
+
+    /// `/tag/{slug}/{id}` or `/c/{slug}/{id}` — the slug is the last segment
+    /// that isn't the trailing numeric id.
+    private static func hashtagSlug(fromHref href: String, kind: PostReference.Kind) -> String? {
+        let segments = href.split(separator: "/").map(String.init)
+        let marker = kind == .node ? "c" : "tag"
+        guard let index = segments.firstIndex(of: marker) else { return nil }
+        let rest = segments[segments.index(after: index)...].filter { Int($0) == nil }
+        return rest.last
+    }
 
     private static func imageBlock(from tag: HTMLTag, href: String?) -> PostImage {
         PostImage(

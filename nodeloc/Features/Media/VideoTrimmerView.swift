@@ -47,7 +47,7 @@ struct ComposeVideoTile: View {
                         .frame(width: 28, height: 28)
                         .background(Color.black.opacity(0.62), in: Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .padding(8)
             }
             // Headroom so the badge isn't clipped by the surrounding stack.
@@ -518,7 +518,7 @@ struct VideoTrimmerView: View {
             Button("返回") { dismiss() }
                 .font(Theme.body(15))
                 .foregroundStyle(.white)
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
 
             Spacer()
 
@@ -530,7 +530,7 @@ struct VideoTrimmerView: View {
                     .foregroundStyle(.white)
                     .frame(width: 52, height: 44)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
 
             Spacer()
 
@@ -547,7 +547,7 @@ struct VideoTrimmerView: View {
                 }
                 .foregroundStyle(.white)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .disabled(state.isExporting)
         }
         .padding(.horizontal, 20)

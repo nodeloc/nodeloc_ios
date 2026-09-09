@@ -5,8 +5,9 @@
 
 import SwiftUI
 
-/// Internal (not file-private): the system search field lives in MainView's
-/// tab bar, so its `.searchScopes` needs this type too.
+/// Internal (not file-private): the app-wide selection lives on `AppState`,
+/// because the search field in MainView's tab bar writes the query that
+/// screen-mode search reads.
 enum SearchScope: String, CaseIterable {
     case all = "全部"
     case nodes = "节点"
@@ -14,6 +15,20 @@ enum SearchScope: String, CaseIterable {
     case users = "用户"
     case apps = "应用"
     case media = "媒体"
+
+    /// The raw values double as identifiers, and an enum's raw value has to be
+    /// a compile-time constant — so the words shown to the user come from here
+    /// instead.
+    var label: String {
+        switch self {
+        case .all: return AppString("全部")
+        case .nodes: return AppString("节点")
+        case .posts: return AppString("帖子")
+        case .users: return AppString("用户")
+        case .apps: return AppString("应用")
+        case .media: return AppString("媒体")
+        }
+    }
 }
 
 struct SearchView: View {
@@ -71,9 +86,24 @@ private struct SearchExperience: View {
         ZStack(alignment: .bottom) {
             backdrop
 
-            searchContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.bottom, isOverlay ? 0 : 12)
+            VStack(spacing: 0) {
+                // Screen mode used to get its scope row from the system's
+                // `.searchScopes`, which only shows while the search field is
+                // *presented* — so it hung off a presentation binding that the
+                // system writes too, and went missing whenever the two
+                // disagreed. This is the same bar the overlay draws, owned by
+                // the app, so it is simply always there.
+                if !isOverlay {
+                    scopeBar
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        .padding(.bottom, 6)
+                }
+
+                searchContent
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.bottom, isOverlay ? 0 : 12)
 
             if isOverlay {
                 telegramSearchControls
@@ -104,7 +134,12 @@ private struct SearchExperience: View {
             }
         }
         .onChange(of: query) { _, newValue in
-            Task { await store.search(newValue) }
+            Task { await store.search(newValue, scope: activeScope) }
+        }
+        // Scopes aren't a filter over one payload — each is answered by a
+        // different endpoint — so changing scope refetches.
+        .onChange(of: activeScope) { _, newScope in
+            Task { await store.search(query, scope: newScope) }
         }
         // Screen mode types into the system field in the tab bar (.searchable
         // in MainView); mirror it into the local query that drives results.
@@ -158,7 +193,7 @@ private struct SearchExperience: View {
             // Hidden entirely when there is nothing to show, rather than an
             // empty heading over blank space.
             if !history.entries.isEmpty {
-                sectionHeader(title: "最近", trailing: "历史记录") {
+                sectionHeader(title: AppString("最近"), trailing: AppString("历史记录")) {
                     showHistory = true
                 }
                 .padding(.bottom, 12)
@@ -177,13 +212,13 @@ private struct SearchExperience: View {
                                 onTrailingTap: { history.remove(term) }
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 .padding(.bottom, 24)
             }
 
-            sectionHeader(title: "热门", trailing: nil)
+            sectionHeader(title: AppString("热门"), trailing: nil)
                 .padding(.bottom, 12)
 
             VStack(spacing: 0) {
@@ -194,12 +229,12 @@ private struct SearchExperience: View {
                         RedditSearchRow(
                             icon: "arrow.up.right",
                             title: title,
-                            subtitle: "根据你的兴趣",
+                            subtitle: AppString("根据你的兴趣"),
                             badge: nil,
                             trailingIcon: nil
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
         }
@@ -212,11 +247,6 @@ private struct SearchExperience: View {
         isOverlay ? selectedScope : app.searchScope
     }
 
-    /// Topics that carry media, for the 媒体 scope.
-    private var mediaResults: [Post] {
-        store.results.filter { !$0.media.isEmpty || $0.videoURL != nil }
-    }
-
     private var scopedResultsAreEmpty: Bool {
         switch activeScope {
         case .all:
@@ -225,7 +255,7 @@ private struct SearchExperience: View {
         case .posts: return store.results.isEmpty
         case .users: return store.userResults.isEmpty
         case .apps: return store.appResults.isEmpty
-        case .media: return mediaResults.isEmpty
+        case .media: return store.mediaResults.isEmpty
         }
     }
 
@@ -243,15 +273,15 @@ private struct SearchExperience: View {
                 // Discourse's default mixed result: nodes and users first
                 // (capped, like the web's grouped search), then the topics.
                 if !store.nodeResults.isEmpty {
-                    sectionHeader(title: "节点", trailing: nil)
+                    sectionHeader(title: AppString("节点"), trailing: nil)
                     ForEach(store.nodeResults.prefix(3)) { nodeRow($0) }
                 }
                 if !store.userResults.isEmpty {
-                    sectionHeader(title: "用户", trailing: nil)
+                    sectionHeader(title: AppString("用户"), trailing: nil)
                     ForEach(store.userResults.prefix(3)) { userRow($0) }
                 }
                 if !store.results.isEmpty, !store.nodeResults.isEmpty || !store.userResults.isEmpty {
-                    sectionHeader(title: "帖子", trailing: nil)
+                    sectionHeader(title: AppString("帖子"), trailing: nil)
                 }
                 postCards(store.results)
             case .nodes:
@@ -263,11 +293,11 @@ private struct SearchExperience: View {
             case .apps:
                 ForEach(store.appResults) { appRow($0) }
             case .media:
-                postCards(mediaResults)
+                postCards(store.mediaResults)
             }
 
             if !store.isSearching && scopedResultsAreEmpty {
-                EmptyStateView(icon: "magnifyingglass", message: "没有找到相关内容")
+                EmptyStateView(icon: "magnifyingglass", message: AppString("没有找到相关内容"))
                 .frame(maxWidth: .infinity)
                 .padding(.top, 54)
             }
@@ -320,7 +350,7 @@ private struct SearchExperience: View {
             .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func nodeRow(_ node: SearchNodeResult) -> some View {
@@ -351,7 +381,7 @@ private struct SearchExperience: View {
             .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func appRow(_ item: DirectoryApp) -> some View {
@@ -385,7 +415,7 @@ private struct SearchExperience: View {
             .padding(.vertical, 8)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private var telegramSearchControls: some View {
@@ -402,9 +432,9 @@ private struct SearchExperience: View {
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(Theme.text)
                         .frame(width: 50, height: 50)
-                        .glassEffect(.regular.interactive(), in: Circle())
+                        .glassSurface(interactive: true, in: .circle)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .shadow(color: .black.opacity(0.08), radius: 12, y: 7)
             }
         }
@@ -413,32 +443,44 @@ private struct SearchExperience: View {
         .padding(.bottom, 8)
     }
 
+    /// Which scope the bar drives, which differs by mode: the overlay keeps its
+    /// own choice, while the screen writes the app-wide one that external
+    /// scoping (`#slug` from a node page) also sets. `activeScope` reads the
+    /// same pair, so the two can't drift.
+    private var scopeSelection: Binding<SearchScope> {
+        isOverlay
+            ? Binding(get: { selectedScope }, set: { selectedScope = $0 })
+            : Binding(get: { app.searchScope }, set: { app.searchScope = $0 })
+    }
+
     private var scopeBar: some View {
-        GlassEffectContainer(spacing: 0) {
+        let selection = scopeSelection
+
+        return GlassContainer(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal) {
                     HStack(spacing: 4) {
                         ForEach(SearchScope.allCases, id: \.self) { scope in
                             Button {
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                                    selectedScope = scope
+                                    selection.wrappedValue = scope
                                     proxy.scrollTo(scope, anchor: .center)
                                 }
                             } label: {
-                                Text(scope.rawValue)
+                                Text(scope.label)
                                     .font(Theme.body(14, weight: .semibold))
-                                    .foregroundStyle(selectedScope == scope ? Theme.text : Theme.text.opacity(0.84))
+                                    .foregroundStyle(selection.wrappedValue == scope ? Theme.text : Theme.text.opacity(0.84))
                                     .padding(.horizontal, 15)
                                     .frame(height: 38)
                                     .background {
-                                        if selectedScope == scope {
+                                        if selection.wrappedValue == scope {
                                             Capsule()
                                                 .fill(Theme.neutral400.opacity(0.62))
                                                 .matchedGeometryEffect(id: "scope-selection", in: scopeSelectionNamespace)
                                         }
                                     }
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.pressable)
                             .id(scope)
                         }
                     }
@@ -446,15 +488,15 @@ private struct SearchExperience: View {
                 }
                 .scrollIndicators(.hidden)
                 .onAppear {
-                    proxy.scrollTo(selectedScope, anchor: .center)
+                    proxy.scrollTo(selection.wrappedValue, anchor: .center)
                 }
-                .onChange(of: selectedScope) { _, newValue in
+                .onChange(of: activeScope) { _, newValue in
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                         proxy.scrollTo(newValue, anchor: .center)
                     }
                 }
             }
-            .glassEffect(.regular, in: Capsule())
+            .glassSurface()
         }
         .shadow(color: .black.opacity(0.08), radius: 12, y: 7)
     }
@@ -485,12 +527,12 @@ private struct SearchExperience: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Theme.muted(0.35))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.horizontal, 15)
         .frame(height: 50)
-        .glassEffect(.regular.interactive(), in: Capsule())
+        .glassSurface(interactive: true)
         .shadow(color: .black.opacity(0.08), radius: 12, y: 7)
     }
 
@@ -516,7 +558,7 @@ private struct SearchExperience: View {
                     .font(Theme.body(14, weight: .semibold))
                     .foregroundStyle(Theme.muted(0.58))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
     }
@@ -525,11 +567,12 @@ private struct SearchExperience: View {
     /// the keyboard so the results are visible immediately.
     private func apply(_ term: String) {
         query = term
-        // Screen mode's visible field is the system one: sync the text and ask
-        // MainView to present search, or the scope row stays hidden.
+        // Screen mode's visible field is the system one, so the text has to be
+        // mirrored into it. It no longer asks for search to be *presented*:
+        // that was only ever to coax the system scope row out, and the scope
+        // bar is drawn here now.
         if !isOverlay {
             app.searchQuery = term
-            app.searchActivationRequested = true
         }
         history.record(term)
         searchFocused = false
@@ -585,7 +628,7 @@ private struct SearchHistorySheet: View {
             }
             // Clearing everything can't be undone, so it asks first.
             .confirmationDialog(
-                "清空全部历史记录？",
+                AppString("清空全部历史记录？"),
                 isPresented: $confirmingClear,
                 titleVisibility: .visible
             ) {
@@ -625,7 +668,7 @@ private struct SearchHistorySheet: View {
                                     .frame(width: 28, height: 28)
                                     .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.pressable)
                             .accessibilityLabel("删除 \(term)")
                         }
                         .padding(.horizontal, 18)
@@ -633,7 +676,7 @@ private struct SearchHistorySheet: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
 
                     Divider().padding(.leading, 58)
                 }
@@ -644,7 +687,7 @@ private struct SearchHistorySheet: View {
     }
 
     private var emptyState: some View {
-        EmptyStateView(icon: "clock", message: "还没有搜索记录")
+        EmptyStateView(icon: "clock", message: AppString("还没有搜索记录"))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -708,7 +751,7 @@ private struct RedditSearchRow: View {
                     Button(action: onTrailingTap) {
                         glyph.contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .accessibilityLabel("删除")
                 } else {
                     glyph

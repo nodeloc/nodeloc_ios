@@ -32,9 +32,9 @@ nonisolated enum PollKind: String, Sendable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .regular: "单选"
-        case .multiple: "多选"
-        case .number: "评分"
+        case .regular: AppString("单选")
+        case .multiple: AppString("多选")
+        case .number: AppString("评分")
         }
     }
 }
@@ -49,10 +49,10 @@ nonisolated enum PollResultVisibility: String, Sendable, CaseIterable, Identifia
 
     var label: String {
         switch self {
-        case .always: "始终公开"
-        case .onVote: "投票后可见"
-        case .onClose: "结束后可见"
-        case .staffOnly: "仅管理员"
+        case .always: AppString("始终公开")
+        case .onVote: AppString("投票后可见")
+        case .onClose: AppString("结束后可见")
+        case .staffOnly: AppString("仅管理员")
         }
     }
 }
@@ -70,11 +70,11 @@ nonisolated enum PollDuration: Int, Sendable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .never: "不自动结束"
-        case .oneDay: "1 天"
-        case .threeDays: "3 天"
-        case .sevenDays: "7 天"
-        case .thirtyDays: "30 天"
+        case .never: AppString("不自动结束")
+        case .oneDay: AppString("1 天")
+        case .threeDays: AppString("3 天")
+        case .sevenDays: AppString("7 天")
+        case .thirtyDays: AppString("30 天")
         }
     }
 
@@ -118,18 +118,18 @@ nonisolated struct PollDraft: Sendable, Equatable {
     func validationError(maximumOptions: Int) -> String? {
         let filled = filledOptions
         if filled.count < 1 {
-            return "投票至少需要一个选项。"
+            return AppString("投票至少需要一个选项。")
         }
         if filled.count > maximumOptions {
-            return "投票最多 \(maximumOptions) 个选项。"
+            return AppString("投票最多 \(maximumOptions) 个选项。")
         }
         if Set(filled).count != filled.count {
-            return "选项不能重复。"
+            return AppString("选项不能重复。")
         }
         if kind == .multiple {
-            if minChoices < 1 { return "最少可选数至少为 1。" }
-            if maxChoices > filled.count { return "最多可选数不能超过选项数量。" }
-            if minChoices > maxChoices { return "最少可选数不能大于最多可选数。" }
+            if minChoices < 1 { return AppString("最少可选数至少为 1。") }
+            if maxChoices > filled.count { return AppString("最多可选数不能超过选项数量。") }
+            if minChoices > maxChoices { return AppString("最少可选数不能大于最多可选数。") }
         }
         return nil
     }
@@ -189,22 +189,22 @@ nonisolated struct RedEnvelopeDraft: Sendable, Equatable {
     /// Mirrors `isValid`/`errorMessage` in red-envelope-composer.gjs and the
     /// server-side checks in red_envelope_service.rb.
     func validationError(limits: RedEnvelopeLimits, userPoints: Int?) -> String? {
-        guard let points, let count else { return "请填写能量总数和红包个数。" }
-        if points <= 0 || count <= 0 { return "能量和个数必须大于 0。" }
+        guard let points, let count else { return AppString("请填写能量总数和红包个数。") }
+        if points <= 0 || count <= 0 { return AppString("能量和个数必须大于 0。") }
         if count < limits.minCount || count > limits.maxCount {
-            return "红包个数需在 \(limits.minCount)–\(limits.maxCount) 之间。"
+            return AppString("红包个数需在 \(limits.minCount)–\(limits.maxCount) 之间。")
         }
         if points < limits.minPoints {
-            return "红包总能量至少 \(limits.minPoints)。"
+            return AppString("红包总能量至少 \(limits.minPoints)。")
         }
         if points < count {
-            return "总能量不能少于红包个数。"
+            return AppString("总能量不能少于红包个数。")
         }
         if points < count * limits.minAveragePoints {
-            return "每个红包平均至少 \(limits.minAveragePoints) 能量，当前需要 \(count * limits.minAveragePoints)。"
+            return AppString("每个红包平均至少 \(limits.minAveragePoints) 能量，当前需要 \(count * limits.minAveragePoints)。")
         }
         if let userPoints, points > userPoints {
-            return "你的能量不足（当前 \(userPoints)）。"
+            return AppString("你的能量不足（当前 \(userPoints)）。")
         }
         return nil
     }
@@ -266,30 +266,30 @@ nonisolated struct LotteryDraft: Sendable, Equatable {
     /// Mirrors `disableSave` + the validation getters in lottery-ui-builder.gjs.
     func validationError(limits: LotteryLimits, now: Date = Date()) -> String? {
         if title.trimmingCharacters(in: .whitespaces).isEmpty {
-            return "请填写抽奖标题。"
+            return AppString("请填写抽奖标题。")
         }
         if minParticipants < 1 {
-            return "最少参与人数至少为 1。"
+            return AppString("最少参与人数至少为 1。")
         }
         if let max = parsedMaxParticipants, minParticipants >= max {
-            return "最少参与人数必须小于最多参与人数。"
+            return AppString("最少参与人数必须小于最多参与人数。")
         }
         if maxTicketsPerUser < 1 {
-            return "每人最多票数至少为 1。"
+            return AppString("每人最多票数至少为 1。")
         }
         guard let drawAt else {
-            return "请选择开奖时间。"
+            return AppString("请选择开奖时间。")
         }
         if drawAt <= now {
-            return "开奖时间必须晚于现在。"
+            return AppString("开奖时间必须晚于现在。")
         }
         if limits.maxDrawDays > 0,
            let latest = Calendar.current.date(byAdding: .day, value: limits.maxDrawDays, to: now),
            drawAt > latest {
-            return "开奖时间最多为 \(limits.maxDrawDays) 天后。"
+            return AppString("开奖时间最多为 \(limits.maxDrawDays) 天后。")
         }
         if completeLevels.isEmpty {
-            return "至少需要一个完整的奖项（名称和奖品）。"
+            return AppString("至少需要一个完整的奖项（名称和奖品）。")
         }
         return nil
     }
@@ -406,7 +406,7 @@ struct PollComposerCard: View {
                 Toggle("公开投票人", isOn: $draft.isPublic)
             } label: {
                 HStack(spacing: 4) {
-                    Text(draft.duration == .never ? "投票不自动结束" : "投票结束于 \(draft.duration.label)")
+                    Text(draft.duration == .never ? AppString("投票不自动结束") : AppString("投票结束于 \(draft.duration.label)"))
                         .font(Theme.body(14, weight: .medium))
                         .foregroundStyle(Theme.text)
                     Image(systemName: "chevron.down")
@@ -424,7 +424,7 @@ struct PollComposerCard: View {
                     .frame(width: 26, height: 26)
                     .background(Theme.muted(0.45), in: Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
         }
     }
 
@@ -448,7 +448,7 @@ struct PollComposerCard: View {
                         .foregroundStyle(Theme.muted(0.5))
                         .frame(width: 22, height: 22)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.horizontal, 10)
@@ -474,7 +474,7 @@ struct PollComposerCard: View {
             .frame(height: 38)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private var multipleChoiceRow: some View {
@@ -488,12 +488,12 @@ struct PollComposerCard: View {
             // the row wider than the composer.
             VStack(alignment: .trailing, spacing: 4) {
                 Stepper(
-                    "最少 \(draft.minChoices)",
+                    AppString("最少 \(draft.minChoices)"),
                     value: $draft.minChoices,
                     in: 1...max(1, draft.filledOptions.count)
                 )
                 Stepper(
-                    "最多 \(draft.maxChoices)",
+                    AppString("最多 \(draft.maxChoices)"),
                     value: $draft.maxChoices,
                     in: 1...max(1, draft.filledOptions.count)
                 )
@@ -606,7 +606,7 @@ struct RedEnvelopeChip: View {
                     .foregroundStyle(Theme.muted(0.6))
                     .frame(width: 26, height: 26)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
         }
         .padding(12)
         .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -655,7 +655,7 @@ struct LotterySheet: View {
                             .multilineTextAlignment(.trailing)
                     }
                     DatePicker(
-                        "开奖时间",
+                        AppString("开奖时间"),
                         selection: Binding(
                             get: { working.drawAt ?? defaultDrawDate },
                             set: { working.drawAt = $0 }
@@ -673,7 +673,7 @@ struct LotterySheet: View {
                             .multilineTextAlignment(.trailing)
                     }
                     Stepper(
-                        "每人最多 \(working.maxTicketsPerUser) 票",
+                        AppString("每人最多 \(working.maxTicketsPerUser) 票"),
                         value: $working.maxTicketsPerUser,
                         in: limits.minTicketsPerUser...max(limits.minTicketsPerUser, limits.maxTicketsPerUser)
                     )
@@ -683,7 +683,14 @@ struct LotterySheet: View {
                         }
                     }
                 } footer: {
-                    Text("参与者每张票消耗 1 能量，开奖后归发起人。人数不足会流抽并原路退还。")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("参与者每张票消耗 1 能量，开奖后归发起人。人数不足会流抽并原路退还。")
+                        // Guideline 5.3.2: the rules have to be reachable in the
+                        // app, and the prize limit is what keeps this a points
+                        // game rather than a raffle with real-world stakes.
+                        Text("奖品仅限站内虚拟物品（能量、徽章、头衔等），不得为现金、实物或可兑换站外权益的物品。")
+                        LotteryRulesLink()
+                    }
                 }
 
                 Section("奖项") {
@@ -755,10 +762,10 @@ struct LotterySheet: View {
                         Image(systemName: "minus.circle.fill")
                             .foregroundStyle(Theme.danger)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
-            TextField("奖品", text: level.prize)
+            TextField("奖品（限站内虚拟物品）", text: level.prize)
             Stepper("数量 \(level.wrappedValue.quantity)", value: level.quantity, in: 1...10_000)
         }
         .font(Theme.body(14))
@@ -787,7 +794,7 @@ struct LotteryChip: View {
                 .foregroundStyle(Theme.accent2)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(draft.title.isEmpty ? "抽奖" : draft.title)
+                Text(draft.title.isEmpty ? AppString("抽奖") : draft.title)
                     .font(Theme.body(14, weight: .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
@@ -805,7 +812,7 @@ struct LotteryChip: View {
                     .foregroundStyle(Theme.muted(0.6))
                     .frame(width: 26, height: 26)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
         }
         .padding(12)
         .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -819,18 +826,22 @@ struct LotteryChip: View {
 
     private var summary: String {
         let prizes = draft.completeLevels.reduce(0) { $0 + max(1, $1.quantity) }
-        var parts = ["\(draft.completeLevels.count) 个奖项 · \(prizes) 份奖品"]
+        var parts = [AppString("\(draft.completeLevels.count) 个奖项 · \(prizes) 份奖品")]
         if let drawAt = draft.drawAt {
-            parts.append(Self.dateFormat.string(from: drawAt) + " 开奖")
+            parts.append(Self.dateFormat.string(from: drawAt) + AppString(" 开奖"))
         }
         return parts.joined(separator: " · ")
     }
 
-    private static let dateFormat: DateFormatter = {
+    /// Deliberately not a `static let`: a cached formatter would freeze the
+    /// language at whichever one was current the first time it was touched, and
+    /// the interface language can change while the app is running.
+    private static var dateFormat: DateFormatter {
         let formatter = DateFormatter()
-        formatter.dateFormat = "M月d日 HH:mm"
+        formatter.locale = AppLanguage.resolved.locale
+        formatter.setLocalizedDateFormatFromTemplate("MdHm")
         return formatter
-    }()
+    }
 }
 
 #Preview("投票卡片") {
@@ -844,11 +855,11 @@ struct LotteryChip: View {
 
 #Preview("抽奖卡片") {
     var d = LotteryDraft()
-    d.title = "抽 5 台小鸡"
+    d.title = AppString("抽 5 台小鸡")
     d.drawAt = Date().addingTimeInterval(86_400 * 3)
     d.levels = [
-        LotteryLevel(name: "一等奖", prize: "1H1G VPS", quantity: 2),
-        LotteryLevel(name: "二等奖", prize: "512M VPS", quantity: 8),
+        LotteryLevel(name: AppString("一等奖"), prize: "1H1G VPS", quantity: 2),
+        LotteryLevel(name: AppString("二等奖"), prize: "512M VPS", quantity: 8),
     ]
     return VStack {
         LotteryChip(draft: d, onTap: {}, onRemove: {})

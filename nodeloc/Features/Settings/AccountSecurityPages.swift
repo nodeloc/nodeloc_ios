@@ -21,25 +21,44 @@ struct AssociatedAccountsPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsPageHeader(title: "关联账户", onClose: onClose)
+            SettingsPageHeader(title: AppString("关联账户"), onClose: onClose)
             ScrollView {
                 VStack(spacing: 0) {
                     if store.associatedAccounts.isEmpty {
-                        EmptyStateView(icon: "link", message: "还没有关联的账户")
+                        EmptyStateView(icon: "link", message: AppString("还没有关联的账户"))
                             .padding(.top, 60)
                     } else {
-                        SettingsSection(title: "已关联") {
+                        SettingsSection(title: AppString("已关联")) {
                             ForEach(store.associatedAccounts) { account in
                                 accountRow(account)
                             }
                         }
                     }
 
+                    // Apple gets a native row: it is the one provider iOS can
+                    // authorize without a web round-trip, and binding it here
+                    // is what keeps an existing account from being duplicated
+                    // the first time someone signs in with Apple.
+                    if !store.hasAppleAccount {
+                        SettingsSection(
+                            title: AppString("绑定 Apple"),
+                            footer: AppString("绑定后即可用 Apple 登录这个账号，不会新建账号。")
+                        ) {
+                            NativeAppleSignInButton(
+                                perform: { await store.linkApple($0) },
+                                onFallbackToWeb: { openWeb("/my/preferences/account") },
+                                height: SocialAuthButtonStyle.height
+                            )
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                        }
+                    }
+
                     SettingsSection(
-                        title: "连接",
-                        footer: "连接新账户需要在网页中授权，将在内置浏览器中打开。"
+                        title: AppString("连接"),
+                        footer: AppString("连接新账户需要在网页中授权，将在内置浏览器中打开。")
                     ) {
-                        SettingsNavRow(title: "连接新账户", icon: "plus.circle") {
+                        SettingsNavRow(title: AppString("连接新账户"), icon: "plus.circle") {
                             openWeb("/my/preferences/account")
                         }
                     }
@@ -51,7 +70,7 @@ struct AssociatedAccountsPage: View {
         .background(Theme.bg.ignoresSafeArea())
         .task { await store.load() }
         .confirmationDialog(
-            "断开与 \(pendingRevoke?.name ?? "") 的关联？",
+            AppString("断开与 \(pendingRevoke?.name ?? "") 的关联？"),
             isPresented: Binding(get: { pendingRevoke != nil }, set: { if !$0 { pendingRevoke = nil } }),
             titleVisibility: .visible
         ) {
@@ -74,7 +93,7 @@ struct AssociatedAccountsPage: View {
             Button("断开") { pendingRevoke = account }
                 .font(Theme.body(13, weight: .semibold))
                 .foregroundStyle(Theme.danger)
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.divider).frame(height: 1).padding(.leading, 20) }
@@ -96,7 +115,7 @@ struct SecurityPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsPageHeader(title: "安全性", onClose: onClose)
+            SettingsPageHeader(title: AppString("安全性"), onClose: onClose)
             ScrollView {
                 VStack(spacing: 0) {
                     passwordSection
@@ -131,10 +150,10 @@ struct SecurityPage: View {
 
     private var passwordSection: some View {
         SettingsSection(
-            title: "密码",
-            footer: "为安全起见，密码只能通过邮件中的链接修改。"
+            title: AppString("密码"),
+            footer: AppString("为安全起见，密码只能通过邮件中的链接修改。")
         ) {
-            SettingsNavRow(title: "更改密码", icon: "key") {
+            SettingsNavRow(title: AppString("更改密码"), icon: "key") {
                 Task { await store.requestPasswordReset(); showPasswordSent = true }
             }
         }
@@ -143,7 +162,7 @@ struct SecurityPage: View {
     // MARK: 2FA
 
     private var twoFactorSection: some View {
-        SettingsSection(title: "两步验证") {
+        SettingsSection(title: AppString("两步验证")) {
             if store.totpEnabled {
                 HStack {
                     Label("身份验证器", systemImage: "checkmark.shield.fill")
@@ -154,11 +173,11 @@ struct SecurityPage: View {
                 .padding(.horizontal, 20).padding(.vertical, 12)
                 .overlay(alignment: .bottom) { rowLine }
 
-                SettingsNavRow(title: "关闭两步验证", icon: "shield.slash", isDestructive: true) {
+                SettingsNavRow(title: AppString("关闭两步验证"), icon: "shield.slash", isDestructive: true) {
                     runConfirmed { await store.disableTOTP() }
                 }
             } else {
-                SettingsNavRow(title: "设置身份验证器", icon: "shield") {
+                SettingsNavRow(title: AppString("设置身份验证器"), icon: "shield") {
                     runConfirmed { showTOTPSetup = true }
                 }
             }
@@ -170,12 +189,12 @@ struct SecurityPage: View {
     @ViewBuilder
     private var sessionsSection: some View {
         if !store.sessions.isEmpty {
-            SettingsSection(title: "登录设备") {
+            SettingsSection(title: AppString("登录设备")) {
                 ForEach(store.sessions) { token in
                     sessionRow(token)
                 }
                 if store.sessions.contains(where: { $0.isActive != true }) {
-                    SettingsNavRow(title: "注销所有其它设备", icon: "arrow.right.square", isDestructive: true) {
+                    SettingsNavRow(title: AppString("注销所有其它设备"), icon: "arrow.right.square", isDestructive: true) {
                         runConfirmed { await store.revokeAllOtherSessions() }
                     }
                 }
@@ -186,7 +205,7 @@ struct SecurityPage: View {
     private func sessionRow(_ token: UserAuthToken) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(token.clientName ?? token.osName ?? "未知设备")
+                Text(token.clientName ?? token.osName ?? AppString("未知设备"))
                     .font(Theme.body(14)).foregroundStyle(Theme.text)
                 if let seen = token.seenAt {
                     Text(seen).font(Theme.body(11)).foregroundStyle(Theme.muted(0.5)).lineLimit(1)
@@ -198,7 +217,7 @@ struct SecurityPage: View {
             } else {
                 Button("注销") { Task { await store.revokeSession(token) } }
                     .font(Theme.body(13, weight: .semibold)).foregroundStyle(Theme.danger)
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
@@ -209,10 +228,10 @@ struct SecurityPage: View {
 
     private var securityKeySection: some View {
         SettingsSection(
-            title: "安全密钥与通行密钥",
-            footer: "安全密钥需要在网页中注册，将在内置浏览器中打开。"
+            title: AppString("安全密钥与通行密钥"),
+            footer: AppString("安全密钥需要在网页中注册，将在内置浏览器中打开。")
         ) {
-            SettingsNavRow(title: "管理安全密钥", icon: "key.horizontal") {
+            SettingsNavRow(title: AppString("管理安全密钥"), icon: "key.horizontal") {
                 openWeb("/my/preferences/security")
             }
         }
@@ -303,7 +322,7 @@ private struct TOTPSetupSheet: View {
 
     @State private var setup: TOTPCreateResponse?
     @State private var code = ""
-    @State private var deviceName = "身份验证器"
+    @State private var deviceName = AppString("身份验证器")
     @State private var backupCodes: [String] = []
     @State private var isWorking = false
     @State private var enabled = false
@@ -325,7 +344,7 @@ private struct TOTPSetupSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(enabled ? "完成" : "取消") { dismiss() }
+                    Button(enabled ? AppString("完成") : AppString("取消")) { dismiss() }
                 }
             }
         }
@@ -429,8 +448,7 @@ struct SettingsPageHeader: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
             Text(title).font(Theme.body(15, weight: .medium))
             Spacer()
         }

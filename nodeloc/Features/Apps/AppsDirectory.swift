@@ -27,7 +27,7 @@ struct AppsDirectoryOverlay: View {
 
             ScrollView {
                 if store.isLoading && store.apps.isEmpty {
-                    NodelocLoader()
+                    ProgressView().tint(Theme.accent)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 60)
                 } else if store.visibleApps.isEmpty {
@@ -35,7 +35,7 @@ struct AppsDirectoryOverlay: View {
                         Image(systemName: "square.grid.2x2")
                             .font(.system(size: 26, weight: .semibold))
                             .foregroundStyle(Theme.muted(0.35))
-                        Text(store.errorText ?? "没有找到应用")
+                        Text(store.errorText ?? AppString("没有找到应用"))
                             .font(Theme.body(13))
                             .foregroundStyle(Theme.muted(0.5))
                     }
@@ -52,7 +52,7 @@ struct AppsDirectoryOverlay: View {
                             } label: {
                                 AppTile(app: item)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.pressable)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -75,8 +75,7 @@ struct AppsDirectoryOverlay: View {
                         .foregroundStyle(Theme.text)
                         .frame(width: 34, height: 34)
                 }
-                .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-                .buttonBorderShape(.circle)
+                .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
 
                 Spacer()
 
@@ -147,6 +146,10 @@ struct AppDetailOverlay: View {
     @State private var installID: Int?
     @State private var isResolving = true
     @State private var webviewTarget: WebviewTarget?
+    /// Guideline 4.7.5 — the declared-age prompt.
+    @State private var showAgeGate = false
+    /// Guideline 4.7.3 — install id held while this app's scopes are reviewed.
+    @State private var pendingLaunch: Int?
 
     /// `fullScreenCover(item:)` needs an Identifiable payload.
     private struct WebviewTarget: Identifiable {
@@ -209,6 +212,28 @@ struct AppDetailOverlay: View {
                 }
             }
         }
+        .sheet(isPresented: $showAgeGate) {
+            MiniAppAgeGateSheet()
+        }
+        .sheet(isPresented: pendingLaunchPresented) {
+            if let item, let installID = pendingLaunch {
+                MiniAppConsentSheet(app: item) {
+                    MiniAppGate.recordConsent(for: item.slug)
+                    pendingLaunch = nil
+                    webviewTarget = WebviewTarget(
+                        url: client.appWebviewURL(installID: installID),
+                        installID: installID
+                    )
+                }
+            }
+        }
+    }
+
+    private var pendingLaunchPresented: Binding<Bool> {
+        Binding(
+            get: { pendingLaunch != nil },
+            set: { if !$0 { pendingLaunch = nil } }
+        )
     }
 
     private var header: some View {
@@ -221,8 +246,7 @@ struct AppDetailOverlay: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
 
             Spacer()
 
@@ -232,8 +256,7 @@ struct AppDetailOverlay: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -280,9 +303,20 @@ struct AppDetailOverlay: View {
         HStack(spacing: 10) {
             // Only webview apps can run natively, and only once an install id
             // resolves — otherwise the discussion is the only entry point.
-            if item.isWebview {
+            if item.isWebview, FeatureFlags.shared.miniAppsEnabled {
                 Button {
                     guard let installID else { return }
+                    // Guideline 4.7.5 then 4.7.3: an age has to be declared,
+                    // and this particular app's scopes accepted, before any of
+                    // its code runs.
+                    guard MiniAppGate.isAgeSatisfied else {
+                        showAgeGate = true
+                        return
+                    }
+                    guard MiniAppGate.hasConsented(to: item.slug) else {
+                        pendingLaunch = installID
+                        return
+                    }
                     webviewTarget = WebviewTarget(
                         url: client.appWebviewURL(installID: installID),
                         installID: installID
@@ -302,7 +336,7 @@ struct AppDetailOverlay: View {
                     .frame(height: 44)
                     .background(installID == nil ? Theme.muted(0.3) : Theme.accent, in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .disabled(installID == nil)
             }
 
@@ -315,7 +349,7 @@ struct AppDetailOverlay: View {
                     .background(Theme.surface, in: Capsule())
                     .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .disabled(item.hostTopicID == nil)
         }
     }
@@ -362,6 +396,7 @@ struct AppWebViewOverlay: View {
 
     @State private var isLoading = true
     @State private var showAbout = false
+    @State private var showFlag = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -377,6 +412,26 @@ struct AppWebViewOverlay: View {
         .sheet(isPresented: $showAbout) {
             AppAboutSheet(app: app, installID: installID)
         }
+        .sheet(isPresented: $showFlag) {
+            if let topicID = app.hostTopicID {
+                FlagSheet(
+                    target: FlagTarget(
+                        kind: .topic,
+                        id: topicID,
+                        authorUsername: app.author?.username
+                    )
+                )
+            }
+        }
+    }
+
+    /// Ignoring the author hides their posts and stops notifications from
+    /// them — the same call the post reader's 屏蔽作者 makes.
+    private func block(_ username: String) async {
+        // No post to report: a mini app isn't a topic, so this is the one block
+        // that can't carry content to the moderators with it.
+        await BlockedUsersStore.shared.blockAndConfirm(username: username, reportingPostID: nil)
+        onClose()
     }
 
     /// One capsule: ellipsis menu + exit, like the mini-program chrome.
@@ -394,6 +449,23 @@ struct AppWebViewOverlay: View {
                     showAbout = true
                 } label: {
                     Label("关于", systemImage: "info.circle")
+                }
+                // Guideline 4.7.1 requires a way to report the software and to
+                // block an abusive author. The report goes to the same
+                // moderation queue as any flag, so staff already see it.
+                if app.hostTopicID != nil {
+                    Button {
+                        showFlag = true
+                    } label: {
+                        Label("举报", systemImage: "flag")
+                    }
+                }
+                if let author = app.author?.username {
+                    Button(role: .destructive) {
+                        Task { await block(author) }
+                    } label: {
+                        Label("屏蔽作者", systemImage: "hand.raised")
+                    }
                 }
                 Button(role: .destructive, action: onClose) {
                     Label("退出小程序", systemImage: "xmark.circle")
@@ -417,11 +489,11 @@ struct AppWebViewOverlay: View {
                     .frame(width: 32, height: 32)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
         }
         .padding(.horizontal, 5)
         .frame(height: 34)
-        .glassEffect(.regular.tint(Theme.bg.opacity(0.5)), in: .capsule)
+        .glassSurface(tint: Theme.bg.opacity(0.5))
         .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
         // Clear of the status bar, since the frame ignores safe areas.
         .padding(.top, UIApplication.topSafeAreaInset)
@@ -461,9 +533,9 @@ private struct AppAboutSheet: View {
                     }
 
                     VStack(spacing: 0) {
-                        factRow("作者", app.author?.username ?? "—")
-                        factRow("版本", app.versionNumber.map { "v\($0)" } ?? "—")
-                        factRow("安装", "#\(installID)")
+                        factRow(AppString("作者"), app.author?.username ?? "—")
+                        factRow(AppString("版本"), app.versionNumber.map { "v\($0)" } ?? "—")
+                        factRow(AppString("安装"), "#\(installID)")
                     }
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .overlay {
@@ -540,13 +612,13 @@ private struct AppAboutSheet: View {
     /// Plain-language scope labels, matching the plugin's own wording.
     private var permissions: [String] {
         let described = [
-            "kv": "为你在此应用内保存数据",
-            "kv.shared": "读取所有人在此应用中共享的内容，例如排行榜",
-            "ui": "显示提示，并将你带到本站的其他页面",
-            "points": "向你发放积分",
-            "realtime": "在有内容变化时通知其他玩家",
-            "schedule": "按计划定时运行",
-            "webview": "绘制自己的界面，而不使用本站的组件"
+            "kv": AppString("为你在此应用内保存数据"),
+            "kv.shared": AppString("读取所有人在此应用中共享的内容，例如排行榜"),
+            "ui": AppString("显示提示，并将你带到本站的其他页面"),
+            "points": AppString("向你发放积分"),
+            "realtime": AppString("在有内容变化时通知其他玩家"),
+            "schedule": AppString("按计划定时运行"),
+            "webview": AppString("绘制自己的界面，而不使用本站的组件")
         ]
         return (app.approvedScopes ?? []).map { described[$0] ?? $0 }
     }
@@ -610,5 +682,123 @@ private struct AppWebView: UIViewRepresentable {
         ) {
             isLoading.wrappedValue = false
         }
+    }
+}
+
+// MARK: - Guideline 4.7 gates
+
+/// Declared-age prompt, required by guideline 4.7.5 before mini apps are
+/// reachable.
+///
+/// The forum has no birthdate to read, so the age is declared here and kept on
+/// the device. A year is enough — asking for a full date would collect more
+/// than the check needs.
+private struct MiniAppAgeGateSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var year: Int = Calendar.current.component(.year, from: Date()) - MiniAppGate.minimumAge
+
+    private var thisYear: Int { Calendar.current.component(.year, from: Date()) }
+    private var declaredAge: Int { thisYear - year }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("出生年份", selection: $year) {
+                        // 100 years is enough, and the upper bound is this year.
+                        ForEach((thisYear - 100)...thisYear, id: \.self) { value in
+                            Text(String(value)).tag(value)
+                        }
+                    }
+                } header: {
+                    Text("确认年龄")
+                } footer: {
+                    Text("小程序由社区成员开发，内容分级可能高于本应用。需满 \(MiniAppGate.minimumAge) 岁才能运行。这个信息只保存在本机，不会上传。")
+                }
+
+                if declaredAge < MiniAppGate.minimumAge {
+                    Section {
+                        Label("未满 \(MiniAppGate.minimumAge) 岁，无法运行小程序", systemImage: "exclamationmark.triangle.fill")
+                            .font(Theme.body(13))
+                            .foregroundStyle(Theme.danger)
+                    }
+                }
+            }
+            .navigationTitle("年龄确认")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("确认") {
+                        MiniAppGate.declaredBirthYear = year
+                        dismiss()
+                    }
+                    .disabled(declaredAge < MiniAppGate.minimumAge)
+                }
+            }
+        }
+    }
+}
+
+/// Per-app consent, required by guideline 4.7.3 before any data or permission
+/// is shared with an individual mini app. Recorded per slug, so each app is
+/// approved on its own rather than once for the whole section.
+private struct MiniAppConsentSheet: View {
+    let app: DirectoryApp
+    let onAgree: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(app.name)
+                        .font(Theme.body(15, weight: .semibold))
+                    if let author = app.author?.username {
+                        LabeledContent("开发者", value: "@\(author)")
+                    }
+                } footer: {
+                    Text("小程序由社区成员开发，运行在沙盒中，无法访问你的账号或设备数据，只能做下面列出的事情。")
+                }
+
+                Section("这个小程序可以") {
+                    ForEach(scopeDescriptions, id: \.self) { line in
+                        Label(line, systemImage: "checkmark.circle")
+                            .font(Theme.body(13))
+                    }
+                }
+            }
+            .navigationTitle("运行前确认")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("同意并运行") {
+                        onAgree()
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Falls back to an explicit "nothing but draw" when the server granted no
+    /// scopes, rather than showing an empty list that reads like a mistake.
+    private var scopeDescriptions: [String] {
+        let described: [String: String] = [
+            "read_public": AppString("读取所有人在此应用中共享的内容，例如排行榜"),
+            "write_own": AppString("为你在此应用内保存数据"),
+            "award_points": AppString("向你发放积分"),
+            "notify": AppString("在有内容变化时通知其他玩家"),
+            "schedule": AppString("按计划定时运行"),
+            "custom_ui": AppString("绘制自己的界面，而不使用本站的组件"),
+        ]
+        let scopes = (app.approvedScopes ?? []).map { described[$0] ?? $0 }
+        return scopes.isEmpty ? [AppString("除了在此面板上绘制内容以外，什么都不做。")] : scopes
     }
 }

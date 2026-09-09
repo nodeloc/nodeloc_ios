@@ -62,8 +62,7 @@ struct CreateNodeOverlay: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
             .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
 
             parentCategoryMenu
@@ -86,8 +85,7 @@ struct CreateNodeOverlay: View {
                 .padding(.horizontal, 14)
                 .frame(height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.capsule)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .capsule)
             .disabled(!canCreate)
             .opacity(canCreate ? 1 : 0.58)
             .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
@@ -176,7 +174,7 @@ struct CreateNodeOverlay: View {
                                     .strokeBorder(color == colorHex ? Theme.text.opacity(0.5) : Theme.divider, lineWidth: color == colorHex ? 2 : 1)
                             }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
         }
@@ -245,8 +243,7 @@ struct CreateNodeOverlay: View {
             .padding(.horizontal, 12)
             .frame(height: 34)
         }
-        .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-        .buttonBorderShape(.capsule)
+        .glassButton(tint: Theme.bg.opacity(0.34), shape: .capsule)
         .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
     }
 
@@ -299,7 +296,7 @@ struct CreateNodeOverlay: View {
         guard let selectedParentID = store.selectedParentID,
               let category = store.parentCategories.first(where: { $0.id == selectedParentID })
         else {
-            return store.isLoadingParents ? "加载中" : "选择主题"
+            return store.isLoadingParents ? AppString("加载中") : AppString("选择主题")
         }
         return category.name
     }

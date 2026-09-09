@@ -34,14 +34,14 @@ struct PushSettingsPage: View {
 
             ScrollView {
                 VStack(spacing: 0) {
-                    SettingsSection(title: "推送", footer: masterFooter) {
+                    SettingsSection(title: AppString("推送"), footer: masterFooter) {
                         SettingsToggleRow(
-                            title: "允许推送通知",
-                            detail: "应用在后台定期检查并推送新通知",
+                            title: AppString("允许推送通知"),
+                            detail: AppString("应用在后台定期检查并推送新通知"),
                             isOn: masterBinding
                         )
                         if permissionDenied {
-                            SettingsNavRow(title: "前往系统设置开启", icon: "gear") {
+                            SettingsNavRow(title: AppString("前往系统设置开启"), icon: "gear") {
                                 openSystemSettings()
                             }
                         }
@@ -49,8 +49,8 @@ struct PushSettingsPage: View {
 
                     if pushIsOn {
                         SettingsSection(
-                            title: "允许的通知类型",
-                            footer: "关闭的类型不会推送，但仍会出现在站内通知列表。"
+                            title: AppString("允许的通知类型"),
+                            footer: AppString("关闭的类型不会推送，但仍会出现在站内通知列表。")
                         ) {
                             ForEach(PushCategory.allCases) { category in
                                 SettingsToggleRow(
@@ -80,8 +80,7 @@ struct PushSettingsPage: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
 
             Text("推送通知").font(Theme.body(15, weight: .medium))
 
@@ -94,9 +93,9 @@ struct PushSettingsPage: View {
 
     private var masterFooter: String {
         if permissionDenied {
-            return "通知权限已被系统拒绝，需要在系统设置中重新允许。"
+            return AppString("通知权限已被系统拒绝，需要在系统设置中重新允许。")
         }
-        return "推送由系统安排的后台检查触发，可能有几分钟到数小时的延迟。"
+        return AppString("推送由系统安排的后台检查触发，可能有几分钟到数小时的延迟。")
     }
 
     private var masterBinding: Binding<Bool> {

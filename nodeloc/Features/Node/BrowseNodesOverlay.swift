@@ -11,6 +11,7 @@ import SwiftUI
 
 struct BrowseNodesOverlay: View {
     @Environment(AppState.self) private var app
+    @Environment(\.sidebarIsPinned) private var sidebarIsPinned
     @Environment(\.openURL) private var openURL
     @State private var store = NodeBrowseStore()
     @State private var query = ""
@@ -32,7 +33,7 @@ struct BrowseNodesOverlay: View {
                     VStack(spacing: 0) {
                         Color.clear
                             .frame(maxWidth: .infinity)
-                            .frame(height: headerContentHeight)
+                            .frame(height: usesTabBarRow ? 0 : headerContentHeight)
 
                         if showsGroupList {
                             groupListContent
@@ -60,8 +61,10 @@ struct BrowseNodesOverlay: View {
                 }
                 .scrollIndicators(.hidden)
 
-                browseHeader()
-                    .zIndex(1)
+                if !usesTabBarRow {
+                    browseHeader()
+                        .zIndex(1)
+                }
 
                 if let selectedNode {
                     NodeDetailOverlay(node: selectedNode) {
@@ -75,26 +78,76 @@ struct BrowseNodesOverlay: View {
             }
             .background(Theme.bg.ignoresSafeArea())
         }
+        .tabBarHeader(isPinned: usesTabBarRow) {
+            browseLeadingItems
+        } trailing: {
+            browseTrailingAction
+        }
         .task { await store.load() }
+    }
+
+    /// True only for the nodes tab on iPad. Presented as a modal this screen
+    /// sits over another one, so there is no tab bar row for it to join.
+    private var usesTabBarRow: Bool { sidebarIsPinned && !showsCloseButton }
+
+    private var browseTitle: some View {
+        Text(headerTitle)
+            .font(Theme.heading(20, weight: .semibold))
+            .foregroundStyle(Theme.text)
+    }
+
+    @ViewBuilder
+    private var browseBackButton: some View {
+        Button { handleBack() } label: {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .frame(width: headerIconFrame, height: headerIconFrame)
+        }
+        .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
+        .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+    }
+
+    /// Guests get 登录 where 新建 would be — creating a node needs an account.
+    @ViewBuilder
+    private var browseTrailingAction: some View {
+        if app.isGuest {
+            GuestLoginButton()
+        } else {
+            Button {
+                withAnimation(.overlayPush) {
+                    app.overlay = .createNode
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: headerIconFrame, height: headerIconFrame)
+            }
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
+            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+        }
+    }
+
+    /// In the tab bar's row the title sits beside the back button rather than
+    /// centred — the centre belongs to the tab capsule.
+    @ViewBuilder
+    private var browseLeadingItems: some View {
+        HStack(spacing: 8) {
+            if showsGroupList {
+                browseBackButton
+            }
+            browseTitle
+        }
     }
 
     private func browseHeader() -> some View {
         ZStack {
-            Text(headerTitle)
-                .font(Theme.heading(20, weight: .semibold))
-                .foregroundStyle(Theme.text)
+            browseTitle
 
             HStack {
                 if showsCloseButton || showsGroupList {
-                    Button { handleBack() } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Theme.text)
-                            .frame(width: headerIconFrame, height: headerIconFrame)
-                    }
-                    .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-                    .buttonBorderShape(.circle)
-                    .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+                    browseBackButton
                 } else {
                     // Root of the nodes tab: no back destination, so the slot
                     // holds the sidebar toggle like the home feed does.
@@ -103,25 +156,7 @@ struct BrowseNodesOverlay: View {
 
                 Spacer()
 
-                // Guests get 登录 where 新建 would be — creating a node needs
-                // an account anyway.
-                if app.isGuest {
-                    GuestLoginButton()
-                } else {
-                    Button {
-                        withAnimation(.overlayPush) {
-                            app.overlay = .createNode
-                        }
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(Theme.text)
-                            .frame(width: headerIconFrame, height: headerIconFrame)
-                    }
-                    .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-                    .buttonBorderShape(.circle)
-                    .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
-                }
+                browseTrailingAction
             }
         }
         .padding(.horizontal, 16)
@@ -136,7 +171,7 @@ struct BrowseNodesOverlay: View {
     }
 
     private var headerTitle: String {
-        showsGroupList ? (store.selectedGroup?.name ?? "节点") : "节点"
+        showsGroupList ? (store.selectedGroup?.name ?? AppString("节点")) : AppString("节点")
     }
 
     private func handleBack() {
@@ -185,7 +220,7 @@ struct BrowseNodesOverlay: View {
     private var groupListContent: some View {
         VStack(spacing: 10) {
             if store.isLoadingGroup {
-                loadingRow("正在加载 \(store.selectedGroup?.name ?? "节点")")
+                loadingRow(AppString("正在加载 \(store.selectedGroup?.name ?? "节点")"))
             }
 
             ForEach(Array(store.groupNodes.enumerated()), id: \.element.id) { index, node in
@@ -193,7 +228,7 @@ struct BrowseNodesOverlay: View {
             }
 
             if !store.isLoadingGroup && store.groupNodes.isEmpty {
-                emptyRow("这里还没有可浏览的节点", icon: "tray")
+                emptyRow(AppString("这里还没有可浏览的节点"), icon: "tray")
                     .padding(.horizontal, 16)
             }
 
@@ -249,12 +284,12 @@ struct BrowseNodesOverlay: View {
                 }
                 .padding(.horizontal, 16)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
 
             if nodes.isEmpty, store.isLoading {
-                loadingRow("正在加载 \(group.name)")
+                loadingRow(AppString("正在加载 \(group.name)"))
             } else if nodes.isEmpty {
-                emptyRow("暂无节点", icon: "tray")
+                emptyRow(AppString("暂无节点"), icon: "tray")
                     .padding(.horizontal, 16)
             } else {
                 horizontalCommunityCards(nodes: nodes)
@@ -307,7 +342,7 @@ struct BrowseNodesOverlay: View {
                     wideCommunityCard(node)
                 }
                 if searchResults.isEmpty {
-                    emptyRow("没有匹配的节点", icon: "magnifyingglass")
+                    emptyRow(AppString("没有匹配的节点"), icon: "magnifyingglass")
                         .padding(.horizontal, 16)
                 }
             }
@@ -330,7 +365,7 @@ struct BrowseNodesOverlay: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Theme.muted(0.4))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.horizontal, 14)
@@ -364,9 +399,9 @@ struct BrowseNodesOverlay: View {
 
     private var relatedTitle: String {
         if let selectedGroup = store.selectedGroup {
-            return "更多 \(selectedGroup.name) 类似内容"
+            return AppString("更多 \(selectedGroup.name) 类似内容")
         }
-        return "更多类似内容"
+        return AppString("更多类似内容")
     }
 
     private func openGroup(_ group: NodeGroupSummary) {
@@ -378,9 +413,9 @@ struct BrowseNodesOverlay: View {
 
     private var fallbackTopicLabels: [String] {
         [
-            "互联网文化", "游戏", "问答与故事", "影视", "科技", "食物",
-            "胜地与旅行", "流行文化", "体育", "商业与金融", "人文与艺术",
-            "教育与职业", "时尚与美容", "新闻与政治", "交通工具"
+            AppString("互联网文化"), AppString("游戏"), AppString("问答与故事"), AppString("影视"), AppString("科技"), AppString("食物"),
+            AppString("胜地与旅行"), AppString("流行文化"), AppString("体育"), AppString("商业与金融"), AppString("人文与艺术"),
+            AppString("教育与职业"), AppString("时尚与美容"), AppString("新闻与政治"), AppString("交通工具")
         ]
     }
 
@@ -398,7 +433,7 @@ struct BrowseNodesOverlay: View {
                         .strokeBorder(isSelected ? Theme.text.opacity(0.18) : Theme.divider, lineWidth: 1.2)
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func horizontalCommunityCards(nodes: [SidebarNodeSummary]) -> some View {
@@ -573,7 +608,7 @@ struct BrowseNodesOverlay: View {
         Button {
             openNode(node)
         } label: {
-            Text(node.isJoined ? "已加入" : "加入")
+            Text(node.isJoined ? AppString("已加入") : AppString("加入"))
                 .font(Theme.body(12, weight: .semibold))
                 .foregroundStyle(node.isJoined ? Theme.muted(0.62) : Theme.bg)
                 .padding(.horizontal, 12)
@@ -585,11 +620,11 @@ struct BrowseNodesOverlay: View {
                     }
                 }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func memberText(for node: SidebarNodeSummary) -> String {
-        node.memberCount.isEmpty ? "成员" : "\(node.memberCount) 成员"
+        node.memberCount.isEmpty ? AppString("成员") : AppString("\(node.memberCount) 成员")
     }
 
     private func displayName(for node: SidebarNodeSummary) -> String {

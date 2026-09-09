@@ -5,8 +5,8 @@
 //  In-app browser. Every link tapped anywhere in the app arrives here rather
 //  than kicking the reader out to Safari — except nodeloc's own topic and
 //  profile URLs, which are routed to the native screens instead (see
-//  `LinkRouter`), and the OAuth flow, which needs a real
-//  `ASWebAuthenticationSession` to share cookies with the system browser.
+//  `LinkRouter`), and social sign-in, which runs in its own web view so the
+//  session cookies it produces can be read back (see `SocialLoginView`).
 //
 
 import SwiftUI
@@ -28,6 +28,14 @@ enum LinkRouter {
         case profile(username: String)
         /// A nodeloc node; open the native node page.
         case node(slug: String)
+        /// `/tag/<slug>` — the native tag topic list.
+        case tag(slug: String)
+        /// `/f/<username>/<slug>` — discourse-community's custom feed.
+        case customFeed(username: String, slug: String)
+        /// `/apps/<slug>` — a mini app's page. Guideline 4.7.4 wants a
+        /// universal link per app, so this has to resolve natively rather than
+        /// fall through to the web view.
+        case app(slug: String)
         /// A group's PM inbox (staff/moderators), where group-message
         /// notifications point; opens the inbox filtered to that group.
         case groupInbox(group: String)
@@ -74,6 +82,15 @@ enum LinkRouter {
             }
         }
 
+        // /apps/<slug>. "directory" is the index page and "installs" is the
+        // sandboxed runner document, neither of which is an app slug.
+        if segments.first == "apps", segments.count >= 2 {
+            let slug = segments[1]
+            if slug != "directory", slug != "installs" {
+                return .app(slug: slug)
+            }
+        }
+
         // /n/<slug> — discourse-community's node route, which appears in real
         // post bodies. /c/<slug>/<id> is core Discourse's equivalent.
         if segments.first == "n", segments.count >= 2 {
@@ -84,6 +101,21 @@ enum LinkRouter {
             let slugs = segments.dropFirst().filter { Int($0) == nil }
             if let slug = slugs.last {
                 return .node(slug: slug)
+            }
+        }
+
+        // /f/<username>/<slug> — a custom feed. Exactly two segments follow, so
+        // anything deeper is left to the web view rather than guessed at.
+        if segments.first == "f", segments.count == 3 {
+            return .customFeed(username: segments[1], slug: segments[2])
+        }
+
+        // /tag/<slug>[/<id>] — cooked `#tag` hrefs, and the same shape when one
+        // is shared as a plain link.
+        if segments.first == "tag", segments.count >= 2 {
+            let slugs = segments.dropFirst().filter { Int($0) == nil }
+            if let slug = slugs.last {
+                return .tag(slug: slug)
             }
         }
 
@@ -117,8 +149,17 @@ extension LinkRouter {
     /// Routes a URL to its native screen or the in-app browser. Returns false
     /// for external schemes (mailto:, tel:) that only the system can open.
     /// Shared by the root openURL handler and push-notification taps.
+    /// `openReference` lets the *nearest* presentation host show a tag rather
+    /// than the root one; a tag has no full-screen page of its own, so it goes
+    /// through the same half sheet a `#tag` badge does. Nil falls back to app
+    /// state, which is right for the root.
     @discardableResult
-    static func open(_ url: URL, app: AppState, browser: BrowserState) -> Bool {
+    static func open(
+        _ url: URL,
+        app: AppState,
+        browser: BrowserState,
+        openReference: ((PostReference) -> Void)? = nil
+    ) -> Bool {
         switch destination(for: url) {
         case .topic(let id, let postNumber):
             app.openTopic(id: id, postNumber: postNumber)
@@ -126,6 +167,22 @@ extension LinkRouter {
             app.openProfile(username: username)
         case .node(let slug):
             app.openNode(slug: slug)
+        case .customFeed(let username, let slug):
+            app.openCustomFeed(username: username, slug: slug)
+        case .tag(let slug):
+            let reference = PostReference(
+                kind: .tag,
+                slug: slug,
+                label: slug,
+                href: "/tag/\(slug)"
+            )
+            if let openReference {
+                openReference(reference)
+            } else {
+                app.routedReference = reference
+            }
+        case .app(let slug):
+            app.openApp(slug: slug)
         case .groupInbox(let group):
             app.openGroupInbox(group: group)
         case .web(let url):
@@ -140,9 +197,18 @@ extension LinkRouter {
 extension View {
     /// Sends every link tapped inside this view through `LinkRouter`, so text
     /// links, oneboxes and buttons all behave the same way.
-    func routesLinksInApp(app: AppState, browser: BrowserState) -> some View {
+    func routesLinksInApp(
+        app: AppState,
+        browser: BrowserState,
+        openReference: ((PostReference) -> Void)? = nil
+    ) -> some View {
         environment(\.openURL, OpenURLAction { url in
-            LinkRouter.open(url, app: app, browser: browser) ? .handled : .systemAction
+            LinkRouter.open(
+                url,
+                app: app,
+                browser: browser,
+                openReference: openReference
+            ) ? .handled : .systemAction
         })
     }
 }
@@ -181,7 +247,7 @@ struct BrowserView: View {
     /// capsule stays centred) and the capsule shrinks.
     private var topChrome: some View {
         HStack(spacing: 8) {
-            HeaderIconButton(systemName: "xmark", accessibilityLabel: "关闭", action: onClose)
+            HeaderIconButton(systemName: "xmark", accessibilityLabel: AppString("关闭"), action: onClose)
                 .opacity(model.chromeHidden ? 0 : 1)
                 .offset(y: model.chromeHidden ? -12 : 0)
                 .allowsHitTesting(!model.chromeHidden)
@@ -237,10 +303,10 @@ struct BrowserView: View {
             .clipShape(Capsule())
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         // `.interactive()` is what gives glass its press response (the same
         // grow-on-touch the neighbouring `.glass` buttons get for free).
-        .glassEffect(.regular.tint(FloatingHeader.glassTint).interactive(), in: .capsule)
+        .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
         .accessibilityLabel("显示浏览器按钮")
     }
@@ -285,7 +351,7 @@ struct BrowserView: View {
                     Label("分享", systemImage: "square.and.arrow.up")
                 }
                 Button {
-                    UIPasteboard.general.url = current
+                    copyLink(current)
                 } label: {
                     Label("拷贝链接", systemImage: "doc.on.doc")
                 }
@@ -293,8 +359,7 @@ struct BrowserView: View {
         } label: {
             FloatingHeaderIcon(systemName: "ellipsis")
         }
-        .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
-        .buttonBorderShape(.circle)
+        .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
         .accessibilityLabel("更多")
     }
 
@@ -302,11 +367,11 @@ struct BrowserView: View {
     /// Slides away while reading down; returns on a scroll up or at either end.
     private var bottomToolbar: some View {
         HStack(spacing: 14) {
-            toolButton("chevron.left", label: "返回", enabled: model.canGoBack) {
+            toolButton("chevron.left", label: AppString("返回"), enabled: model.canGoBack) {
                 model.goBack()
             }
 
-            toolButton("chevron.right", label: "前进", enabled: model.canGoForward) {
+            toolButton("chevron.right", label: AppString("前进"), enabled: model.canGoForward) {
                 model.goForward()
             }
 
@@ -314,17 +379,17 @@ struct BrowserView: View {
                 ShareLink(item: current) {
                     toolIcon("square.and.arrow.up", enabled: true)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .accessibilityLabel("分享")
             } else {
                 toolIcon("square.and.arrow.up", enabled: false)
             }
 
-            toolButton("arrow.clockwise", label: "刷新", enabled: true) {
+            toolButton("arrow.clockwise", label: AppString("刷新"), enabled: true) {
                 model.reload()
             }
 
-            toolButton("safari", label: "在默认浏览器打开", enabled: model.currentURL != nil) {
+            toolButton("safari", label: AppString("在默认浏览器打开"), enabled: model.currentURL != nil) {
                 if let current = model.currentURL {
                     UIApplication.shared.open(current)
                 }
@@ -332,7 +397,7 @@ struct BrowserView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .glassEffect(.regular.tint(FloatingHeader.glassTint).interactive(), in: .capsule)
+        .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
         .padding(.bottom, 10)
         .opacity(model.chromeHidden ? 0 : 1)
@@ -349,7 +414,7 @@ struct BrowserView: View {
         Button(action: action) {
             toolIcon(systemName, enabled: enabled)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(!enabled)
         .accessibilityLabel(label)
     }

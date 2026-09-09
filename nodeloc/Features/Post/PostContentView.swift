@@ -13,6 +13,7 @@
 
 import AVKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Emoji
 
@@ -62,8 +63,13 @@ final class EmojiImageStore {
     /// Emoji sized to sit on a line of `pointSize` text.
     func image(for urlString: String, pointSize: CGFloat) -> UIImage? {
         _ = generation
+        // One em, which is what the site's own cooked-post CSS says
+        // (`img.emoji { width: 1em; height: 1em }`). This used to be 1.15em, and
+        // nodeloc's custom emoji are dense edge-to-edge art with none of the
+        // padding Apple's have — at 1.15em they towered over the sentence.
+        //
         // Round so a handful of body sizes don't spawn a cache entry each.
-        let side = (pointSize * 1.15).rounded()
+        let side = pointSize.rounded()
         let key = "\(urlString)@\(Int(side))" as NSString
         if let cached = scaled.object(forKey: key) { return cached }
         guard let original = images.object(forKey: urlString as NSString) else { return nil }
@@ -253,11 +259,14 @@ enum PostInlineRenderer {
             run.foregroundColor = Theme.accent
             return run
 
-        case .mention(let username):
-            var run = AttributedString("@\(username)")
-            run.foregroundColor = Theme.accent
+        case .reference(let reference):
+            // Flat fallback for the places that still render through a single
+            // `Text` — table cells and summaries. Paragraphs with a reference go
+            // through `PostReferenceTextView`, which draws the real capsule.
+            var run = AttributedString(reference.textPrefix + reference.label)
+            run.foregroundColor = reference.tint
             run.font = .system(size: metrics.bodySize, weight: .medium)
-            if let url = resolvedLink("/u/\(username)") { run.link = url }
+            if let url = resolvedLink(reference.href) { run.link = url }
             return run
 
         case .lineBreak:
@@ -295,6 +304,15 @@ struct PostContentView: View {
     var metrics: PostTextMetrics = .body
     var onImageTap: ((PostImage) -> Void)?
     var pollProvider: ((String) -> AnyView?)?
+    /// A tap on the body that wasn't aimed at anything in particular — the
+    /// reply reader uses it to collapse.
+    ///
+    /// Attached per block rather than around the whole body: a block holding a
+    /// reference badge renders through a `UIViewRepresentable`, and a SwiftUI
+    /// tap around that cancels the touch before the text view can resolve the
+    /// badge. Those blocks report their own background taps instead, so a tap
+    /// on plain text still collapses wherever it lands.
+    var onBackgroundTap: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -303,7 +321,13 @@ struct PostContentView: View {
                     block: block,
                     metrics: metrics,
                     onImageTap: onImageTap,
-                    pollProvider: pollProvider
+                    pollProvider: pollProvider,
+                    onBackgroundTap: onBackgroundTap
+                )
+                .contentShape(Rectangle())
+                .gesture(
+                    TapGesture().onEnded { onBackgroundTap?() },
+                    isEnabled: onBackgroundTap != nil && !block.containsReference
                 )
             }
         }
@@ -334,6 +358,17 @@ private struct PostVideoActionsKey: EnvironmentKey {
     static let defaultValue = PostVideoActions()
 }
 
+/// Whether inline video on this surface may play at all.
+///
+/// Scroll visibility isn't enough: a feed card stays "visible" to the scroll
+/// view when a full-screen overlay is laid over it, or when the tab it lives in
+/// is switched away from — the view is still mounted, just not on screen — and
+/// the clip kept talking behind whatever the reader opened. Each host declares
+/// whether it is the surface in front.
+private struct MediaAutoplayKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
 /// Actions the full-screen chrome invokes that the player can't perform itself.
 struct PostVideoActions {
     /// Sends the like to the server; the local toggle is handled centrally.
@@ -356,6 +391,11 @@ extension EnvironmentValues {
         get { self[PostVideoActionsKey.self] }
         set { self[PostVideoActionsKey.self] = newValue }
     }
+
+    var mediaAutoplayEnabled: Bool {
+        get { self[MediaAutoplayKey.self] }
+        set { self[MediaAutoplayKey.self] = newValue }
+    }
 }
 
 struct PostBlockView: View {
@@ -363,8 +403,15 @@ struct PostBlockView: View {
     let metrics: PostTextMetrics
     var onImageTap: ((PostImage) -> Void)?
     var pollProvider: ((String) -> AnyView?)?
+    /// Forwarded to `PostReferenceTextView`, the one renderer that has to
+    /// report its own background taps.
+    var onBackgroundTap: (() -> Void)?
 
     @Environment(EmojiImageStore.self) private var emoji
+    /// Resolved to the nearest presentation host, so a badge tapped inside a
+    /// full-screen cover opens its sheet *there* rather than behind the cover.
+    @Environment(\.openPostReference) private var openPostReference
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         switch block {
@@ -384,6 +431,9 @@ struct PostBlockView: View {
 
         case .video(let video):
             PostVideoView(video: video)
+
+        case .embed(let embed):
+            PostEmbedView(embed: embed)
 
         case .codeBlock(let language, let code):
             PostCodeBlockView(language: language, code: code)
@@ -416,20 +466,44 @@ struct PostBlockView: View {
             if let view = pollProvider?(name) {
                 view
             }
+
+        case .permission(let block):
+            PostPermissionView(
+                block: block,
+                metrics: metrics,
+                onImageTap: onImageTap
+            )
         }
     }
 
+    @ViewBuilder
     private func inlineText(_ inlines: [PostInline]) -> some View {
-        PostInlineRenderer.text(for: inlines, metrics: metrics, emoji: emoji)
-            .font(Theme.body(metrics.bodySize))
-            .foregroundStyle(Theme.text.opacity(metrics.textOpacity))
-            .lineSpacing(metrics.lineSpacing)
-            // Order matters: the frame has to constrain the width *before*
-            // `fixedSize` measures the height. Reversed, the text sizes to its
-            // own ideal width first and overruns any inset container.
+        if inlines.containsReference {
+            // Badges are text attachments, which a SwiftUI `Text` can't hold —
+            // see `PostReferenceTextView` for why this one paragraph shape gets
+            // a UIKit renderer.
+            PostReferenceTextView(
+                inlines: inlines,
+                metrics: metrics,
+                onTapReference: { openPostReference($0) },
+                onTapLink: { openURL($0) },
+                // The paragraph owns every tap inside itself, so it has to
+                // pass the uninteresting ones back out.
+                onTapBackground: { onBackgroundTap?() }
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .tint(Theme.accent)
+        } else {
+            PostInlineRenderer.text(for: inlines, metrics: metrics, emoji: emoji)
+                .font(Theme.body(metrics.bodySize))
+                .foregroundStyle(Theme.text.opacity(metrics.textOpacity))
+                .lineSpacing(metrics.lineSpacing)
+                // Order matters: the frame has to constrain the width *before*
+                // `fixedSize` measures the height. Reversed, the text sizes to
+                // its own ideal width first and overruns any inset container.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .tint(Theme.accent)
+        }
     }
 
     private func headingSize(_ level: Int) -> CGFloat {
@@ -453,8 +527,31 @@ struct PostImageView: View {
     private var resolvedURL: URL? { PostInlineRenderer.resolvedLink(image.src) }
     private var isGIF: Bool { resolvedURL?.pathExtension.lowercased() == "gif" }
 
+    /// Anything at or below this drawn width is a sticker or an inline badge
+    /// rather than a picture, and gets none of the frame chrome — which is also
+    /// what the site does, since its cooked CSS only rounds lightboxed images.
+    private static let stickerWidth: CGFloat = 140
+
+    /// The width the HTML asks for.
+    ///
+    /// Discourse cooks small uploads as plain `<img width="82" height="82">`
+    /// with no lightbox, and the browser honours that under
+    /// `.cooked img { max-width: 100% }`. Forcing every image to fill the column
+    /// blew an 82×82 sticker up to four times its size, which is what "emoji
+    /// 非常大" turned out to be: the sticker in t/106076 post 2 is an upload,
+    /// `class="animated"`, not an emoji at all.
+    private var declaredWidth: CGFloat? {
+        guard let width = image.width, width > 0 else { return nil }
+        return CGFloat(width)
+    }
+
+    private var isSticker: Bool {
+        guard let declaredWidth else { return false }
+        return declaredWidth <= Self.stickerWidth
+    }
+
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: isSticker ? 4 : 10, style: .continuous)
 
         Group {
             if isGIF, let url = resolvedURL {
@@ -475,12 +572,20 @@ struct PostImageView: View {
             }
         }
         .aspectRatio(image.aspectRatio, contentMode: .fit)
-        .frame(maxWidth: .infinity)
+        // An upper bound, so a big image still fills the column while a small
+        // one stays its own size.
+        .frame(maxWidth: declaredWidth ?? .infinity, alignment: .leading)
         .clipShape(shape)
-        .overlay { shape.strokeBorder(Theme.divider, lineWidth: 1) }
+        .overlay {
+            if !isSticker {
+                shape.strokeBorder(Theme.divider, lineWidth: 1)
+            }
+        }
         .contentShape(shape)
         .onTapGesture(perform: onTap)
-        .accessibilityLabel(image.alt ?? "图片")
+        // Left-aligned in the column, like the browser's inline flow.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(image.alt ?? AppString("图片"))
     }
 }
 
@@ -598,6 +703,55 @@ final class AnimatedGIFStore {
 final class VideoMuteState {
     static let shared = VideoMuteState()
     var isMuted = true
+    /// True while a full-screen player or image viewer is up.
+    ///
+    /// A `fullScreenCover` doesn't unmount what it covers, and the covered
+    /// scroll view keeps calling its cards visible, so the card the reader
+    /// tapped went on playing *underneath* the player — audible over every
+    /// video they then swiped to. Every inline surface consults this; the
+    /// presenter sets it.
+    var isFullScreenActive = false
+}
+
+/// Shown while a video has been told to play but has no frames yet.
+///
+/// Two waits hide behind this, and both are real: resolving the HLS rendition
+/// (`AnyVideoResolver`, one request) and then buffering it. Before this the card
+/// just sat on its poster, or on black in full screen, with nothing to say.
+struct VideoLoadingIndicator: View {
+    var size: CGFloat = 22
+
+    var body: some View {
+        ProgressView()
+            .progressViewStyle(.circular)
+            .controlSize(.regular)
+            .tint(.white)
+            .frame(width: size, height: size)
+            .padding(12)
+            .background(.black.opacity(0.32), in: Circle())
+            // Purely informational, and it must never eat the tap that opens
+            // full screen or toggles the chrome.
+            .allowsHitTesting(false)
+            .transition(.opacity)
+    }
+}
+
+/// Tracks whether a player is *waiting* — told to play with nothing to show.
+///
+/// `.waitingToPlayAtSpecifiedRate` is the precise signal, covering both an empty
+/// buffer and a stall; `status == .readyToPlay` only says the asset was
+/// understood. Deliberately not "anything other than `.playing`": that includes
+/// `.paused`, which would leave a spinner sitting on top of a video the reader
+/// paused on purpose.
+@MainActor
+func observeBuffering(
+    _ player: AVPlayer,
+    onChange: @escaping @MainActor (Bool) -> Void
+) -> NSKeyValueObservation {
+    player.observe(\.timeControlStatus, options: [.initial, .new]) { player, _ in
+        let isWaiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        Task { @MainActor in onChange(isWaiting) }
+    }
 }
 
 /// First frames, generated on demand and cached by video URL.
@@ -700,11 +854,18 @@ struct PostVideoView: View {
     @State private var player: AVPlayer?
     @State private var isVisible = false
     @State private var isPresentingFullScreen = false
+    /// Removed on teardown; see `FeedVideoTile.endObserver`.
+    @State private var endObserver: NSObjectProtocol?
+    /// See `FeedVideoTile.isPlaybackAllowed`.
+    @State private var isPlaybackAllowed = false
+    @State private var bufferObservation: NSKeyValueObservation?
+    @State private var isBuffering = false
     @Environment(VideoMuteState.self) private var mute
     @Environment(VideoPosterStore.self) private var posters
     @Environment(\.postVideoSiblings) private var siblings
     @Environment(\.postVideoPresentation) private var presentation
     @Environment(\.postVideoActions) private var actions
+    @Environment(\.mediaAutoplayEnabled) private var autoplayEnabled
     @Environment(\.scenePhase) private var scenePhase
 
     private let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -733,6 +894,7 @@ struct PostVideoView: View {
             .background { poster }
             .overlay { surface }
             .clipShape(shape)
+            .overlay { if showsLoading { VideoLoadingIndicator() } }
             .overlay { shape.strokeBorder(Theme.divider, lineWidth: 1) }
             .overlay(alignment: .topTrailing) { muteButton }
             .contentShape(shape)
@@ -746,13 +908,21 @@ struct PostVideoView: View {
             }
             .onChange(of: mute.isMuted) { _, muted in player?.isMuted = muted }
             .onChange(of: isPresentingFullScreen) { _, _ in updatePlayback() }
+            .onChange(of: autoplayEnabled) { _, _ in updatePlayback() }
             .onChange(of: scenePhase) { _, _ in updatePlayback() }
             // Settles the card's shape as early as possible, before any player
             // exists — a video block that is off screen still gets sized, so
             // scrolling to it doesn't jump.
-            .task { loadPoster() }
-            .onAppear(perform: preparePlayer)
+            .task { await loadPoster() }
+            .task { await preparePlayer() }
+            .onChange(of: mute.isFullScreenActive) { _, _ in updatePlayback() }
             .onDisappear {
+                if let endObserver {
+                    NotificationCenter.default.removeObserver(endObserver)
+                }
+                endObserver = nil
+                bufferObservation?.invalidate()
+                bufferObservation = nil
                 player?.pause()
                 player = nil
             }
@@ -795,9 +965,9 @@ struct PostVideoView: View {
                 .frame(width: 30, height: 30)
                 .background(.black.opacity(0.5), in: Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .padding(10)
-        .accessibilityLabel(mute.isMuted ? "取消静音" : "静音")
+        .accessibilityLabel(mute.isMuted ? AppString("取消静音") : AppString("静音"))
     }
 
     /// Server thumbnail when there is one, otherwise the clip's own first frame.
@@ -845,34 +1015,52 @@ struct PostVideoView: View {
     /// Decodes the first frame, which also settles the card's shape. Runs on
     /// `task`, before and independently of the player, so the layout is right
     /// as early as possible and survives the player teardown on scroll-away.
-    private func loadPoster() {
-        guard let url = PostInlineRenderer.resolvedLink(video.src) else { return }
+    private func loadPoster() async {
+        guard let url = await AnyVideoResolver.shared.playableURL(for: video) else { return }
         posters.loadIfNeeded(video.src, url: url)
     }
 
-    private func preparePlayer() {
-        guard player == nil, let url = PostInlineRenderer.resolvedLink(video.src) else { return }
+    private func preparePlayer() async {
+        // Prefer the transcoded stream; see `AnyVideoResolver`.
+        guard player == nil, let url = await AnyVideoResolver.shared.playableURL(for: video) else { return }
         let asset = AVURLAsset(url: url)
         let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
         player.isMuted = mute.isMuted
         // Inline videos loop; short clips otherwise freeze on a black frame.
         player.actionAtItemEnd = .none
-        NotificationCenter.default.addObserver(
+        endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: player.currentItem,
             queue: .main
         ) { _ in
-            Task { @MainActor in player.seek(to: .zero); player.play() }
+            Task { @MainActor in
+                player.seek(to: .zero)
+                if isPlaybackAllowed { player.play() }
+            }
         }
+        bufferObservation = observeBuffering(player) { isBuffering = $0 }
         self.player = player
         updatePlayback()
+    }
+
+    /// See `FeedVideoTile.showsLoading`.
+    private var showsLoading: Bool {
+        guard isPlaybackAllowed else { return false }
+        return player == nil || isBuffering
     }
 
     private func updatePlayback() {
         guard let player else { return }
         // Full screen owns its own player, so the inline one steps aside to
-        // avoid two audio tracks.
-        let shouldPlay = isVisible && !isPresentingFullScreen && scenePhase == .active
+        // avoid two audio tracks. `autoplayEnabled` is the same idea one level
+        // up: an overlay or another tab in front means this card is off screen
+        // even though the scroll view still calls it visible.
+        let shouldPlay = isVisible
+            && autoplayEnabled
+            && !isPresentingFullScreen
+            && !mute.isFullScreenActive
+            && scenePhase == .active
+        isPlaybackAllowed = shouldPlay
         if shouldPlay {
             player.isMuted = mute.isMuted
             player.play()
@@ -905,7 +1093,9 @@ struct PostVideoPresentation {
 
     func context(app: AppState) -> PostVideoContext {
         PostVideoContext(
-            nodeName: post.node,
+            // Resolved name first: a topic opened from a link carries no node
+            // of its own, so `post.node` alone left this header blank.
+            nodeName: node?.name ?? post.node,
             nodeLogoURL: node?.logoURL,
             nodeColorHex: node?.colorHex,
             title: post.title,
@@ -914,7 +1104,12 @@ struct PostVideoPresentation {
             likeCount: app.voteCount(post),
             isLiked: app.isLiked(post),
             commentCount: commentCount ?? post.comments,
-            shareURL: DiscourseConfig.baseURL.appending(path: "t/topic/\(post.id)")
+            shareURL: DiscourseConfig.baseURL.appending(path: "t/topic/\(post.id)"),
+            // Through `app`, so a vote cast here and one cast on the card behind
+            // agree immediately.
+            voteScore: app.voteScore(for: post),
+            voteDirection: app.voteDirection(for: post),
+            canVoteDown: post.canVoteDown
         )
     }
 
@@ -944,29 +1139,60 @@ struct PostVideoFullScreen: ViewModifier {
 
     func body(content: Content) -> some View {
         content.fullScreenCover(item: $video) { current in
-            if let presentation {
-                let list = siblings.isEmpty ? [current] : siblings
-                PostVideoPager(
-                    videos: list,
-                    startingAt: list.firstIndex { $0.src == current.src } ?? 0,
-                    context: presentation.context(app: app),
-                    onLike: {
-                        let wasLiked = app.isLiked(presentation.post)
-                        app.toggleLike(presentation.post)
-                        if !wasLiked { onRemoteLike?() }
-                    },
-                    onComment: {
+            // Claims audio while the cover is up: whatever was playing inline
+            // behind it is still mounted and would otherwise keep going, over
+            // the top of every video the reader then swipes to.
+            //
+            // Driven by the *cover's* lifecycle, not the presenter's. A feed
+            // card can scroll out and be destroyed while the player is open,
+            // and a flag set from there would never be cleared — leaving
+            // autoplay dead for the rest of the session.
+            claimingAudio {
+                if let presentation {
+                    let list = siblings.isEmpty ? [current] : siblings
+                    PostVideoPager(
+                        videos: list,
+                        startingAt: list.firstIndex { $0.src == current.src } ?? 0,
+                        context: presentation.context(app: app),
+                        topicID: presentation.post.id,
+                        onLike: {
+                            let wasLiked = app.isLiked(presentation.post)
+                            app.toggleLike(presentation.post)
+                            if !wasLiked { onRemoteLike?() }
+                        },
+                        onComment: {
+                            video = nil
+                            onComment?()
+                        },
+                        onVote: { direction, reaction in
+                            app.castVote(direction, on: presentation.post, reaction: reaction)
+                        },
+                        onRepost: {
+                            video = nil
+                            app.startRepost(
+                                of: presentation.post,
+                                url: presentation.post.topicURL,
+                                author: presentation.profileTarget?.username
+                            )
+                        },
+                        onReport: nil,
+                        node: presentation.node,
+                        author: presentation.profileTarget
+                    ) {
                         video = nil
-                        onComment?()
-                    },
-                    node: presentation.node,
-                    author: presentation.profileTarget
-                ) {
-                    video = nil
+                    }
                 }
             }
         }
     }
+}
+
+/// Marks its content as the owner of media audio while it is on screen.
+@MainActor
+func claimingAudio<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    content()
+        .onAppear { VideoMuteState.shared.isFullScreenActive = true }
+        .onDisappear { VideoMuteState.shared.isFullScreenActive = false }
 }
 
 /// Presents `PostImageViewer` with the same chrome the video player uses.
@@ -981,10 +1207,12 @@ struct PostImageFullScreen: ViewModifier {
 
     func body(content: Content) -> some View {
         content.fullScreenCover(isPresented: isPresented) {
+            claimingAudio {
             PostImageViewer(
                 images: images,
                 selection: $selection,
                 context: presentation?.context(app: app),
+                topicID: presentation?.post.id,
                 node: presentation?.node,
                 author: presentation?.profileTarget,
                 onLike: presentation.map { presentation in
@@ -999,6 +1227,21 @@ struct PostImageFullScreen: ViewModifier {
                         images = []
                         action()
                     }
+                },
+                onVote: presentation.map { presentation in
+                    { direction, reaction in
+                        app.castVote(direction, on: presentation.post, reaction: reaction)
+                    }
+                },
+                onRepost: presentation.map { presentation in
+                    {
+                        images = []
+                        app.startRepost(
+                            of: presentation.post,
+                            url: presentation.post.topicURL,
+                            author: presentation.profileTarget?.username
+                        )
+                    }
                 }
             ) {
                 images = []
@@ -1006,6 +1249,7 @@ struct PostImageFullScreen: ViewModifier {
             // Clear, so the viewer's own dimming layer is all there is — the
             // drag-to-dismiss fade then reveals the reader behind the image.
             .presentationBackground(.clear)
+            }
         }
     }
 
@@ -1071,8 +1315,22 @@ struct FeedVideoTile: View {
     /// showing a black rectangle and a mute button that does nothing.
     @State private var isUnplayable = false
     @State private var statusObservation: NSKeyValueObservation?
+    @State private var bufferObservation: NSKeyValueObservation?
+    @State private var isBuffering = false
+    /// Token for the loop observer, so it can be removed. Left registered, its
+    /// closure keeps the player alive and restarts it on every loop — audio
+    /// from a card nobody can see any more.
+    @State private var endObserver: NSObjectProtocol?
+    /// The last playback decision, mirrored into state on purpose.
+    ///
+    /// The loop closure captures a *copy* of this view, and a copy's
+    /// `@Environment` values are frozen at capture time — reading them there
+    /// would let the end of a clip resume audio on rules that no longer hold.
+    /// `@State` is a reference to a box, so this reads the current answer.
+    @State private var isPlaybackAllowed = false
     @Environment(VideoMuteState.self) private var mute
     @Environment(VideoPosterStore.self) private var posters
+    @Environment(\.mediaAutoplayEnabled) private var autoplayEnabled
     @Environment(\.scenePhase) private var scenePhase
 
     private let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -1093,6 +1351,7 @@ struct FeedVideoTile: View {
             .background { poster }
             .overlay { surface }
             .clipShape(shape)
+            .overlay { if showsLoading { VideoLoadingIndicator() } }
             .overlay(alignment: .bottomTrailing) {
                 if !isUnplayable { muteButton }
             }
@@ -1105,15 +1364,32 @@ struct FeedVideoTile: View {
             .contentShape(shape)
             .onTapGesture { if !isUnplayable { onTap?() } }
             .onChange(of: mute.isMuted) { _, muted in player?.isMuted = muted }
+            .onChange(of: autoplayEnabled) { _, _ in updatePlayback() }
+            .onChange(of: mute.isFullScreenActive) { _, _ in updatePlayback() }
             .onChange(of: scenePhase) { _, _ in updatePlayback() }
-            .task { posters.loadIfNeeded(url.absoluteString, url: url) }
-            .onAppear(perform: preparePlayer)
-            .onDisappear {
-                statusObservation?.invalidate()
-                statusObservation = nil
-                player?.pause()
-                player = nil
-            }
+            .task { await preparePlayer() }
+            .onDisappear(perform: teardown)
+    }
+
+    /// Only while the reader is looking at this card: one that scrolled away is
+    /// not loading, it's paused. `player == nil` covers the stream lookup, which
+    /// happens before there is anything to observe.
+    private var showsLoading: Bool {
+        guard !isUnplayable, isVisible else { return false }
+        return player == nil || isBuffering
+    }
+
+    private func teardown() {
+        statusObservation?.invalidate()
+        statusObservation = nil
+        bufferObservation?.invalidate()
+        bufferObservation = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        endObserver = nil
+        player?.pause()
+        player = nil
     }
 
     @ViewBuilder
@@ -1150,23 +1426,38 @@ struct FeedVideoTile: View {
                 .frame(width: 28, height: 28)
                 .background(.black.opacity(0.5), in: Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .padding(10)
     }
 
-    private func preparePlayer() {
+    private func preparePlayer() async {
         guard player == nil else { return }
-        let item = AVPlayerItem(url: url)
+        // The topic's `topic_video_url` is the original upload. Playing it
+        // directly is what every other surface stopped doing: the HLS rendition
+        // is adaptive and answered reliably where the original intermittently
+        // 404s, which is what left cards sitting on their poster.
+        guard let playable = await AnyVideoResolver.shared.playableURL(forUpload: url) else { return }
+        // Keyed by the original URL so the card's aspect ratio stays stable,
+        // but decoded from the stream that actually exists.
+        posters.loadIfNeeded(url.absoluteString, url: playable)
+        let item = AVPlayerItem(url: playable)
         let player = AVPlayer(playerItem: item)
         player.isMuted = mute.isMuted
         player.actionAtItemEnd = .none
-        NotificationCenter.default.addObserver(
+        endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
             queue: .main
         ) { _ in
-            Task { @MainActor in player.seek(to: .zero); player.play() }
+            Task { @MainActor in
+                player.seek(to: .zero)
+                // Looping must not override the reasons this card was stopped;
+                // otherwise the end of a clip resurrects audio behind an
+                // overlay or a full-screen player.
+                if isPlaybackAllowed { player.play() }
+            }
         }
+        bufferObservation = observeBuffering(player) { isBuffering = $0 }
         // A 404 surfaces here, not as a thrown error.
         statusObservation = item.observe(\.status) { item, _ in
             guard item.status == .failed else { return }
@@ -1181,7 +1472,12 @@ struct FeedVideoTile: View {
 
     private func updatePlayback() {
         guard let player, !isUnplayable else { return }
-        if isVisible && scenePhase == .active {
+        let shouldPlay = isVisible
+            && autoplayEnabled
+            && !mute.isFullScreenActive
+            && scenePhase == .active
+        isPlaybackAllowed = shouldPlay
+        if shouldPlay {
             player.isMuted = mute.isMuted
             player.play()
         } else {
@@ -1237,6 +1533,12 @@ nonisolated struct PostVideoContext: Equatable {
     var isLiked: Bool
     var commentCount: Int
     var shareURL: URL?
+    /// discourse-vote on the topic's first post. Nil score means voting doesn't
+    /// apply to that node, and the bar falls back to a plain like — the same
+    /// rule the reader's OP bar follows.
+    var voteScore: Int?
+    var voteDirection: VoteDirection = .none
+    var canVoteDown: Bool = false
 
     var nodeLetter: String {
         let stripped = nodeName.hasPrefix("n/") ? String(nodeName.dropFirst(2)) : nodeName
@@ -1280,8 +1582,13 @@ struct PostVideoPager: View {
     let videos: [PostVideo]
     let startingAt: Int
     var context: PostVideoContext?
+    /// The topic these videos belong to, so a recommendation never repeats it.
+    var topicID: Int?
     var onLike: (() -> Void)?
     var onComment: (() -> Void)?
+    var onVote: ((VoteDirection, String?) -> Void)?
+    var onRepost: (() -> Void)?
+    var onReport: (() -> Void)?
     /// Destinations opened over the video. Presented here rather than in the
     /// post behind, so dismissing one returns to the video.
     var node: SidebarNodeSummary?
@@ -1294,14 +1601,30 @@ struct PostVideoPager: View {
     @State private var transport = VideoTransportState()
     /// Mirrors the chrome's covered state, so a hidden clip stops playing.
     @State private var isCovered = false
+    /// Videos from other topics, appended as the reader swipes up. Each brings
+    /// its own post, so the chrome changes with the page.
+    @State private var recommendations: [VideoFeedStore.Item] = []
+    /// A top-up is in flight; keeps one swipe from starting several walks.
+    @State private var isLoadingRecommendation = false
+    /// Nodes resolved for recommended videos, so their chrome gets the real
+    /// logo instead of an initial.
+    @State private var recommendedNodes: [Int: SidebarNodeSummary] = [:]
+    /// 举报 target, presented over the player rather than behind it — a sheet on
+    /// this view stays inside the full-screen cover.
+    @State private var flagTarget: FlagTarget?
     @Environment(VideoMuteState.self) private var mute
+    @Environment(AppState.self) private var app
 
     init(
         videos: [PostVideo],
         startingAt: Int,
         context: PostVideoContext? = nil,
+        topicID: Int? = nil,
         onLike: (() -> Void)? = nil,
         onComment: (() -> Void)? = nil,
+        onVote: ((VoteDirection, String?) -> Void)? = nil,
+        onRepost: (() -> Void)? = nil,
+        onReport: (() -> Void)? = nil,
         node: SidebarNodeSummary? = nil,
         author: UserProfileTarget? = nil,
         onClose: @escaping () -> Void
@@ -1309,8 +1632,12 @@ struct PostVideoPager: View {
         self.videos = videos
         self.startingAt = startingAt
         self.context = context
+        self.topicID = topicID
         self.onLike = onLike
         self.onComment = onComment
+        self.onVote = onVote
+        self.onRepost = onRepost
+        self.onReport = onReport
         self.node = node
         self.author = author
         self.onClose = onClose
@@ -1319,12 +1646,19 @@ struct PostVideoPager: View {
 
     var body: some View {
         MediaViewerChrome(
-            context: context,
-            pageIndicator: videos.count > 1 ? "\(selection + 1)/\(videos.count)" : nil,
-            node: node,
-            author: author,
-            onLike: onLike,
-            onComment: onComment,
+            context: currentContext,
+            // Only the post's own videos are a countable set; what comes after
+            // is an open-ended feed, so the indicator stops there.
+            pageIndicator: selection < videos.count && videos.count > 1
+                ? "\(selection + 1)/\(videos.count)"
+                : nil,
+            node: currentNode,
+            author: currentAuthor,
+            onLike: currentOnLike,
+            onComment: currentOnComment,
+            onVote: currentOnVote,
+            onRepost: currentOnRepost,
+            onReport: currentOnReport,
             middleBar: AnyView(VideoTransportBar(transport: transport)),
             onClose: onClose,
             isVisible: $isChromeVisible,
@@ -1334,35 +1668,193 @@ struct PostVideoPager: View {
         ) {
             pages
         }
-        // Each video reports its own duration and position.
-        .onChange(of: selection) { _, _ in transport.reset() }
+        // Resetting the transport is the incoming *page's* job, not this one's:
+        // both fire on a selection change with no defined order, and this one
+        // landing second wiped the closures the new page had just published,
+        // leaving play/pause and the scrubber inert.
+        .onChange(of: selection) { _, _ in
+            Task { await topUpRecommendations() }
+        }
+        .task {
+            // One spare page from the start, so the very first upward swipe on
+            // a single-video post has somewhere to go.
+            await topUpRecommendations()
+        }
+        .sheet(item: $flagTarget) { target in
+            FlagSheet(target: target)
+        }
     }
 
+    // MARK: Pages
+
+    private var pageCount: Int { videos.count + recommendations.count }
+
+    private func video(at index: Int) -> PostVideo? {
+        if index < videos.count { return videos[index] }
+        let offset = index - videos.count
+        return recommendations.indices.contains(offset) ? recommendations[offset].video : nil
+    }
+
+    /// The recommendation showing, if the reader has swiped past the post's own
+    /// videos.
+    private var currentRecommendation: VideoFeedStore.Item? {
+        let offset = selection - videos.count
+        guard offset >= 0, recommendations.indices.contains(offset) else { return nil }
+        return recommendations[offset]
+    }
+
+    // MARK: Chrome for whichever page is showing
+
+    private var currentContext: PostVideoContext? {
+        guard let item = currentRecommendation else { return context }
+        return PostVideoPresentation(
+            post: item.post,
+            node: recommendedNodes[item.post.id]
+        ).context(app: app)
+    }
+
+    private var currentNode: SidebarNodeSummary? {
+        guard let item = currentRecommendation else { return node }
+        return recommendedNodes[item.post.id]
+    }
+
+    private var currentAuthor: UserProfileTarget? {
+        guard let item = currentRecommendation else { return author }
+        return item.post.authorProfileTarget
+    }
+
+    private var currentOnLike: (() -> Void)? {
+        guard let item = currentRecommendation else { return onLike }
+        return {
+            let wasLiked = app.isLiked(item.post)
+            app.toggleLike(item.post)
+            // The suggestion was resolved through its topic, so unlike a feed
+            // row this one knows the first post's id and the like can be real.
+            guard !wasLiked, let postID = item.post.opPostID else { return }
+            Task { try? await DiscourseClient().likePost(id: postID) }
+        }
+    }
+
+    private var currentOnComment: (() -> Void)? {
+        guard let item = currentRecommendation else { return onComment }
+        return {
+            onClose()
+            app.openTopic(id: item.post.id)
+        }
+    }
+
+    /// A recommendation votes through `app` like a feed row does, so the vote
+    /// survives the player closing and shows on the card if it's on screen.
+    private var currentOnVote: ((VoteDirection, String?) -> Void)? {
+        guard let item = currentRecommendation else { return onVote }
+        return { direction, reaction in
+            app.castVote(direction, on: item.post, reaction: reaction)
+        }
+    }
+
+    private var currentOnRepost: (() -> Void)? {
+        guard let item = currentRecommendation else { return onRepost }
+        return {
+            onClose()
+            app.startRepost(of: item.post, url: item.post.topicURL)
+        }
+    }
+
+    private var currentOnReport: (() -> Void)? {
+        guard let item = currentRecommendation else {
+            // The post these videos belong to. `onReport` from the presenter is
+            // unused: the sheet has to be presented from inside the cover, or it
+            // opens behind it.
+            guard let topicID else { return onReport }
+            return {
+                flagTarget = FlagTarget(
+                    kind: .topic,
+                    id: topicID,
+                    authorUsername: context?.authorUsername
+                )
+            }
+        }
+        return {
+            flagTarget = FlagTarget(
+                kind: .topic,
+                id: item.post.id,
+                authorUsername: item.post.authorUsername
+            )
+        }
+    }
+
+    /// Keeps exactly one unseen page below the reader, which is what makes the
+    /// upward swipe feel endless rather than loading on demand.
+    private func topUpRecommendations() async {
+        guard selection >= pageCount - 1, !isLoadingRecommendation else { return }
+        isLoadingRecommendation = true
+        defer { isLoadingRecommendation = false }
+
+        var excluded = Set(recommendations.map(\.post.id))
+        if let topicID { excluded.insert(topicID) }
+        guard let item = await VideoFeedStore.shared.next(excluding: excluded) else { return }
+        recommendations.append(item)
+        if let node = await NodeCatalog.shared.node(slug: item.post.node) {
+            recommendedNodes[item.post.id] = node
+        }
+    }
+
+
     /// `.page` on a rotated TabView is the standard way to get vertical paging:
-    /// rotate the container -90°, counter-rotate each page. The frame is
-    /// swapped to match, measured from the container rather than `UIScreen.main`
-    /// — that's deprecated in iOS 26 and wrong under iPad multitasking anyway.
+    /// rotate the container, counter-rotate each page. The frame is swapped to
+    /// match, measured from the container rather than `UIScreen.main` — that's
+    /// deprecated in iOS 26 and wrong under iPad multitasking anyway.
+    ///
+    /// The sign matters and was wrong. A pager lays page 1 to the local right of
+    /// page 0; rotating the container **-90°** turns that "right" into screen
+    /// *up*, so the next video sat above and only a downward swipe reached it —
+    /// backwards from every short-video app, and the reason an upward swipe
+    /// looked like it produced nothing. At **+90°** the next page is below,
+    /// where swiping up belongs.
     private var pages: some View {
         GeometryReader { proxy in
             TabView(selection: $selection) {
-                ForEach(Array(videos.enumerated()), id: \.offset) { index, video in
-                    FullScreenVideoPage(
-                        video: video,
-                        isActive: selection == index && !isCovered,
-                        isChromeVisible: $isChromeVisible,
-                        transport: transport
-                    )
+                ForEach(0..<pageCount, id: \.self) { index in
+                    Group {
+                        if let video = video(at: index) {
+                            FullScreenVideoPage(
+                                video: video,
+                                isActive: selection == index && !isCovered,
+                                isChromeVisible: $isChromeVisible,
+                                transport: transport
+                            )
+                        }
+                    }
                     .frame(width: proxy.size.width, height: proxy.size.height)
-                    .rotationEffect(.degrees(90))
+                    .rotationEffect(.degrees(-90))
                     .tag(index)
                 }
             }
             .frame(width: proxy.size.height, height: proxy.size.width)
-            .rotationEffect(.degrees(-90))
+            .rotationEffect(.degrees(90))
             .tabViewStyle(.page(indexDisplayMode: .never))
             .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
         .ignoresSafeArea()
+        // Outside the rotation, so the translation is in screen coordinates.
+        .simultaneousGesture(closeDragGesture)
+    }
+
+    /// Pulling down on the first page closes the player.
+    ///
+    /// Only on the first page: everywhere else a downward drag is the pager's
+    /// own "previous video", and stealing it would make the feed one-way. The
+    /// gesture is simultaneous rather than high-priority so the TabView keeps
+    /// its paging on every other page.
+    private var closeDragGesture: some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onEnded { value in
+                guard selection == 0 else { return }
+                let pulledDown = value.translation.height > 110 || value.velocity.height > 800
+                let mostlyVertical = value.translation.height > abs(value.translation.width) * 1.2
+                guard pulledDown, mostlyVertical else { return }
+                onClose()
+            }
     }
 }
 
@@ -1379,6 +1871,10 @@ struct MediaViewerChrome<Content: View>: View {
     var author: UserProfileTarget?
     var onLike: (() -> Void)?
     var onComment: (() -> Void)?
+    var onVote: ((VoteDirection, String?) -> Void)?
+    var onRepost: (() -> Void)?
+    /// Opens the native flag sheet for whatever is showing.
+    var onReport: (() -> Void)?
     /// Sits between the caption and the action bar. The video puts its
     /// transport row here; the image viewer has nothing to put.
     var middleBar: AnyView?
@@ -1424,6 +1920,9 @@ struct MediaViewerChrome<Content: View>: View {
                     }
                 }
                 .transition(.move(edge: .trailing).combined(with: .opacity))
+                // This chrome is itself inside a full-screen cover, so the node
+                // page needs its own host or its links leave for Safari.
+                .appPresentationHost(app: app)
             }
         }
         .overlay {
@@ -1456,7 +1955,13 @@ struct MediaViewerChrome<Content: View>: View {
             if let middleBar { middleBar }
 
             if let context {
-                PostVideoActionBar(context: context, onLike: onLike, onComment: onComment)
+                PostVideoActionBar(
+                    context: context,
+                    onLike: onLike,
+                    onComment: onComment,
+                    onVote: onVote,
+                    onRepost: onRepost
+                )
             }
         }
         .padding(.horizontal, FloatingHeader.horizontalInset)
@@ -1498,7 +2003,7 @@ struct MediaViewerChrome<Content: View>: View {
                 // the title below is not a profile link.
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .disabled(author == nil)
             .accessibilityLabel("打开 \(context.authorUsername ?? "") 的主页")
 
@@ -1542,7 +2047,7 @@ struct MediaViewerChrome<Content: View>: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .disabled(node == nil)
                 .accessibilityLabel("打开节点 \(context.nodeName)")
             }
@@ -1559,12 +2064,25 @@ struct MediaViewerChrome<Content: View>: View {
             Menu {
                 if let url = context?.shareURL {
                     ShareLink(item: url) { Label("分享", systemImage: "square.and.arrow.up") }
+                    Button {
+                        UIPasteboard.general.setItems([[
+                            UTType.url.identifier: url,
+                            UTType.utf8PlainText.identifier: url.absoluteString,
+                        ]])
+                        ToastCenter.shared.show(AppString("链接已复制"))
+                    } label: {
+                        Label("复制链接", systemImage: "link")
+                    }
+                }
+                if let onReport {
+                    Button(role: .destructive, action: onReport) {
+                        Label("举报", systemImage: "flag")
+                    }
                 }
             } label: {
                 FloatingHeaderIcon(systemName: "ellipsis")
             }
-            .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
             .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
             .accessibilityLabel("更多")
         }
@@ -1584,69 +2102,119 @@ struct MediaViewerChrome<Content: View>: View {
     }
 }
 
-/// Like / comment / share row pinned to the bottom of the full-screen player.
+/// The player's own action row, laid out like the OP's in the post reader:
+/// counted stats in filled capsules on the left, icon-only actions as circles on
+/// the right, everything the same height.
+///
+/// Same shapes, different fill — `Theme.surface` disappears against video, so
+/// the capsules and circles are white at low opacity instead. The upvote uses
+/// Lucide's `arrow-big-up` like the reader's `VoteControl`, and it is a *like*
+/// rather than a score: the chrome context carries `likeCount`/`isLiked`, not a
+/// vote direction, and no surface here can downvote.
 private struct PostVideoActionBar: View {
     let context: PostVideoContext
     var onLike: (() -> Void)?
     var onComment: (() -> Void)?
+    /// discourse-vote. Absent (or a nil score) falls back to the like button.
+    var onVote: ((VoteDirection, String?) -> Void)?
+    /// Quotes this topic in the composer — the same 转发 the reader offers, not
+    /// a share sheet.
+    var onRepost: (() -> Void)?
+
+    /// Matches `PostDetailOverlay.actionControlHeight`, so the two rows read as
+    /// the same control set.
+    private static let controlHeight: CGFloat = 40
 
     var body: some View {
         HStack(spacing: 10) {
-            Button {
-                onLike?()
-            } label: {
-                pill {
-                    Image(systemName: context.isLiked ? "arrow.up.circle.fill" : "arrow.up")
-                        .foregroundStyle(context.isLiked ? Theme.love : .white)
-                    Text(Self.compact(context.likeCount))
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(context.isLiked ? "取消点赞" : "点赞")
-
-            Button {
-                onComment?()
-            } label: {
-                pill {
-                    Image(systemName: "bubble.left")
-                    Text(Self.compact(context.commentCount))
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("评论")
-
-            if let url = context.shareURL {
-                ShareLink(item: url) {
-                    pill {
-                        Image(systemName: "arrow.2.squarepath")
-                        Text("转发")
+            capsule {
+                if let score = context.voteScore, let onVote {
+                    // The reader's own control, so up *and* down are here and a
+                    // long press still opens the face picker.
+                    VoteControl(
+                        score: score,
+                        direction: context.voteDirection,
+                        canVoteDown: context.canVoteDown,
+                        onVote: onVote
+                    )
+                    // Tuned for light surfaces; over video the unvoted glyphs
+                    // and the score need to be white.
+                    .environment(\.voteControlTint, .white)
+                } else {
+                    Button {
+                        onLike?()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(VoteControl.assetName(for: .up, filled: context.isLiked))
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 17, height: 17)
+                                .foregroundStyle(context.isLiked ? Theme.accent : .white)
+                            count(context.likeCount)
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.pressable)
+                    .accessibilityLabel(context.isLiked ? AppString("取消点赞") : AppString("点赞"))
                 }
-                .buttonStyle(.plain)
             }
 
-            Spacer(minLength: 0)
+            capsule {
+                Button {
+                    onComment?()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bubble.left")
+                            .font(.system(size: 15, weight: .medium))
+                        count(context.commentCount)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.pressable)
+                .accessibilityLabel("评论")
+            }
+
+            Spacer(minLength: 8)
+
+            if let onRepost {
+                Button(action: onRepost) {
+                    Image(systemName: "arrow.2.squarepath")
+                        .font(.system(size: 15, weight: .medium))
+                        .frame(width: Self.controlHeight, height: Self.controlHeight)
+                        .background(.white.opacity(0.16), in: Circle())
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.pressableIcon)
+                .accessibilityLabel("转发")
+            }
         }
-        // Insets and the scrim come from the enclosing bottom stack, so the
-        // caption, transport row and this row share one gradient.
-        .font(Theme.body(13, weight: .semibold))
+        .font(Theme.body(12, weight: .medium))
         .foregroundStyle(.white)
     }
 
-    private func pill<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 6) {
+    /// The reader's counts never wrap; neither do these.
+    private func count(_ value: Int) -> some View {
+        Text(Self.compact(value))
+            .font(Theme.body(12, weight: .semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func capsule<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 12) {
             content()
         }
-        .font(Theme.body(13, weight: .semibold))
         .padding(.horizontal, 12)
-        .frame(height: 32)
+        .frame(height: Self.controlHeight)
         .background(.white.opacity(0.16), in: Capsule())
     }
 
     /// 18300 → "1.8万", matching the feed's counts.
     static func compact(_ value: Int) -> String {
         if value >= 10_000 {
-            return String(format: "%.1f万", Double(value) / 10_000)
+            return String(format: AppString("%.1f万"), Double(value) / 10_000)
         }
         if value >= 1_000 {
             return String(format: "%.1fk", Double(value) / 1_000)
@@ -1668,6 +2236,19 @@ private struct FullScreenVideoPage: View {
 
     @State private var player: AVPlayer?
     @State private var timeObserver: Any?
+    @State private var endObserver: NSObjectProtocol?
+    /// Whether this page should be playing, as of *now*.
+    ///
+    /// `isActive` can't be read once the work goes async: preparing a player
+    /// awaits the HLS lookup, and the view value that started that work is a
+    /// snapshot — a page swiped to during the lookup still sees the `isActive`
+    /// it had when it was a neighbour. That is why a recommendation swiped up
+    /// to came out silent and frozen. `@State` is a reference to a box, so this
+    /// reads the current answer whichever order the events arrive in; nil means
+    /// nothing has decided yet.
+    @State private var isPlaybackAllowed: Bool?
+    @State private var bufferObservation: NSKeyValueObservation?
+    @State private var isBuffering = false
     @Environment(VideoMuteState.self) private var mute
 
     var body: some View {
@@ -1684,45 +2265,67 @@ private struct FullScreenVideoPage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
             }
+
+            // The wait here is the longest of the three surfaces: resolving the
+            // stream, then buffering it, on a page that is otherwise black.
+            if showsLoading {
+                VideoLoadingIndicator(size: 26)
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
             withAnimation(.quick) { isChromeVisible.toggle() }
         }
-        .onAppear(perform: prepare)
+        .task { await prepare() }
         .onDisappear(perform: teardown)
         .onChange(of: isActive) { _, active in
+            isPlaybackAllowed = active
             if active {
+                // The player may still be resolving; `prepare` finishes the job
+                // by reading `isPlaybackAllowed` when it has one.
                 player?.play()
-                publishControls()
+                takeOverTransport()
             } else {
                 player?.pause()
             }
-            if active { transport.isPlaying = true }
         }
         .onChange(of: mute.isMuted) { _, muted in player?.isMuted = muted }
     }
 
-    private func prepare() {
-        guard player == nil, let url = PostInlineRenderer.resolvedLink(video.src) else { return }
+    private func prepare() async {
+        guard player == nil else { return }
+        // Seeded before the await, so an `onChange` landing mid-lookup wins.
+        if isPlaybackAllowed == nil { isPlaybackAllowed = isActive }
+        guard let url = await AnyVideoResolver.shared.playableURL(for: video) else { return }
         let player = AVPlayer(url: url)
         player.isMuted = mute.isMuted
         player.actionAtItemEnd = .none
-        NotificationCenter.default.addObserver(
+        endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: player.currentItem,
             queue: .main
         ) { _ in
-            Task { @MainActor in player.seek(to: .zero); player.play() }
+            Task { @MainActor in
+                player.seek(to: .zero)
+                // Only the page on screen loops. Restarting unconditionally
+                // gave a swiped-away page a second life, audio and all.
+                if isPlaybackAllowed == true { player.play() }
+            }
         }
+
+        bufferObservation = observeBuffering(player) { isBuffering = $0 }
 
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.2, preferredTimescale: 600),
             queue: .main
         ) { time in
             Task { @MainActor in
-                // Only the visible page drives the shared transport row.
-                guard isActive, !transport.isScrubbing else { return }
+                // Only the visible page drives the shared transport row — and
+                // read that from state, not from the `isActive` this closure
+                // captured. A page prepared as a neighbour captured `false`, so
+                // once swiped to it never reported a position and the scrub bar
+                // stayed pinned at zero while the video played.
+                guard isPlaybackAllowed == true, !transport.isScrubbing else { return }
                 let total = player.currentItem?.duration.seconds ?? 0
                 if total.isFinite, total > 0 {
                     transport.duration = total
@@ -1732,10 +2335,23 @@ private struct FullScreenVideoPage: View {
         }
 
         self.player = player
-        if isActive {
+        // Decided from live state, not from the `isActive` this call started
+        // with: by now the reader may well have swiped onto this page.
+        if isPlaybackAllowed == true {
             player.play()
-            publishControls()
+            takeOverTransport()
         }
+    }
+
+    /// Clears the shared transport row and rewires it to this page.
+    ///
+    /// One call, in one place, so the elapsed time, the scrub position and the
+    /// play/pause button always describe the video on screen — and never a
+    /// half-reset mixture of the old one and the new.
+    private func takeOverTransport() {
+        transport.reset()
+        publishControls()
+        transport.isPlaying = player?.timeControlStatus != .paused
     }
 
     /// Hands the pager's transport row a way to drive this page's player.
@@ -1756,9 +2372,22 @@ private struct FullScreenVideoPage: View {
         }
     }
 
+    /// Only the page being watched reports loading; neighbours are prepared
+    /// ahead of time and are not waiting on anything the reader can see.
+    private var showsLoading: Bool {
+        guard isPlaybackAllowed == true else { return false }
+        return player == nil || isBuffering
+    }
+
     private func teardown() {
         if let timeObserver { player?.removeTimeObserver(timeObserver) }
         timeObserver = nil
+        bufferObservation?.invalidate()
+        bufferObservation = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        endObserver = nil
         player?.pause()
         player = nil
     }
@@ -1779,8 +2408,8 @@ private struct VideoTransportBar: View {
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(transport.isPlaying ? "暂停" : "播放")
+            .buttonStyle(.pressable)
+            .accessibilityLabel(transport.isPlaying ? AppString("暂停") : AppString("播放"))
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
@@ -1822,8 +2451,8 @@ private struct VideoTransportBar: View {
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(mute.isMuted ? "取消静音" : "静音")
+            .buttonStyle(.pressable)
+            .accessibilityLabel(mute.isMuted ? AppString("取消静音") : AppString("静音"))
         }
     }
 
@@ -1845,13 +2474,22 @@ struct PostImageViewer: View {
     /// Same post identity the video viewer shows. Optional so the post detail's
     /// inline images can still open without it.
     var context: PostVideoContext?
+    /// The topic these images belong to, for 举报 and 转发. Same reason the video
+    /// pager needs it: the context alone carries no id.
+    var topicID: Int?
     var node: SidebarNodeSummary?
     var author: UserProfileTarget?
     var onLike: (() -> Void)?
     var onComment: (() -> Void)?
+    var onVote: ((VoteDirection, String?) -> Void)?
+    var onRepost: (() -> Void)?
+
     let onClose: () -> Void
 
     @State private var isChromeVisible = true
+    /// 举报, presented from inside the viewer — a sheet put on the presenter
+    /// would open behind this cover.
+    @State private var flagTarget: FlagTarget?
     /// Drag-to-dismiss: how far the image has been pulled down.
     @State private var dragOffset: CGFloat = 0
     /// nil until this gesture's direction is decided; false = it's a page
@@ -1868,6 +2506,17 @@ struct PostImageViewer: View {
             author: author,
             onLike: onLike,
             onComment: onComment,
+            onVote: onVote,
+            onRepost: onRepost,
+            onReport: topicID.map { id in
+                {
+                    flagTarget = FlagTarget(
+                        kind: .topic,
+                        id: id,
+                        authorUsername: context?.authorUsername
+                    )
+                }
+            },
             backgroundOpacity: 1 - Double(min(max(dragOffset, 0) / 500, 0.8)),
             onClose: onClose,
             isVisible: $isChromeVisible
@@ -1890,6 +2539,9 @@ struct PostImageViewer: View {
             .offset(y: dragOffset)
             .scaleEffect(max(1 - dragOffset / 1400, 0.85))
             .simultaneousGesture(dismissDragGesture, isEnabled: !isZoomed)
+        }
+        .sheet(item: $flagTarget) { target in
+            FlagSheet(target: target)
         }
     }
 
@@ -1925,13 +2577,20 @@ struct PostImageViewer: View {
     }
 }
 
-/// Pinch to zoom, drag to pan while zoomed, double-tap to toggle.
-private struct ZoomableImage: View {
-    let urlString: String
+/// Pinch to zoom, drag to pan while zoomed, double-tap to toggle — around
+/// whatever content is handed to it.
+///
+/// Split out from `ZoomableImage` so the chat's own image preview, which loads
+/// its picture itself (it also has to share and save it), can zoom without
+/// downloading it a second time through a URL-driven view.
+struct ZoomableContainer<Content: View>: View {
     var onToggleChrome: (() -> Void)?
-    /// Reports zoomed-in state so the viewer disables drag-to-dismiss while
+    /// Reports zoomed-in state so a viewer can disable drag-to-dismiss while
     /// the drag should pan the magnified image instead.
     var onZoomChanged: ((Bool) -> Void)?
+    /// Must size itself to the *content* — an `Image` with `.scaledToFit()`
+    /// does, and that fitted frame is what the pan limits are measured from.
+    @ViewBuilder let content: Content
 
     @State private var scale: CGFloat = 1
     @State private var committedScale: CGFloat = 1
@@ -1944,34 +2603,22 @@ private struct ZoomableImage: View {
     private let maxScale: CGFloat = 6
 
     var body: some View {
-        // Full resolution: this view zooms to 6x, so a screen-sized decode
-        // would go soft the moment it is magnified.
-        CachedRemoteImage(
-            url: PostInlineRenderer.resolvedLink(urlString),
-            maxPointSize: CachedRemoteImage<EmptyView, EmptyView>.fullResolution
-        ) { image in
-            image
-                .resizable()
-                .scaledToFit()
-                // The displayed (pre-zoom) size, needed to compute pan limits.
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { imageSize = $0 }
-        } placeholder: {
-            ProgressView().tint(.white)
-        }
-        .scaleEffect(scale)
-        .offset(offset)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
-        .gesture(panGesture, isEnabled: scale > 1)
-        .gesture(zoomGesture)
-        .onTapGesture(count: 2, perform: toggleZoom)
-        // Single tap hides the chrome, matching the video viewer. Ordered after
-        // the double tap so it doesn't swallow it.
-        .onTapGesture { onToggleChrome?() }
+        content
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { imageSize = $0 }
+            .scaleEffect(scale)
+            .offset(offset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
+            .gesture(panGesture, isEnabled: scale > 1)
+            .gesture(zoomGesture)
+            .onTapGesture(count: 2, perform: toggleZoom)
+            // Single tap hides the chrome, matching the video viewer. Ordered
+            // after the double tap so it doesn't swallow it.
+            .onTapGesture { onToggleChrome?() }
     }
 
-    /// Only active while zoomed in, so it never competes with the pager's
+    /// Only active while zoomed in, so it never competes with a pager's
     /// horizontal swipe at 1×.
     private var panGesture: some Gesture {
         DragGesture()
@@ -2026,6 +2673,30 @@ private struct ZoomableImage: View {
             width: min(max(proposed.width, -limitX), limitX),
             height: min(max(proposed.height, -limitY), limitY)
         )
+    }
+}
+
+/// A remote image in a `ZoomableContainer`.
+private struct ZoomableImage: View {
+    let urlString: String
+    var onToggleChrome: (() -> Void)?
+    var onZoomChanged: ((Bool) -> Void)?
+
+    var body: some View {
+        ZoomableContainer(onToggleChrome: onToggleChrome, onZoomChanged: onZoomChanged) {
+            // Full resolution: this zooms to 6x, so a screen-sized decode would
+            // go soft the moment it is magnified.
+            CachedRemoteImage(
+                url: PostInlineRenderer.resolvedLink(urlString),
+                maxPointSize: CachedRemoteImage<EmptyView, EmptyView>.fullResolution
+            ) { image in
+                image
+                    .resizable()
+                    .scaledToFit()
+            } placeholder: {
+                ProgressView().tint(.white)
+            }
+        }
     }
 }
 
@@ -2243,7 +2914,7 @@ struct PostDetailsView: View {
                 }
                 .foregroundStyle(Theme.text.opacity(0.8))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
 
             if isExpanded {
                 ForEach(blocks) { block in
@@ -2298,7 +2969,7 @@ struct PostSpoilerView: View {
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.22)) { isRevealed.toggle() }
         }
-        .accessibilityLabel(isRevealed ? "剧透内容已显示" : "剧透内容，点击查看")
+        .accessibilityLabel(isRevealed ? AppString("剧透内容已显示") : AppString("剧透内容，点击查看"))
     }
 }
 
@@ -2374,6 +3045,39 @@ struct PostOneboxView: View {
 
 // MARK: - Previews
 
+#Preview("Full screen image chrome") {
+    PostImageViewer(
+        images: [PostImage(src: "https://www.nodeloc.com/uploads/default/original/3X/0/d/preview.jpeg",
+                           href: nil, alt: nil, width: 900, height: 1200)],
+        selection: .constant(0),
+        context: PostVideoContext(
+            nodeName: "n/MemeVideos",
+            nodeLogoURL: nil,
+            nodeColorHex: "E45735",
+            title: AppString("哥们找到了作弊码"),
+            authorUsername: "Spiritual-Pudding-70",
+            authorAvatarURL: nil,
+            likeCount: 18300,
+            isLiked: false,
+            commentCount: 569,
+            shareURL: URL(string: "https://www.nodeloc.com/t/topic/86774"),
+            voteScore: 128,
+            voteDirection: .up,
+            canVoteDown: true
+        ),
+        topicID: 86774,
+        node: nil,
+        author: UserProfileTarget(username: "Spiritual-Pudding-70"),
+        onLike: {},
+        onComment: {},
+        onVote: { _, _ in },
+        onRepost: {},
+        onClose: {}
+    )
+    .environment(VideoMuteState.shared)
+    .environment(AppState())
+}
+
 #Preview("Full screen video chrome") {
     PostVideoPager(
         videos: [
@@ -2385,16 +3089,22 @@ struct PostOneboxView: View {
             nodeName: "n/MemeVideos",
             nodeLogoURL: nil,
             nodeColorHex: "E45735",
-            title: "哥们找到了作弊码",
+            title: AppString("哥们找到了作弊码"),
             authorUsername: "Spiritual-Pudding-70",
             authorAvatarURL: nil,
             likeCount: 18300,
             isLiked: false,
             commentCount: 569,
-            shareURL: URL(string: "https://www.nodeloc.com/t/topic/86774")
+            shareURL: URL(string: "https://www.nodeloc.com/t/topic/86774"),
+            voteScore: 128,
+            voteDirection: .none,
+            canVoteDown: true
         ),
         onLike: {},
         onComment: {},
+        onVote: { _, _ in },
+        onRepost: {},
+        onReport: {},
         node: SidebarNodeSummary(
             id: 1, name: "MemeVideos", slug: "memevideos", description: "",
             memberCount: "1k", colorHex: "E45735", logoURL: nil,

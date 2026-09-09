@@ -63,8 +63,7 @@ struct ProfileEditPage: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
 
             Text("个人资料").font(Theme.body(15, weight: .medium))
             Spacer()
@@ -104,7 +103,7 @@ struct ProfileEditPage: View {
                         .padding(.vertical, 10)
                         .background(Theme.surface, in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
 
                 PhotosPicker(selection: $cardItem, matching: .images) {
                     Label("更换背景", systemImage: "photo")
@@ -113,7 +112,7 @@ struct ProfileEditPage: View {
                         .padding(.vertical, 10)
                         .background(Theme.surface, in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             .padding(.horizontal, 16)
 
@@ -123,7 +122,7 @@ struct ProfileEditPage: View {
                 } label: {
                     Text("移除背景").font(Theme.body(12)).foregroundStyle(Theme.danger)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.top, 8)
@@ -153,11 +152,11 @@ struct ProfileEditPage: View {
     // MARK: Text fields
 
     private var textSection: some View {
-        SettingsSection(title: "资料") {
-            SettingsTextRow(title: "昵称", placeholder: "你的名字", text: bindingName)
-            SettingsMultilineRow(title: "自我介绍", placeholder: "介绍一下自己", text: bindingBio)
-            SettingsTextRow(title: "网站", placeholder: "https://", text: bindingWebsite)
-            SettingsTextRow(title: "地点", placeholder: "所在地", text: bindingLocation)
+        SettingsSection(title: AppString("资料")) {
+            SettingsTextRow(title: AppString("昵称"), placeholder: AppString("你的名字"), text: bindingName)
+            SettingsMultilineRow(title: AppString("自我介绍"), placeholder: AppString("介绍一下自己"), text: bindingBio)
+            SettingsTextRow(title: AppString("网站"), placeholder: "https://", text: bindingWebsite)
+            SettingsTextRow(title: AppString("地点"), placeholder: AppString("所在地"), text: bindingLocation)
         }
     }
 
@@ -173,7 +172,7 @@ struct ProfileEditPage: View {
     private struct TitleChoice: Identifiable, Equatable {
         let value: String
         var id: String { value }
-        var label: String { value.isEmpty ? "无" : value }
+        var label: String { value.isEmpty ? AppString("无") : value }
     }
 
     private var titleChoices: [TitleChoice] {
@@ -183,8 +182,8 @@ struct ProfileEditPage: View {
     @ViewBuilder
     private var titleSection: some View {
         SettingsSection(
-            title: "头衔",
-            footer: store.titleOptions.isEmpty ? "只有可授予头衔的徽章才能设为头衔。" : nil
+            title: AppString("头衔"),
+            footer: store.titleOptions.isEmpty ? AppString("只有可授予头衔的徽章才能设为头衔。") : nil
         ) {
             if store.titleOptions.isEmpty {
                 // Nothing to choose: a plain, non-tappable row.
@@ -197,7 +196,7 @@ struct ProfileEditPage: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 SettingsPickerRow(
-                    title: "头衔",
+                    title: AppString("头衔"),
                     options: titleChoices,
                     label: \.label,
                     selection: titleBinding
@@ -219,18 +218,18 @@ struct ProfileEditPage: View {
     private struct FlairChoice: Identifiable, Equatable {
         let group: UserGroupFlair?
         var id: Int { group?.id ?? -1 }
-        var label: String { group?.displayName ?? "无" }
+        var label: String { group?.displayName ?? AppString("无") }
     }
 
     @ViewBuilder
     private var flairSection: some View {
         if !store.flairOptions.isEmpty {
             SettingsSection(
-                title: "资质",
-                footer: "资质来自你所在的用户组，会显示在你的头像旁。"
+                title: AppString("资质"),
+                footer: AppString("资质来自你所在的用户组，会显示在你的头像旁。")
             ) {
                 SettingsPickerRow(
-                    title: "资质",
+                    title: AppString("资质"),
                     options: flairChoices,
                     label: \.label,
                     selection: flairBinding

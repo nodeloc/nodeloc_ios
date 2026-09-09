@@ -3,16 +3,14 @@
 //  nodeloc
 //
 //  Lightweight async client for the nodeloc.com Discourse backend.
-//  Reading is public (login_required = false); authenticated calls attach either
-//  a Discourse User-Api-Key or a website session cookie after login.
+//  Reading is public (login_required = false); authenticated calls ride the
+//  website session established at login (see DiscourseAuthService).
 //
 
 import Foundation
 
 nonisolated enum DiscourseConfig {
     static let baseURL = URL(string: "https://www.nodeloc.com")!
-    /// Custom URL scheme registered for the User API Key redirect.
-    static let authRedirect = "nodeloc://auth"
     static let appName = "NODELOC iOS"
     static let clientIDDefaultsKey = "nodeloc.client_id"
     /// Klipy API key for the GIF picker (nodeloc's discourse-gifs runs the Klipy
@@ -33,9 +31,9 @@ nonisolated enum DiscourseConfig {
     }()
 }
 
-/// Holds the signed-in user's auth state. The app supports both Discourse User API
-/// keys and normal website sessions so it can use the same username/password flow
-/// as the site.
+/// Holds the signed-in user's auth state — a website session, however it was
+/// obtained (password, or one of Discourse's auth providers). `userApiKey` is
+/// kept only so a session stored by an older build still restores.
 @Observable
 final class DiscourseAuth {
     // nonisolated so value types (DiscourseClient) can capture the shared
@@ -46,11 +44,21 @@ final class DiscourseAuth {
     var sessionCookie: String?
     var csrfToken: String?
     var username: String?
+    /// Admin or moderator, from `current_user`. Staff-only actions (pinning a
+    /// reply, for one) are offered on this rather than attempted and refused.
+    var isStaff = false
     var isAuthenticated: Bool { userApiKey != nil || sessionCookie != nil }
 }
 
 enum DiscourseError: Error, LocalizedError {
-    case badResponse(Int)
+    /// Status code, plus whatever the server said about it.
+    ///
+    /// Discourse explains itself in the body — `{"error": "…"}` or
+    /// `{"errors": ["…"]}` — and throwing that away meant a precise, already
+    /// localized message ("该账号开启了两步验证，请通过网站登录。") was replaced
+    /// by generic copy about permissions. The message is preferred over the
+    /// canned wording whenever there is one.
+    case badResponse(Int, message: String? = nil)
     /// Cloudflare answered with a challenge instead of the API — the app can't
     /// solve it, only report it distinctly from a real permission error.
     case challenged
@@ -74,30 +82,33 @@ enum DiscourseError: Error, LocalizedError {
     /// stay out of the UI.
     var errorDescription: String? {
         switch self {
-        case .badResponse(let code):
+        case .badResponse(let code, let message):
+            // The server's own wording is more specific than anything that can
+            // be inferred from a status code.
+            if let message, !message.isEmpty { return message }
             switch code {
-            case 401, 403: return "没有权限或登录已失效，请重新登录后再试"
-            case 404: return "内容不存在或已被删除"
-            case 429: return "操作太频繁，请稍后再试"
-            case 500...: return "服务器开小差了，请稍后再试"
-            default: return "请求失败，请稍后重试"
+            case 401, 403: return AppString("没有权限或登录已失效，请重新登录后再试")
+            case 404: return AppString("内容不存在或已被删除")
+            case 429: return AppString("操作太频繁，请稍后再试")
+            case 500...: return AppString("服务器开小差了，请稍后再试")
+            default: return AppString("请求失败，请稍后重试")
             }
         case .challenged:
-            return "请求被站点安全防护拦截，请稍后再试"
+            return AppString("请求被站点安全防护拦截，请稍后再试")
         case .decoding:
-            return "数据加载出错，请稍后重试"
+            return AppString("数据加载出错，请稍后重试")
         case .transport(let error):
             if let urlError = error as? URLError {
                 switch urlError.code {
                 case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
-                    return "网络不可用，请检查网络连接"
+                    return AppString("网络不可用，请检查网络连接")
                 case .timedOut:
-                    return "连接超时，请稍后重试"
+                    return AppString("连接超时，请稍后重试")
                 default:
                     break
                 }
             }
-            return "网络异常，请稍后重试"
+            return AppString("网络异常，请稍后重试")
         }
     }
 }
@@ -135,19 +146,45 @@ struct DiscourseClient {
         var request = URLRequest(url: components.url!)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // Server-rendered content — topic titles, excerpts, cooked posts — is
+        // translated by Discourse's content localization, and it picks the
+        // language from this header. Without it every list came back in the
+        // topic's original language whatever the app was set to.
+        request.setValue(AppLanguage.resolved.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
         applyAuth(to: &request, includeCSRF: includeCSRF)
         return request
     }
 
     /// Executes a request, mapping transport failures and non-2xx statuses to
     /// `DiscourseError`. The single funnel for all network I/O in this client.
-    private func perform(_ request: URLRequest) async throws -> Data {
+    private func perform(_ request: URLRequest, retriesRemaining: Int = 1) async throws -> Data {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
         } catch {
             throw DiscourseError.transport(error)
         }
+
+        // Discourse rate-limits per user, and opening a screen that fans out
+        // (a profile fires the user, summary, points and activity calls at
+        // once) can trip it. One short retry turns a screen that came up empty
+        // into one that just took a moment.
+        //
+        // Reads only: replaying a POST could double-post. The server says how
+        // long to wait in `Retry-After`; the clamp keeps a long value from
+        // hanging the view.
+        if let http = response as? HTTPURLResponse,
+           http.statusCode == 429,
+           retriesRemaining > 0,
+           (request.httpMethod ?? "GET").uppercased() == "GET" {
+            let wait = Self.retryDelay(from: http)
+            #if DEBUG
+            print("[DiscourseAPI] 429 \(request.url?.path ?? "") — retrying in \(wait)s")
+            #endif
+            try? await Task.sleep(for: .seconds(wait))
+            return try await perform(request, retriesRemaining: retriesRemaining - 1)
+        }
+
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             // Cloudflare interception looks like a 403 but isn't one from
             // Discourse: it carries cf-mitigated (or an HTML body from the
@@ -167,9 +204,39 @@ struct DiscourseClient {
             """)
             #endif
 
-            throw isChallenge ? DiscourseError.challenged : DiscourseError.badResponse(http.statusCode)
+            throw isChallenge
+                ? DiscourseError.challenged
+                : DiscourseError.badResponse(
+                    http.statusCode,
+                    message: Self.serverMessage(from: data)
+                )
         }
         return data
+    }
+
+    /// Discourse's own explanation for a failure, if the body carries one.
+    ///
+    /// Both shapes appear: `{"error": "…"}` from plugins and custom endpoints,
+    /// `{"errors": ["…"]}` from core. Anything else — an HTML error page, an
+    /// empty body — yields nil and the caller falls back to canned wording.
+    private static func serverMessage(from data: Data) -> String? {
+        guard !data.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        if let single = object["error"] as? String, !single.isEmpty { return single }
+        if let list = object["errors"] as? [String] {
+            let joined = list.filter { !$0.isEmpty }.joined(separator: "\n")
+            if !joined.isEmpty { return joined }
+        }
+        return nil
+    }
+
+    /// `Retry-After` when the server sends one, else a short default. Clamped
+    /// so a generous server value can't leave a screen waiting.
+    private static func retryDelay(from response: HTTPURLResponse) -> Double {
+        let advertised = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+        return min(max(advertised ?? 0.8, 0.4), 3)
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
@@ -183,6 +250,15 @@ struct DiscourseClient {
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
+            // Callers routinely use `try?`, so a decode failure is
+            // otherwise indistinguishable from "no data" — that silence
+            // has already hidden real bugs (a mis-spelled optional field
+            // simply stayed nil forever).
+            #if DEBUG
+            let preview = String(decoding: data.prefix(400), as: UTF8.self)
+            print("[DiscourseAPI] decode failed for \(T.self): \(error)")
+            print("[DiscourseAPI]   body: \(preview)")
+            #endif
             throw DiscourseError.decoding(error)
         }
     }
@@ -215,11 +291,31 @@ struct DiscourseClient {
 
     // MARK: Endpoints
 
-    func latest(page: Int = 0) async throws -> LatestResponse {
-        try await get(
-            "latest.json",
-            query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
-        )
+    /// One of the home tab's lists. All four answer with the same `topic_list`
+    /// payload, so only the path differs.
+    ///
+    /// `seed` is for `best`, whose ordering is randomised per request — see
+    /// `HomeFeed.isSeeded`. Pass back the seed the first page reported and
+    /// later pages continue that same ordering.
+    func topicList(
+        feed: HomeFeed,
+        page: Int = 0,
+        seed: String? = nil
+    ) async throws -> LatestResponse {
+        var query: [URLQueryItem] = []
+        if page > 0 { query.append(URLQueryItem(name: "page", value: String(page))) }
+        if let seed { query.append(URLQueryItem(name: "seed", value: seed)) }
+        return try await get(feed.path, query: query)
+    }
+
+    /// Sends the activation mail again, for an account that hasn't been
+    /// activated yet. Core Discourse's `UsersController#send_activation_email`.
+    ///
+    /// Needs no session — the account being activated can't sign in yet, which
+    /// is the whole point.
+    @discardableResult
+    func resendActivationEmail(username: String) async throws -> Data {
+        try await post("u/action/send_activation_email", form: ["username": username])
     }
 
     func site() async throws -> SiteResponse {
@@ -236,6 +332,15 @@ struct DiscourseClient {
     ) async throws -> CategoryTopicsResponse {
         try await get(
             "c/\(path)/\(categoryID)/l/\(sort).json",
+            query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
+        )
+    }
+
+    /// Topics carrying a tag. Same `topic_list` payload as a node's list, so
+    /// the rows and the mapping are shared; paginated with `?page=` from 0.
+    func tagTopics(slug: String, page: Int = 0) async throws -> CategoryTopicsResponse {
+        try await get(
+            "tag/\(slug).json",
             query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
         )
     }
@@ -258,6 +363,16 @@ struct DiscourseClient {
     func setCategoryNotification(categoryID: Int, level: Int) async throws -> Data {
         try await post(
             "category/\(categoryID)/notifications",
+            form: ["notification_level": String(level)]
+        )
+    }
+
+    /// How much a *topic* notifies this user — the same integers as a node's
+    /// level (`NodeNotificationLevel`), on the topic's own endpoint.
+    @discardableResult
+    func setTopicNotification(topicID: Int, level: Int) async throws -> Data {
+        try await post(
+            "t/\(topicID)/notifications",
             form: ["notification_level": String(level)]
         )
     }
@@ -285,8 +400,130 @@ struct DiscourseClient {
         try await get("node/recently-visited.json")
     }
 
-    func customFeeds() async throws -> SidebarCustomFeedsResponse {
+    // MARK: Custom feeds
+    //
+    // discourse-community's custom feeds: a named set of nodes read as one
+    // list. Routes taken from the plugin's own bundle — the web client has no
+    // create/manage *page*, only modals, which is why there is no `/custom-feeds`
+    // GET route to lean on here.
+
+    /// The signed-in reader's own feeds, private ones included.
+    func customFeeds() async throws -> CustomFeedsResponse {
         try await get("custom-feeds.json")
+    }
+
+    /// Someone else's feeds — only those they marked `show_on_profile`.
+    func customFeeds(username: String) async throws -> CustomFeedsResponse {
+        try await get("custom-feeds/by-user/\(username).json")
+    }
+
+    /// One feed and the nodes it gathers.
+    func customFeed(username: String, slug: String) async throws -> CustomFeedResponse {
+        try await get("custom-feeds/\(username)/\(slug).json")
+    }
+
+    /// The feed's topics. A plain `topic_list` with `users`, exactly like the
+    /// home feed, so `FeedMapper` maps it unchanged. Paginates with `?page=`,
+    /// as its own `more_topics_url` advertises.
+    func customFeedTopics(
+        username: String,
+        slug: String,
+        page: Int = 0
+    ) async throws -> CategoryTopicsResponse {
+        try await get(
+            "f/\(username)/\(slug).json",
+            query: page > 0 ? [URLQueryItem(name: "page", value: String(page))] : []
+        )
+    }
+
+    func createCustomFeed(
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        showOnProfile: Bool
+    ) async throws -> CustomFeedResponse {
+        try await Self.decode(
+            formItems("POST", path: "custom-feeds", items: Self.customFeedForm(
+                name: name, description: description,
+                isPrivate: isPrivate, showOnProfile: showOnProfile
+            ))
+        )
+    }
+
+    func updateCustomFeed(
+        id: Int,
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        showOnProfile: Bool
+    ) async throws -> CustomFeedResponse {
+        try await Self.decode(
+            formItems("PUT", path: "custom-feeds/\(id)", items: Self.customFeedForm(
+                name: name, description: description,
+                isPrivate: isPrivate, showOnProfile: showOnProfile
+            ))
+        )
+    }
+
+    func deleteCustomFeed(id: Int) async throws {
+        _ = try await send("DELETE", path: "custom-feeds/\(id)")
+    }
+
+    /// Copies someone else's feed, nodes and all, into one of your own.
+    func copyCustomFeed(
+        username: String,
+        slug: String,
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        showOnProfile: Bool
+    ) async throws -> CustomFeedResponse {
+        try await Self.decode(
+            formItems("POST", path: "custom-feeds/\(username)/\(slug)/copy", items: Self.customFeedForm(
+                name: name, description: description,
+                isPrivate: isPrivate, showOnProfile: showOnProfile
+            ))
+        )
+    }
+
+    /// Both node mutations answer with the whole updated feed.
+    func addCustomFeedNode(feedID: Int, categoryID: Int) async throws -> CustomFeedResponse {
+        try await Self.decode(
+            formItems(
+                "POST",
+                path: "custom-feeds/\(feedID)/nodes",
+                items: [("category_id", String(categoryID))]
+            )
+        )
+    }
+
+    func removeCustomFeedNode(feedID: Int, categoryID: Int) async throws -> CustomFeedResponse {
+        try await Self.decode(send("DELETE", path: "custom-feeds/\(feedID)/nodes/\(categoryID)"))
+    }
+
+    /// Nodes matching `term`, to add to a feed.
+    func customFeedNodeSearch(term: String) async throws -> CustomFeedNodeSearchResponse {
+        try await get(
+            "custom-feeds/node-search",
+            query: [URLQueryItem(name: "term", value: term)]
+        )
+    }
+
+    /// The four fields the plugin's create/edit/copy forms all submit.
+    private static func customFeedForm(
+        name: String,
+        description: String,
+        isPrivate: Bool,
+        showOnProfile: Bool
+    ) -> [(String, String)] {
+        [
+            ("name", name),
+            ("description", description),
+            ("private", isPrivate ? "true" : "false"),
+            // The plugin clears this itself when private is set, but sending a
+            // contradiction would be asking the server to resolve our bug.
+            ("show_on_profile", (isPrivate ? false : showOnProfile) ? "true" : "false"),
+        ]
     }
 
     func checkNodeSlug(_ slug: String) async throws -> NodeSlugAvailabilityResponse {
@@ -328,8 +565,181 @@ struct DiscourseClient {
         )
     }
 
-    func search(_ term: String) async throws -> SearchResponse {
-        try await get("search.json", query: [URLQueryItem(name: "q", value: term)])
+    /// Full-page search. `filters` are Discourse's own `q` operators, e.g.
+    /// "with:images" — appended to the term the way the web search box does.
+    func search(_ term: String, filters: String? = nil) async throws -> SearchResponse {
+        let q = [term, filters].compactMap { $0 }.joined(separator: " ")
+        return try await get("search.json", query: [URLQueryItem(name: "q", value: q)])
+    }
+
+    // MARK: Checkin & upgrade progress (site plugins)
+
+    /// 签到 — discourse-checkin. The site's own button posts a nonce and a
+    /// timestamp with two marker headers; the reply carries the points award
+    /// or a message explaining why it was refused (already signed in today).
+    func checkIn() async throws -> CheckinResponse {
+        var request = makeRequest("POST", path: "checkin", includeCSRF: true)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("true", forHTTPHeaderField: "X-Discourse-Checkin")
+        let nonce = UUID().uuidString
+        request.setValue(nonce, forHTTPHeaderField: "X-Checkin-Nonce")
+        request.httpBody = [
+            "nonce=\(nonce)",
+            "timestamp=\(Int(Date().timeIntervalSince1970 * 1000))",
+        ].joined(separator: "&").data(using: .utf8)
+        return try Self.decode(try await perform(request))
+    }
+
+    /// 升级进度 — discourse-upgrade-process.
+    func upgradeProgress(username: String) async throws -> UpgradeProgressReport {
+        try await get("u/\(username)/upgrade-progress.json")
+    }
+
+    /// The companion plugin's one-shot profile payload, replacing the five
+    /// calls `ProfileStore.load` used to fan out — see
+    /// `SERVER_TASKS_PROFILE_AGGREGATE.md`.
+    ///
+    /// Hands back the raw bytes as well as the decoded value: the profile page
+    /// keeps the last response on disk to render from on the next launch, and
+    /// storing the server's own JSON avoids inventing a second encoding path
+    /// that could drift from this one.
+    ///
+    /// - Parameter username: `nil` asks for the signed-in user.
+    func profileAggregate(
+        username: String?,
+        activityFilter: Int
+    ) async throws -> (data: Data, response: ProfileAggregateResponse) {
+        var query = [URLQueryItem(name: "activity_filter", value: String(activityFilter))]
+        if let username {
+            query.append(URLQueryItem(name: "username", value: username))
+        }
+        let data = try await perform(
+            makeRequest(path: "mobile/profile.json", query: query, includeCSRF: false)
+        )
+        return (data, try Self.decode(data))
+    }
+
+    /// Decodes a profile payload that came off disk rather than the network.
+    static func decodeProfileAggregate(_ data: Data) -> ProfileAggregateResponse? {
+        try? decode(data)
+    }
+
+    /// Pins (or unpins — it toggles) a top-level reply, discourse-community's
+    /// nested-replies feature. Staff only; the answer is the topic's full set of
+    /// pinned post ids, so callers replace rather than patch.
+    func togglePinnedPost(topicID: Int, slug: String = "topic", postID: Int) async throws -> PinnedPostsResponse {
+        let data = try await formItems(
+            "PUT",
+            path: "n/\(slug)/\(topicID)/pin.json",
+            items: [("post_id", String(postID))]
+        )
+        return try Self.decode(data)
+    }
+
+    // MARK: 发帖来源 (discourse-mobile)
+
+    /// The account's disclosure level for the 小尾巴 — stored server-side, so it
+    /// Server-controlled feature switches (see `FeatureFlags`). Deliberately
+    /// throwing rather than optional: the caller treats any failure as "keep
+    /// the last known values".
+    func featureFlags() async throws -> FeatureFlagConfig {
+        try await get("mobile/feature_flags.json")
+    }
+
+    /// follows the account rather than the device.
+    func postSourceLevel() async throws -> PostSourceLevelResponse {
+        try await get("mobile/preferences/post_source")
+    }
+
+    @discardableResult
+    func setPostSourceLevel(_ level: Int) async throws -> PostSourceLevelResponse {
+        let data = try await formItems(
+            "PUT",
+            path: "mobile/preferences/post_source",
+            items: [("level", String(level))]
+        )
+        return try Self.decode(data)
+    }
+
+    /// Strips the tail off everything already posted. A deletion, not a hidden
+    /// flag: lowering the level only governs what comes next.
+    func clearPostSourceHistory() async throws -> ClearPostSourcesResponse {
+        let data = try await send("DELETE", path: "mobile/preferences/post_source/history")
+        return try Self.decode(data)
+    }
+
+    // MARK: Relationship with one user
+
+    /// 通知方式 for a single user: the same three levels the site's own
+    /// dropdown writes (`normal` / `mute` / `ignore`).
+    ///
+    /// Ignoring needs an expiry — Discourse's `IgnoredUser` requires one and
+    /// the server parses it unconditionally — so 屏蔽 must send a date. The web
+    /// UI's 永久 option is simply a very distant one, which is what
+    /// `UserNotificationLevel.expiry` produces.
+    @discardableResult
+    func setUserNotificationLevel(
+        username: String,
+        level: String,
+        expiringAt: Date? = nil
+    ) async throws -> Data {
+        var items = [("notification_level", level)]
+        if let expiringAt {
+            items.append(("expiring_at", ISO8601DateFormatter().string(from: expiringAt)))
+        }
+        return try await formItems("PUT", path: "u/\(username)/notification_level.json", items: items)
+    }
+
+    /// Opens the direct-message channel with one user. Discourse returns the
+    /// existing channel when there already is one, so this doubles as "find".
+    func createDirectMessageChannel(usernames: [String]) async throws -> ChatChannelResponse {
+        let data = try await formItems(
+            "POST",
+            path: "chat/api/direct-message-channels.json",
+            items: usernames.map { ("target_usernames[]", $0) }
+        )
+        return try Self.decode(data)
+    }
+
+    /// Starts a 私信. `archetype=private_message` plus recipients is what turns
+    /// `POST /posts` into a message rather than a public topic.
+    @discardableResult
+    func createPrivateMessage(recipient: String, title: String, raw: String) async throws -> CreatePostResponse {
+        var form = [
+            "title": title,
+            "raw": raw,
+            "archetype": "private_message",
+            "target_recipients": recipient,
+        ]
+        // A message is a post like any other, and the disclosure level is the
+        // author's — applying it here too keeps one setting from meaning two
+        // different things.
+        form.merge(DeviceSource.postFields) { current, _ in current }
+        let data = try await post("posts", form: form)
+        return try Self.decode(data)
+    }
+
+    /// Tag completion for the composer's `#` trigger.
+    func searchTags(term: String, limit: Int = 5) async throws -> TagSearchResponse {
+        try await get(
+            "tags/filter/search",
+            query: [
+                URLQueryItem(name: "q", value: term),
+                URLQueryItem(name: "limit", value: String(limit)),
+            ]
+        )
+    }
+
+    /// Dedicated user search. `/search.json` reports zero users for a plain
+    /// term, so people have to be looked up through their own endpoint.
+    func searchUsers(term: String) async throws -> UserSearchResponse {
+        try await get(
+            "u/search/users.json",
+            query: [
+                URLQueryItem(name: "term", value: term),
+                URLQueryItem(name: "limit", value: "20"),
+            ]
+        )
     }
 
     func user(_ username: String) async throws -> UserResponse {
@@ -352,10 +762,38 @@ struct DiscourseClient {
 
     // MARK: Apps (discourse-apps plugin)
 
-    /// Published apps. The directory endpoint returns a bare JSON array.
+    /// Every published app, across as many pages as it takes.
+    ///
+    /// Two things this got wrong before, both of which showed up as
+    /// "数据加载出错" on 浏览全部应用:
+    ///
+    /// * The payload is an object (`{ apps, total, page, per_page }`), not the
+    ///   bare array it used to decode into.
+    /// * It is paginated at a fixed 24. `per_page` is reported back but
+    ///   ignored as input, and `page` is zero-based — 33 apps arrive as 24 + 9,
+    ///   so one request silently dropped a third of the directory.
     func appsDirectory() async throws -> [DirectoryApp] {
-        try await get("apps/directory.json")
+        var collected: [DirectoryApp] = []
+
+        for page in 0..<Self.appsDirectoryPageLimit {
+            let response: AppsDirectoryResponse = try await get(
+                "apps/directory.json",
+                query: [URLQueryItem(name: "page", value: String(page))]
+            )
+            collected.append(contentsOf: response.apps)
+
+            // An empty page ends it too, so a missing or wrong `total` can't
+            // turn this into an endless walk.
+            if response.apps.isEmpty { break }
+            if let total = response.total, collected.count >= total { break }
+        }
+
+        return collected
     }
+
+    /// Enough for the directory several times over; only here so a server that
+    /// keeps answering can't loop forever.
+    private static let appsDirectoryPageLimit = 20
 
     /// One app by slug. This payload *is* wrapped, unlike the list.
     func app(slug: String) async throws -> DirectoryAppResponse {
@@ -396,12 +834,68 @@ struct DiscourseClient {
 
     /// User activity stream filtered by Discourse UserAction type
     /// (1 = likes given, 3 = bookmarks, 4 = topics, 5 = replies).
-    func userActions(username: String, filter: Int) async throws -> UserActionsResponse {
+    ///
+    /// `offset` was pinned to 0 here, which is why a profile tab could only
+    /// ever show its first page. The endpoint pages fine — verified that
+    /// `offset=30` returns the next 30 — so the limitation was ours.
+    static let userActionsPageSize = 30
+
+    func userActions(
+        username: String,
+        filter: Int,
+        offset: Int = 0
+    ) async throws -> UserActionsResponse {
         try await get("user_actions.json", query: [
             URLQueryItem(name: "username", value: username),
             URLQueryItem(name: "filter", value: String(filter)),
-            URLQueryItem(name: "offset", value: "0")
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(Self.userActionsPageSize))
         ])
+    }
+
+    // MARK: Native Sign in with Apple
+
+    /// Trades a native Apple credential for a Discourse session.
+    ///
+    /// The companion plugin verifies the identity token and replies by setting
+    /// the ordinary `_t` session cookie, which `URLSession.shared`'s jar picks
+    /// up — so there is nothing to read out of the body. Discourse core has no
+    /// endpoint for this; see `SERVER_TASKS_APPLE_SIGNIN.md`.
+    ///
+    /// Throws `DiscourseError.badResponse(404)` or `(501)` when the endpoint
+    /// isn't deployed, which is the caller's signal to use the web flow.
+    @discardableResult
+    func nativeAppleLogin(_ credential: AppleSignInCredential) async throws -> Data {
+        struct Body: Encodable {
+            let identityToken: String
+            let nonce: String
+            let authorizationCode: String?
+            let email: String?
+            let fullName: String?
+
+            enum CodingKeys: String, CodingKey {
+                case identityToken = "identity_token"
+                case nonce
+                case authorizationCode = "authorization_code"
+                case email
+                case fullName = "full_name"
+            }
+        }
+
+        let data = try await postJSON("mobile/auth/apple.json", body: Body(
+            identityToken: credential.identityToken,
+            nonce: credential.nonce,
+            authorizationCode: credential.authorizationCode,
+            email: credential.email,
+            fullName: credential.fullName
+        ))
+        #if DEBUG
+        // The two callers differ only by whether a session travels with the
+        // request, so the body is the fastest way to see which branch the
+        // server took.
+        print("[AppleSignIn] response: \(String(decoding: data.prefix(400), as: UTF8.self))")
+        #endif
+        return data
     }
 
     func currentUser() async throws -> CurrentUserResponse {
@@ -456,7 +950,7 @@ struct DiscourseClient {
     func chatChannels() async throws -> ChatChannelsResponse {
         do {
             return try await get("chat/api/me/channels.json")
-        } catch DiscourseError.badResponse(let code) where code == 404 {
+        } catch DiscourseError.badResponse(let code, _) where code == 404 {
             return try await get("chat/api/channels.json")
         }
     }
@@ -498,6 +992,12 @@ struct DiscourseClient {
     func messageBusPoll(clientID: String, positions: [String: Int]) async throws -> Data {
         var request = makeRequest("POST", path: "message-bus/\(clientID)/poll", includeCSRF: true)
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        // Without this MessageBus answers a long poll in its *chunked* framing —
+        // `[]\r\n|\r\n[]\r\n|\r\n`, several JSON documents separated by
+        // pipes — which is not JSON, so every poll's payload was discarded and
+        // chat never went live. The header is MessageBus's own opt-out and it
+        // still long-polls; it just answers with one array.
+        request.setValue("true", forHTTPHeaderField: "Dont-Chunk")
         request.httpBody = positions
             .map { key, value in
                 let encodedKey = key.addingPercentEncoding(withAllowedCharacters: Self.formAllowedCharacters) ?? key
@@ -561,14 +1061,47 @@ struct DiscourseClient {
 
     // MARK: Write actions (require authentication)
 
-    func createChatMessage(channelID: Int, message: String, threadID: Int? = nil) async throws -> ChatCreateMessageResponse {
-        var form = ["message": message]
+    /// `uploadIDs` repeats as `upload_ids[]`, which a `[String: String]` form
+    /// can't express — the same shape the site's own composer sends. A message
+    /// carrying uploads may have empty text.
+    func createChatMessage(
+        channelID: Int,
+        message: String,
+        threadID: Int? = nil,
+        inReplyToID: Int? = nil,
+        uploadIDs: [Int] = []
+    ) async throws -> ChatCreateMessageResponse {
+        var items: [(String, String)] = [("message", message)]
         if let threadID {
-            form["thread_id"] = String(threadID)
+            items.append(("thread_id", String(threadID)))
         }
+        // `Chat::CreateMessage`'s own contract attribute. The reply comes back on
+        // the message as `in_reply_to`, which the app already decodes.
+        if let inReplyToID {
+            items.append(("in_reply_to_id", String(inReplyToID)))
+        }
+        items.append(contentsOf: uploadIDs.map { ("upload_ids[]", String($0)) })
 
-        let data = try await post("chat/\(channelID).json", form: form)
+        let data = try await formItems("POST", path: "chat/\(channelID).json", items: items)
         return try Self.decode(data)
+    }
+
+    /// Chat's own upload bucket. The type matters: the site's uploader declares
+    /// `chat-composer`, and Discourse validates allowed extensions per type.
+    func uploadChatMedia(data: Data, fileName: String, mimeType: String) async throws -> DiscourseUpload {
+        try await postMultipart(
+            "uploads.json",
+            fields: [
+                "upload_type": "chat-composer",
+                "synchronous": "true",
+            ],
+            file: MultipartFile(
+                fieldName: "file",
+                fileName: fileName,
+                mimeType: mimeType,
+                data: data
+            )
+        )
     }
 
     /// Marks a chat channel read up to `messageID` (the endpoint requires the
@@ -581,6 +1114,48 @@ struct DiscourseClient {
             path: "chat/api/channels/\(channelID)/read",
             query: [URLQueryItem(name: "message_id", value: String(messageID))]
         )
+    }
+
+    /// One channel, with `current_user_membership` — which is where the mute
+    /// flag and notification level live.
+    func chatChannel(id: Int) async throws -> ChatChannelResponse {
+        try await get("chat/api/channels/\(id).json")
+    }
+
+    /// The channel's notification settings for me. One endpoint for both knobs,
+    /// nested under `notifications_settings` exactly as the web sends it; the
+    /// answer is the updated membership.
+    @discardableResult
+    func updateChatChannelNotifications(
+        id: Int,
+        muted: Bool? = nil,
+        notificationLevel: String? = nil
+    ) async throws -> ChatMembershipResponse {
+        var items: [(String, String)] = []
+        if let muted { items.append(("notifications_settings[muted]", muted ? "true" : "false")) }
+        if let notificationLevel {
+            items.append(("notifications_settings[notification_level]", notificationLevel))
+        }
+        let data = try await formItems(
+            "PUT",
+            path: "chat/api/channels/\(id)/notifications-settings/me",
+            items: items
+        )
+        return try Self.decode(data)
+    }
+
+    /// Leaves a direct message. Note the `/follows` suffix: that is what the web
+    /// calls for a DM, while a public channel drops the whole membership.
+    @discardableResult
+    func unfollowChatChannel(id: Int) async throws -> Data {
+        try await send("DELETE", path: "chat/api/channels/\(id)/memberships/me/follows")
+    }
+
+    /// Marks every chat channel read at once — the plugin's own
+    /// `markAllChannelsAsRead`, which needs no message ids.
+    @discardableResult
+    func markAllChatChannelsRead() async throws -> Data {
+        try await send("PUT", path: "chat/api/channels/read")
     }
 
     private func chatMessageQuery(
@@ -818,6 +1393,33 @@ struct DiscourseClient {
         ])
     }
 
+    /// Casts (or retracts) a vote — discourse-vote.
+    ///
+    /// The direction is where the vote should *end up*, not a toggle, so a
+    /// double tap or a retried request can't drift from the server. An upvote is
+    /// a core like under the hood; switching to a downvote retracts it first,
+    /// which is why both directions go through this one call rather than the
+    /// like endpoints.
+    /// `reaction` names the face to vote with; without one the direction's
+    /// default is used (the main reaction upward, the first excluded face down).
+    @discardableResult
+    func castVote(
+        postID: Int,
+        direction: VoteDirection,
+        reaction: String? = nil
+    ) async throws -> Data {
+        var items = [("direction", direction.rawValue)]
+        if let reaction, !reaction.isEmpty {
+            items.append(("reaction", reaction))
+        }
+        return try await formItems("PUT", path: "vote/posts/\(postID)", items: items)
+    }
+
+    /// Who reacted to a post, grouped by face — discourse-reactions.
+    func reactionUsers(postID: Int) async throws -> ReactionUsersResponse {
+        try await get("discourse-reactions/posts/\(postID)/reactions-users.json")
+    }
+
     /// Removes a previously-given like (post_action_type_id 2).
     func unlikePost(id: Int) async throws {
         try await formItems("DELETE", path: "post_actions/\(id)", items: [
@@ -825,7 +1427,6 @@ struct DiscourseClient {
         ])
     }
 
-    /// Posts a reply to a topic.
     /// 打赏 — discourse-reward. Gives `amount` energy to a post.
     @discardableResult
     func giveReward(postID: Int, amount: Int, note: String? = nil) async throws -> Data {
@@ -851,8 +1452,341 @@ struct DiscourseClient {
             "topic_id": String(topicID),
         ]
         if let replyToPostNumber { form["reply_to_post_number"] = String(replyToPostNumber) }
+        form.merge(DeviceSource.postFields) { current, _ in current }
         let data = try await post("posts", form: form)
         return try Self.decode(data)
+    }
+
+    // MARK: Editing & moderation
+    //
+    // Every one of these is gated in the UI by a `can_*` flag the server put on
+    // the post or topic, never by the app deciding who is staff. That is what
+    // makes a *node* moderator behave correctly: Discourse serializes the flags
+    // per object, so their rights appear on their own node's content and
+    // nowhere else, and the app doesn't have to know which nodes those are.
+
+    /// The markdown behind a post, for prefilling the editor.
+    func postRaw(id: Int) async throws -> PostRawResponse {
+        try await get("posts/\(id).json")
+    }
+
+    /// Saves an edit. `edit_reason` is optional and shows in the post's history.
+    @discardableResult
+    func updatePost(id: Int, raw: String, editReason: String? = nil) async throws -> Data {
+        var items = [("post[raw]", raw)]
+        if let editReason, !editReason.isEmpty {
+            items.append(("post[edit_reason]", editReason))
+        }
+        return try await formItems("PUT", path: "posts/\(id).json", items: items)
+    }
+
+    /// Deletes a post. Discourse soft-deletes for staff (recoverable) and
+    /// tombstones for an author deleting their own.
+    @discardableResult
+    func deletePost(id: Int) async throws -> Data {
+        try await send("DELETE", path: "posts/\(id).json")
+    }
+
+    @discardableResult
+    func recoverPost(id: Int) async throws -> Data {
+        try await send("PUT", path: "posts/\(id)/recover.json")
+    }
+
+    /// Adds or removes an emoji reaction on a chat message.
+    ///
+    /// The one chat write that isn't under `/chat/api`: it lives on the legacy
+    /// controller as `PUT /chat/:channel_id/react/:message_id`, taking `emoji`
+    /// and `react_action` ("add" / "remove") — `Chat::MessageReactor`'s two
+    /// actions.
+    @discardableResult
+    func reactToChatMessage(
+        channelID: Int,
+        messageID: Int,
+        emoji: String,
+        add: Bool
+    ) async throws -> Data {
+        try await formItems(
+            "PUT",
+            path: "chat/\(channelID)/react/\(messageID).json",
+            items: [
+                // Bare name, no colons: `Emoji.exists?` is checked against the
+                // name and the serializer echoes it back the same way.
+                ("emoji", emoji.trimmingCharacters(in: CharacterSet(charactersIn: ":"))),
+                ("react_action", add ? "add" : "remove"),
+            ]
+        )
+    }
+
+    /// Edits a chat message. Only `message` changes; uploads keep whatever the
+    /// message already had.
+    @discardableResult
+    func updateChatMessage(channelID: Int, messageID: Int, message: String) async throws -> Data {
+        try await formItems(
+            "PUT",
+            path: "chat/api/channels/\(channelID)/messages/\(messageID)",
+            items: [("message", message)]
+        )
+    }
+
+    /// Trashes a chat message. Recoverable — see `restoreChatMessage`.
+    @discardableResult
+    func deleteChatMessage(channelID: Int, messageID: Int) async throws -> Data {
+        try await send("DELETE", path: "chat/api/channels/\(channelID)/messages/\(messageID)")
+    }
+
+    @discardableResult
+    func restoreChatMessage(channelID: Int, messageID: Int) async throws -> Data {
+        try await send("PUT", path: "chat/api/channels/\(channelID)/messages/\(messageID)/restore")
+    }
+
+    /// Deletes the signed-in account, posts and all.
+    ///
+    /// `UserDestroyer` runs with `delete_posts: true`. The server refuses with
+    /// 403 when `can_delete_account` is false, which is why the UI reads that
+    /// flag first and offers to write to staff instead.
+    @discardableResult
+    func deleteAccount(username: String) async throws -> Data {
+        try await send("DELETE", path: "u/\(username).json")
+    }
+
+    /// Flags a chat message. `flagTypeID` is a `PostActionType` id — the same
+    /// ids `site.json` serves for posts, filtered per message by the server's
+    /// `available_flags`.
+    @discardableResult
+    func flagChatMessage(
+        channelID: Int,
+        messageID: Int,
+        flagTypeID: Int,
+        message: String? = nil
+    ) async throws -> Data {
+        var items = [("flag_type_id", String(flagTypeID))]
+        if let message, !message.isEmpty { items.append(("message", message)) }
+        return try await formItems(
+            "POST",
+            path: "chat/api/channels/\(channelID)/messages/\(messageID)/flags",
+            items: items
+        )
+    }
+
+    /// The channel's pinned messages. Gated by the `chat_pinned_messages` site
+    /// setting — a 404 means the feature is off, not that something broke.
+    func chatChannelPins(channelID: Int) async throws -> ChatPinsResponse {
+        try await get("chat/api/channels/\(channelID)/pins")
+    }
+
+    @discardableResult
+    func pinChatMessage(channelID: Int, messageID: Int) async throws -> Data {
+        try await send("POST", path: "chat/api/channels/\(channelID)/messages/\(messageID)/pin")
+    }
+
+    @discardableResult
+    func unpinChatMessage(channelID: Int, messageID: Int) async throws -> Data {
+        try await send("DELETE", path: "chat/api/channels/\(channelID)/messages/\(messageID)/pin")
+    }
+
+    /// Clears the "new pin" marker on the channel's pinned bar.
+    @discardableResult
+    func markChatPinsRead(channelID: Int) async throws -> Data {
+        try await send("PUT", path: "chat/api/channels/\(channelID)/pins/read")
+    }
+
+    /// Adds people to an existing channel — a group DM or a category channel.
+    /// `usernames` is capped server-side by `chat_max_direct_message_users`.
+    @discardableResult
+    func addUsersToChatChannel(channelID: Int, usernames: [String]) async throws -> Data {
+        try await formItems(
+            "POST",
+            path: "chat/api/channels/\(channelID)/memberships",
+            items: usernames.map { ("usernames[]", $0) }
+        )
+    }
+
+    @discardableResult
+    func removeUserFromChatChannel(channelID: Int, userID: Int) async throws -> Data {
+        try await send("DELETE", path: "chat/api/channels/\(channelID)/memberships/\(userID)")
+    }
+
+    /// Stores the unsent draft server-side, so it survives to another device.
+    /// `data` is the composer state as JSON — Discourse's own shape, which for a
+    /// plain message is `{"message":"…"}`.
+    @discardableResult
+    func saveChatDraft(channelID: Int, threadID: Int? = nil, message: String) async throws -> Data {
+        var items: [(String, String)] = []
+        if let payload = try? JSONSerialization.data(withJSONObject: ["message": message]),
+           let json = String(data: payload, encoding: .utf8) {
+            items.append(("data", json))
+        }
+        if let threadID { items.append(("thread_id", String(threadID))) }
+        return try await formItems(
+            "POST",
+            path: "chat/api/channels/\(channelID)/drafts",
+            items: items
+        )
+    }
+
+    /// Turns chat messages into forum markdown — `Chat::TranscriptService` — for
+    /// quoting a conversation into a topic or a reply.
+    func chatTranscript(channelID: Int, messageIDs: [Int]) async throws -> ChatTranscriptResponse {
+        let data = try await formItems(
+            "POST",
+            path: "chat/\(channelID)/quote.json",
+            items: messageIDs.map { ("message_ids[]", String($0)) }
+        )
+        return try Self.decode(data)
+    }
+
+    /// Per-thread notification level ("always" / "normal" / "tracking" / "muted"
+    /// in `Chat::NotificationLevels`).
+    @discardableResult
+    func setChatThreadNotificationLevel(
+        channelID: Int,
+        threadID: Int,
+        level: String
+    ) async throws -> Data {
+        try await formItems(
+            "PUT",
+            path: "chat/api/channels/\(channelID)/threads/\(threadID)/notifications-settings/me",
+            items: [("notification_level", level)]
+        )
+    }
+
+    /// Who belongs to a chat channel. `INDEX_LIMIT` on the server is 50, so a
+    /// bigger `limit` is silently clamped — page with `offset`.
+    func chatChannelMemberships(
+        channelID: Int,
+        offset: Int = 0,
+        limit: Int = 50
+    ) async throws -> ChatMembershipsResponse {
+        try await get(
+            "chat/api/channels/\(channelID)/memberships",
+            query: [
+                URLQueryItem(name: "offset", value: String(offset)),
+                URLQueryItem(name: "limit", value: String(limit)),
+            ]
+        )
+    }
+
+    /// Every emoji the site offers, grouped — standard sets first, then each
+    /// custom group. Same endpoint the web's picker uses.
+    func emojis() async throws -> [String: [DiscourseEmoji]] {
+        try await get("emojis.json")
+    }
+
+    /// discourse-anyvideo's record for one upload, by the upload's SHA1 — the
+    /// same lookup the web player does to find an HLS rendition.
+    func anyVideo(sha1: String) async throws -> AnyVideoResponse {
+        try await get("anyvideo/videos/by_sha1/\(sha1).json")
+    }
+
+    /// discourse-anyvideo's random pick of video topics, for the full-screen
+    /// player's upward swipe. `excludingTopicID` keeps the one on screen out of
+    /// the result — the plugin filters it server-side.
+    func videoSuggestions(excludingTopicID: Int? = nil) async throws -> VideoSuggestionsResponse {
+        var query: [URLQueryItem] = []
+        if let excludingTopicID {
+            query.append(URLQueryItem(name: "exclude_topic_id", value: String(excludingTopicID)))
+        }
+        return try await get("anyvideo/videos/suggestions.json", query: query)
+    }
+
+    /// One post's cooked HTML. The nested view blanks `cooked` for a reply whose
+    /// author the viewer ignores; this is the endpoint the web's reveal button
+    /// calls to fetch it back.
+    func postCooked(id: Int) async throws -> PostCookedResponse {
+        try await get("posts/\(id)/cooked.json")
+    }
+
+    /// Retitles or recategorises a topic. The `-` stands in for the slug, which
+    /// only affects the canonical URL.
+    @discardableResult
+    func updateTopic(id: Int, title: String? = nil, categoryID: Int? = nil) async throws -> Data {
+        var items: [(String, String)] = []
+        if let title { items.append(("title", title)) }
+        if let categoryID { items.append(("category_id", String(categoryID))) }
+        return try await formItems("PUT", path: "t/-/\(id).json", items: items)
+    }
+
+    @discardableResult
+    func deleteTopic(id: Int) async throws -> Data {
+        try await send("DELETE", path: "t/\(id).json")
+    }
+
+    /// Topic status flags: "closed", "visible", "archived", "pinned",
+    /// "pinned_globally". The same endpoint the web's topic admin menu uses.
+    ///
+    /// `until` only means anything to the two pinned statuses, where the server
+    /// schedules an `unpin_topic` job for it. Sent as ISO 8601, which is what
+    /// `Time.parse` on the other end wants.
+    @discardableResult
+    func setTopicStatus(
+        id: Int,
+        status: String,
+        enabled: Bool,
+        until: Date? = nil
+    ) async throws -> Data {
+        var items = [("status", status), ("enabled", enabled ? "true" : "false")]
+        if let until {
+            items.append(("until", ISO8601DateFormatter().string(from: until)))
+        }
+        return try await formItems("PUT", path: "t/\(id)/status.json", items: items)
+    }
+
+    /// Hides a pin from *this* reader only — `topic_users.cleared_pinned_at`.
+    /// Anyone may do it to any pinned topic they can see; it moderates nothing.
+    @discardableResult
+    func clearTopicPin(id: Int) async throws -> Data {
+        try await send("PUT", path: "t/\(id)/clear-pin.json")
+    }
+
+    /// Undoes `clearTopicPin`, putting the pin back for this reader.
+    @discardableResult
+    func reTopicPin(id: Int) async throws -> Data {
+        try await send("PUT", path: "t/\(id)/re-pin.json")
+    }
+
+    /// The third featured mode: a banner shows on every page until each reader
+    /// dismisses it. Staff only, and only one banner exists at a time — making
+    /// a new one replaces the old.
+    @discardableResult
+    func makeTopicBanner(id: Int) async throws -> Data {
+        try await send("PUT", path: "t/\(id)/make-banner.json")
+    }
+
+    @discardableResult
+    func removeTopicBanner(id: Int) async throws -> Data {
+        try await send("PUT", path: "t/\(id)/remove-banner.json")
+    }
+
+    /// How full the featured slots already are, for the 置顶 sheet's counts.
+    func topicFeatureStats(categoryID: Int?) async throws -> TopicFeatureStats {
+        var query: [URLQueryItem] = []
+        if let categoryID {
+            query.append(URLQueryItem(name: "category_id", value: String(categoryID)))
+        }
+        return try await get("topics/feature_stats.json", query: query)
+    }
+
+    /// Flags a post or a topic — Discourse's `POST /post_actions`, the same call
+    /// the web's flag modal makes.
+    ///
+    /// With `flagTopic` true, `id` is the *topic* id and the server resolves it
+    /// to the first post itself (`fetch_post_from_params`); otherwise `id` is a
+    /// post id. `message` is required by some flag types and rejected as too
+    /// short otherwise.
+    @discardableResult
+    func flag(
+        id: Int,
+        typeID: Int,
+        message: String? = nil,
+        flagTopic: Bool = false
+    ) async throws -> Data {
+        var form = [
+            "id": String(id),
+            "post_action_type_id": String(typeID),
+            "flag_topic": flagTopic ? "true" : "false",
+        ]
+        if let message, !message.isEmpty { form["message"] = message }
+        return try await post("post_actions", form: form)
     }
 
     /// Bookmarks a post (保存书签).
@@ -869,12 +1803,14 @@ struct DiscourseClient {
     /// like red-envelope creation.
     @discardableResult
     func createTopic(title: String, raw: String, categoryID: Int) async throws -> CreatePostResponse {
-        let data = try await post("posts", form: [
+        var form = [
             "title": title,
             "raw": raw,
             "category": String(categoryID),
             "archetype": "regular",
-        ])
+        ]
+        form.merge(DeviceSource.postFields) { current, _ in current }
+        let data = try await post("posts", form: form)
         return try Self.decode(data)
     }
 
@@ -1074,13 +2010,83 @@ enum DiscourseFormat {
     static func plainText(_ html: String?) -> String {
         guard let html else { return "" }
         var text = html.replacing(htmlTagPattern, with: "")
+        // Cooked titles carry the typographic set too — `fancy_title` renders
+        // an apostrophe as `&rsquo;`, which used to reach the screen literally.
         let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
-                        "&#39;": "'", "&hellip;": "…", "&nbsp;": " "]
+                        "&#39;": "'", "&hellip;": "…", "&nbsp;": " ",
+                        "&rsquo;": "’", "&lsquo;": "‘", "&ldquo;": "“",
+                        "&rdquo;": "”", "&mdash;": "—", "&ndash;": "–"]
         for (entity, value) in entities { text = text.replacingOccurrences(of: entity, with: value) }
         return text
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .breakingLongTokens()
     }
+
+    /// Prose from the server, which arrives as HTML, rendered as text that
+    /// keeps its paragraph breaks.
+    ///
+    /// `plainText` is for excerpts and titles, where every tag collapses to
+    /// nothing on purpose — a one-line excerpt wants no newlines. That is
+    /// wrong for a message meant to be *read*: Discourse's own
+    /// `login.activate_email` is
+    /// `<p>…activate your account.</p><p>If it doesn't arrive…</p>`, and
+    /// dropping the tags outright runs the two sentences together.
+    static func plainTextParagraphs(_ html: String?) -> String {
+        guard let html else { return "" }
+        // Block boundaries become breaks before the tags are stripped.
+        var text = html.replacing(/<\s*br\s*\/?>/.ignoresCase(), with: "\n")
+        text = text.replacing(/<\s*\/\s*(p|div|li|h[1-6])\s*>/.ignoresCase(), with: "\n\n")
+        return plainText(text)
+            // Collapse the runs the substitutions above can leave behind, so a
+            // trailing `</p>` doesn't end the message with blank lines.
+            .replacing(/\n{3,}/, with: "\n\n")
+            .replacing(/[ \t]+\n/, with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The title to display for a topic, translated when a translation exists.
+    ///
+    /// Content localization only rewrites `fancy_title`, so a localized topic
+    /// has to be read from there. `title` stays the original and is otherwise
+    /// preferable — it holds real emoji and no entities — so it keeps winning
+    /// whenever `fancy_title_localized` is false.
+    static func displayTitle(for topic: TopicListItem) -> String {
+        displayTitle(
+            title: topic.title,
+            fancyTitle: topic.fancyTitle,
+            isLocalized: topic.fancyTitleLocalized
+        )
+    }
+
+    /// Same rule for the topic detail, which carries the fields separately.
+    static func displayTitle(title: String, fancyTitle: String?, isLocalized: Bool?) -> String {
+        guard isLocalized == true, let fancyTitle, !fancyTitle.isEmpty else { return title }
+        return localizedTitle(fancyTitle)
+    }
+
+    /// Cleans up a cooked title for display as plain text.
+    ///
+    /// Emoji arrive as `:shortcode:` and are dropped rather than mapped: the
+    /// chat renderer already found that a shortcode→character table covers only
+    /// a fraction of the set and leaves the rest showing as literal text
+    /// (`:grinning_face:`), and a row of plain text has nowhere to put the
+    /// images Discourse serves instead. Losing the emoji from a *translated*
+    /// title is the smaller loss — the alternative is not translating it.
+    static func localizedTitle(_ fancyTitle: String) -> String {
+        var text = plainText(fancyTitle)
+        text = text.replacing(emojiShortcodePattern, with: " ")
+        return text
+            .replacingOccurrences(of: "\\s{2,}", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `:name:` / `:name_1:` — Discourse's shortcode form.
+    ///
+    /// The body must contain a letter, which keeps a timestamp intact: a naive
+    /// `:[a-z0-9_+-]{2,}:` matches the `:30:` inside "10:30:45" and would turn
+    /// it into "10 45". `:+1:` and `:-1:` are the two real shortcodes with no
+    /// letter in them, so they are spelled out.
+    private static let emojiShortcodePattern = /:(?:\+1|-1|[a-z0-9_+-]*[a-z][a-z0-9_+-]*):/
 
     static func mediaItems(for topic: TopicListItem) -> [PostMedia] {
         // Prefer the responsive thumbnail set: it carries the topic's

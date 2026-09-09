@@ -7,14 +7,21 @@ import SwiftUI
 
 struct ProfileView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.sidebarIsPinned) private var sidebarIsPinned
     /// Shared so switching tabs doesn't discard the loaded profile.
     private var store = ProfileStore.shared
-    @State private var showBadges = false
-    @State private var showNodes = false
+    /// Which sheet is up. A single `.sheet(item:)` rather than one modifier
+    /// per sheet: several `.sheet` on the same view silently collapse to
+    /// whichever was applied last, which is why the badge and upgrade sheets
+    /// never opened.
+    @State private var activeSheet: ProfileSheet?
+
+    private enum ProfileSheet: String, Identifiable {
+        case badges, nodes, upgrade
+        var id: String { rawValue }
+    }
     @State private var selectedTab: ProfileStore.ProfileTab = .topics
     @State private var scrollOffset: CGFloat = 0
-    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
-    @State private var pull = PullToRefresh()
 
     /// Anchor for the scroll-to-top the identity capsule performs.
     private let topAnchor = "profile-top"
@@ -26,14 +33,19 @@ struct ProfileView: View {
                 // it required a top safe-area inset, and that inset is what
                 // stopped the banner reaching the top of the screen.
                 LazyVStack(spacing: 18) {
-                    profileHero
-                        .id(topAnchor)
-                    redditStatsRow
+                    if store.isShowingSkeleton {
+                        profileSkeleton
+                            .id(topAnchor)
+                    } else {
+                        profileHero
+                            .id(topAnchor)
+                        redditStatsRow
 
-                    tabBar
-                    tabContent
-                        .padding(.top, 6)
-                        .padding(.bottom, 112)
+                        tabBar
+                        tabContent
+                            .padding(.top, 6)
+                            .padding(.bottom, 112)
+                    }
                 }
             }
             .scrollIndicators(.hidden)
@@ -48,27 +60,48 @@ struct ProfileView: View {
                 geometry.contentOffset.y
             } action: { _, newValue in
                 scrollOffset = newValue
-                pull.scrolled(to: newValue) {
-                    await store.load(isAppAuthed: app.authed, force: true)
-                }
             }
             // Pinned above the scroll view so they stay reachable as the banner
             // scrolls away, matching the home feed's floating controls. The
             // overlay sits on the ignored area, so it re-applies the inset
             // itself — otherwise the buttons land under the notch.
             .overlay(alignment: .top) {
-                floatingHeaderButtons(scrollProxy: proxy)
-                    .padding(.top, UIApplication.topSafeAreaInset)
+                // Hidden once its controls have moved into the iPad tab bar's
+                // row, or they would appear twice.
+                if !sidebarIsPinned {
+                    floatingHeaderButtons(scrollProxy: proxy)
+                        .padding(.top, UIApplication.topSafeAreaInset)
+                }
             }
-            .overlay(alignment: .top) {
-                NodelocRefreshIndicator(pull: pull)
-                    .padding(.top, UIApplication.topSafeAreaInset + 66)
+            // Applied inside the ScrollViewReader because the identity capsule
+            // scrolls back to the top, which needs this proxy.
+            .tabBarHeader(isPinned: sidebarIsPinned) {
+                identityCapsule(scrollProxy: proxy)
+                    .opacity(identityRevealProgress)
+                    .allowsHitTesting(identityRevealProgress > 0.9)
+            } trailing: {
+                headerTools
             }
         }
         .task(id: app.authed) { await store.load(isAppAuthed: app.authed) }
         .task(id: tabTaskKey) { await store.loadTab(selectedTab) }
-        .sheet(isPresented: $showBadges) { badgeSheet }
-        .sheet(isPresented: $showNodes) { nodesSheet }
+        // The tab has to be reloaded explicitly. `force` clears `actionItems`,
+        // but `tabTaskKey` is username + tab — neither changes on a refresh, so
+        // the `.task(id:)` above never re-runs and the list was left empty.
+        .refreshable {
+            await store.load(isAppAuthed: app.authed, force: true)
+            await store.loadTab(selectedTab)
+        }
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .badges: badgeSheet
+            case .nodes: nodesSheet
+            case .upgrade:
+                if let progress = store.upgradeProgress {
+                    UpgradeProgressSheet(report: progress)
+                }
+            }
+        }
     }
 
     /// Re-run tab loading when either the selected tab or the loaded user changes.
@@ -83,6 +116,15 @@ struct ProfileView: View {
             // bar. Its height grows to match, keeping the avatar's overlap.
             profileBanner
                 .frame(height: bannerHeight + UIApplication.topSafeAreaInset + pullStretch)
+                // On the banner rather than in the card: the banner spans the
+                // full width, so its leading edge is the screen's, and its
+                // bottom edge is the fixed reference the avatar is placed
+                // against — both of which the column needs.
+                .overlay(alignment: .bottomLeading) {
+                    upgradeProgressColumn
+                        .padding(.leading, progressTrackCentreX - progressTrackWidth / 2)
+                        .offset(y: -(avatarCentreAboveBanner - progressTrackLength / 2))
+                }
                 // Pinned to the top of the scroll content while it grows, so
                 // pulling down never opens a gap above the image.
                 .offset(y: -pullStretch)
@@ -93,6 +135,92 @@ struct ProfileView: View {
                 .offset(y: -54)
                 .padding(.bottom, -54)
         }
+    }
+
+    // MARK: Skeleton
+
+    /// The first open of an account, when there is no snapshot to draw instead.
+    ///
+    /// Shaped like `profileHero` + `redditStatsRow` + `tabBar` rather than being
+    /// a generic shimmer, so the real page lands roughly where the placeholders
+    /// were instead of shoving everything down when it arrives. One pulse on
+    /// the container keeps every piece in phase, as on the feed.
+    ///
+    /// This replaces a screenful of `--`: `ProfileStat.placeholders` and the
+    /// seeded initial used to be what a cold start showed, which reads as data
+    /// that failed rather than data that is coming.
+    private var profileSkeleton: some View {
+        VStack(spacing: 18) {
+            // Banner and card, including the card's overlap onto the banner —
+            // the one piece of this layout that would be obvious if it moved.
+            VStack(spacing: 0) {
+                Rectangle()
+                    .fill(Theme.neutral300)
+                    .frame(height: bannerHeight + UIApplication.topSafeAreaInset)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .bottom, spacing: 12) {
+                        Circle()
+                            .fill(Theme.neutral300)
+                            .frame(width: 76, height: 76)
+                            .overlay { Circle().strokeBorder(Theme.bg, lineWidth: 4) }
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            SkeletonLine(widthFraction: 0.52, height: 18)
+                            SkeletonLine(widthFraction: 0.34)
+                        }
+                        .padding(.bottom, 8)
+                    }
+
+                    SkeletonLine(widthFraction: 0.92)
+                    SkeletonLine(widthFraction: 0.64)
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Theme.surface,
+                    in: RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous)
+                )
+                .padding(.horizontal, 16)
+                .offset(y: -54)
+                .padding(.bottom, -54)
+            }
+
+            // Five evenly divided stats, as `redditStatsRow` lays them out.
+            HStack(spacing: 0) {
+                ForEach(0..<5, id: \.self) { _ in
+                    VStack(spacing: 5) {
+                        SkeletonLine(widthFraction: 0.46, height: 15)
+                        SkeletonLine(widthFraction: 0.66, height: 9)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(.horizontal, 16)
+
+            // The five activity tabs.
+            HStack(spacing: 24) {
+                ForEach(0..<5, id: \.self) { _ in
+                    SkeletonLine(height: 14)
+                        .frame(width: 32)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+
+            VStack(spacing: 16) {
+                ForEach(0..<4, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        SkeletonLine(widthFraction: 0.88, height: 15)
+                        SkeletonLine(widthFraction: 0.42)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .padding(.bottom, 112)
+        }
+        .skeletonPulsing()
     }
 
     /// Stays put while the page scrolls. The identity capsule fades in between
@@ -113,13 +241,136 @@ struct ProfileView: View {
 
             Spacer(minLength: 8)
 
-            HeaderIconButton(systemName: "gearshape", accessibilityLabel: "设置") {
-                app.overlay = .settings
-            }
+            headerTools
         }
         .padding(.horizontal, FloatingHeader.horizontalInset)
         .padding(.top, 8)
         .frame(height: headerBarHeight, alignment: .top)
+    }
+
+    /// 签到 · 设置 in one glass capsule, matching the node page and the post
+    /// reader rather than floating separate circles. 升级进度 lives on the
+    /// banner's bottom edge instead — see `upgradeProgressBar`.
+    private var headerTools: some View {
+        HStack(spacing: 6) {
+            // Guests have nothing to sign in for.
+            if !store.isGuest {
+                Button {
+                    Task { await store.checkIn() }
+                } label: {
+                    Group {
+                        if store.isCheckingIn {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            // The same mark the site's own checkin button
+                            // uses. Dimmed once today is done — the control is
+                            // disabled then, so it should read that way.
+                            Image("LucideCalendarHeart")
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 17, height: 17)
+                                .foregroundStyle(store.hasCheckedInToday ? Theme.muted(0.35) : Theme.text)
+                        }
+                    }
+                    .frame(width: 28, height: FloatingHeader.controlHeight)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.pressable)
+                .disabled(store.isCheckingIn || store.hasCheckedInToday)
+                .accessibilityLabel(store.hasCheckedInToday ? AppString("今天已签到") : AppString("签到"))
+            }
+
+            Button { app.overlay = .settings } label: {
+                toolIcon("gearshape")
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel("设置")
+        }
+        .padding(.horizontal, 8)
+        // 7pt above/below a 34pt row reproduces what `.buttonStyle(.glass)`
+        // does, so this capsule matches the hamburger's height exactly.
+        .padding(.vertical, 7)
+        .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
+        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+    }
+
+    private let progressTrackLength: CGFloat = 46
+    private let progressTrackWidth: CGFloat = 3
+    /// The avatar's centre, measured up from the banner's bottom edge: it is
+    /// 96pt tall and lifted 42pt above the card's top, which the card in turn
+    /// places 54pt above the banner's bottom. Keeping the column level with it
+    /// is why this is derived rather than eyeballed.
+    private let avatarCentreAboveBanner: CGFloat = 48
+
+    /// Lines the track up with the hamburger above it. `.glass` grows a 34pt
+    /// glyph into a 48pt circle, and that circle starts at the header's own
+    /// inset — so its centre is the inset plus half of 48.
+    private var progressTrackCentreX: CGFloat {
+        FloatingHeader.horizontalInset + (FloatingHeader.controlHeight + 14) / 2
+    }
+
+    /// 升级进度 down the left edge of the banner: a vertical track that fills
+    /// upward from the current level, named at the bottom, toward the level
+    /// being climbed to, named at the top. Drawn in `Theme.text` at two
+    /// strengths — so it inverts with the colour scheme — over a `Theme.bg`
+    /// halo, which is what keeps it legible on top of banner artwork.
+    /// Tapping opens the requirements.
+    @ViewBuilder
+    private var upgradeProgressColumn: some View {
+        if !store.isGuest, let report = store.upgradeProgress, report.hasConditions {
+            Button { activeSheet = .upgrade } label: {
+                HStack(spacing: 7) {
+                    Capsule()
+                        .fill(Theme.text.opacity(0.28))
+                        .frame(width: progressTrackWidth, height: progressTrackLength)
+                        .overlay(alignment: .bottom) {
+                            Capsule()
+                                .fill(Theme.text)
+                                .frame(height: progressTrackLength * report.fraction)
+                        }
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(nextLevelLabel(report))
+                        Spacer(minLength: 0)
+                        Text(report.currentLevelName ?? AppString("当前等级"))
+                    }
+                    .frame(height: progressTrackLength, alignment: .leading)
+                }
+                .font(Theme.body(10, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(maxWidth: 110, alignment: .leading)
+                .contentShape(Rectangle())
+                // A halo in the page colour, not a black drop shadow: it has to
+                // separate the marks from a photo banner in both schemes.
+                .shadow(color: Theme.bg.opacity(0.8), radius: 3)
+                .shadow(color: Theme.bg.opacity(0.5), radius: 6)
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel("升级进度")
+            .accessibilityValue("\(report.satisfiedCount)/\(report.allConditions.count)")
+        }
+    }
+
+    /// At the top level there is no next level, and the requirements become
+    /// upkeep — say that rather than showing a dash.
+    private func nextLevelLabel(_ report: UpgradeProgressReport) -> String {
+        if let next = report.nextLevelName, !next.isEmpty {
+            return next
+        }
+        return report.isRetention
+            ? AppString("维持中")
+            : AppString("最高等级")
+    }
+
+    private func toolIcon(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(Theme.text)
+            .frame(width: 28, height: FloatingHeader.controlHeight)
+            .contentShape(Rectangle())
     }
 
     /// Avatar + username, shown once the big card is out of view. Uses the same
@@ -283,8 +534,8 @@ struct ProfileView: View {
 
             if !store.roles.isEmpty {
                 FlowLayout(spacing: 8, alignment: .center) {
-                    ForEach(store.roles, id: \.self) { role in
-                        profileChip(role, color: roleColor(role))
+                    ForEach(store.roles) { role in
+                        profileChip(role.label, color: roleColor(role))
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -342,33 +593,45 @@ struct ProfileView: View {
     private var profileMeta: some View {
         let items = profileMetaItems
         if !items.isEmpty {
-            VStack(spacing: 8) {
+            // One row, wrapping only if it has to: 位置 and 网址 are each a few
+            // words, and a line apiece left the card taller than the facts
+            // justified. `FlowLayout` keeps them side by side on a normal phone
+            // and drops the second one down when a long website would collide.
+            FlowLayout(spacing: 14, alignment: .center) {
                 ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    HStack(spacing: 8) {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Theme.accent)
-                            .frame(width: 16)
-                        Text(item.text)
-                            .font(Theme.body(12, weight: .medium))
-                            .foregroundStyle(Theme.muted(0.62))
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
+                    Button {
+                        item.action()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                            Text(item.text)
+                                .font(Theme.body(12, weight: .medium))
+                                .foregroundStyle(Theme.muted(0.62))
+                                .lineLimit(1)
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.pressable)
                 }
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 14)
             .padding(.vertical, 4)
         }
     }
 
-    private var profileMetaItems: [(icon: String, text: String)] {
-        var items: [(icon: String, text: String)] = []
+    /// 位置 opens Maps, 网址 opens the in-app browser. Both were plain text
+    /// before, which read like links and did nothing.
+    private var profileMetaItems: [(icon: String, text: String, action: () -> Void)] {
+        var items: [(icon: String, text: String, action: () -> Void)] = []
         if let location = store.location, !location.isEmpty {
-            items.append(("mappin.and.ellipse", location))
+            items.append(("mappin.and.ellipse", location, { openInMaps(location) }))
         }
         if let website = store.website, !website.isEmpty {
-            items.append(("link", website))
+            let url = store.websiteURL
+            items.append(("link", website, { openProfileWebsite(url: url, displayText: website) }))
         }
         return items
     }
@@ -376,18 +639,11 @@ struct ProfileView: View {
     // MARK: Achievements link + badge sheet
 
     private var achievementsLink: some View {
-        Button { showBadges = true } label: {
+        Button { activeSheet = .badges } label: {
             HStack(spacing: 8) {
                 HStack(spacing: -7) {
-                    ForEach(0..<min(3, store.badges.count), id: \.self) { index in
-                        Circle()
-                            .fill(badgeColor(index))
-                            .frame(width: 22, height: 22)
-                            .overlay {
-                                Image(systemName: "rosette")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
+                    ForEach(store.badgeDetails.prefix(3)) { badge in
+                        ProfileBadgeIcon(badge: badge)
                             .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
                     }
                 }
@@ -404,7 +660,7 @@ struct ProfileView: View {
             .background(Theme.surface, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     /// 头衔 next to the display name. Uses the admin-designed style from
@@ -425,18 +681,14 @@ struct ProfileView: View {
 
     /// Recently visited nodes, styled like the achievements pill.
     private var recentNodesLink: some View {
-        Button { showNodes = true } label: {
+        Button { activeSheet = .nodes } label: {
             HStack(spacing: 8) {
                 HStack(spacing: -7) {
                     ForEach(store.recentNodes.prefix(3)) { node in
-                        Circle()
-                            .fill(profileNodeColor(node.colorHex))
-                            .frame(width: 22, height: 22)
-                            .overlay {
-                                Text(String(node.name.prefix(1)))
-                                    .font(Theme.heading(10, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
+                        // The node's own logo, the same as the sheet shows —
+                        // an initial on a colour disc was a placeholder that
+                        // outlived the data being available.
+                        NodeAvatar(node: node, size: 22, cornerRadius: 11)
                             .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
                     }
                 }
@@ -453,7 +705,7 @@ struct ProfileView: View {
             .background(Theme.surface, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private var nodesSheet: some View {
@@ -462,12 +714,12 @@ struct ProfileView: View {
                 VStack(spacing: 10) {
                     ForEach(store.recentNodes) { node in
                         Button {
-                            showNodes = false
+                            activeSheet = nil
                             app.tab = .nodes
                         } label: {
                             ProfileNodeRow(node: node)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 .padding(16)
@@ -478,7 +730,7 @@ struct ProfileView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showNodes = false } label: {
+                    Button { activeSheet = nil } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 13, weight: .bold))
                     }
@@ -493,16 +745,9 @@ struct ProfileView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(badgeSheetItems) { item in
+                    ForEach(store.badgeDetails) { item in
                         HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(badgeColor(item.index).opacity(0.14))
-                                .frame(width: 44, height: 44)
-                                .overlay {
-                                    Image(systemName: "rosette")
-                                        .font(.system(size: 18, weight: .bold))
-                                        .foregroundStyle(badgeColor(item.index))
-                                }
+                            ProfileBadgeIcon(badge: item, size: 44, cornerRadius: 12)
 
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.name)
@@ -534,7 +779,7 @@ struct ProfileView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showBadges = false } label: {
+                    Button { activeSheet = nil } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 13, weight: .bold))
                     }
@@ -545,33 +790,6 @@ struct ProfileView: View {
         .standardSheet()
     }
 
-    private struct BadgeSheetItem: Identifiable {
-        let id: Int
-        let index: Int
-        let name: String
-        let description: String
-    }
-
-    private var badgeSheetItems: [BadgeSheetItem] {
-        if !store.badgeDetails.isEmpty {
-            return store.badgeDetails.enumerated().map {
-                BadgeSheetItem(id: $1.id, index: $0, name: $1.name, description: $1.description)
-            }
-        }
-        return store.badges.enumerated().map {
-            BadgeSheetItem(id: $0, index: $0, name: $1, description: "")
-        }
-    }
-
-    private func badgeColor(_ index: Int) -> Color {
-        let colors: [Color] = [
-            Color(light: 0xD99A00, dark: 0xF8D34B),
-            Color(light: 0x2F6DF6, dark: 0x7EA7FF),
-            Color(light: 0x8A36D6, dark: 0xC99BFF),
-            Color(light: 0x1FA36B, dark: 0x5FD6A0)
-        ]
-        return colors[index % colors.count]
-    }
 
     // MARK: Reddit-style stats
 
@@ -581,7 +799,7 @@ struct ProfileView: View {
                 VStack(spacing: 3) {
                     Text(stat.value)
                         .font(Theme.heading(17, weight: .bold))
-                        .foregroundStyle(stat.label == "能量" || stat.label == "声望" ? Theme.accent : Theme.text)
+                        .foregroundStyle(stat.isAccented ? Theme.accent : Theme.text)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                     Text(stat.label)
@@ -613,7 +831,7 @@ struct ProfileView: View {
                         withAnimation(.quick) { selectedTab = tab }
                     } label: {
                         VStack(spacing: 7) {
-                            Text(tab.rawValue)
+                            Text(tab.label)
                                 .font(Theme.body(14, weight: selectedTab == tab ? .semibold : .medium))
                                 .foregroundStyle(selectedTab == tab ? Theme.text : Theme.muted(0.5))
                             Rectangle()
@@ -623,7 +841,7 @@ struct ProfileView: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             .padding(.horizontal, 16)
@@ -648,10 +866,51 @@ struct ProfileView: View {
         } else if let items = store.actionItems[selectedTab], !items.isEmpty {
             LazyVStack(spacing: 0) {
                 ForEach(items) { activityRow($0) }
+
+                if store.tabsWithMore.contains(selectedTab) {
+                    HStack {
+                        ProgressView().tint(Theme.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .onScrollVisibilityChange(threshold: 0.1) { visible in
+                        guard visible else { return }
+                        Task { await store.loadMore(selectedTab) }
+                    }
+                }
             }
+        } else if store.failedTabs.contains(selectedTab) {
+            // A failed request is not an empty tab; offer the retry instead of
+            // claiming there is nothing here.
+            failedTab
         } else {
             emptyTab
         }
+    }
+
+    private var failedTab: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Theme.muted(0.4))
+            Text("加载失败")
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.muted(0.55))
+            Button {
+                let tab = selectedTab
+                Task { await store.loadTab(tab) }
+            } label: {
+                Text("重试")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(Theme.accent.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.pressable)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 44)
     }
 
     /// 能量 history from the discourse-points-service plugin.
@@ -667,7 +926,7 @@ struct ProfileView: View {
                 Image(systemName: "bolt.slash")
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Theme.muted(0.35))
-                Text(store.isGuest ? "登录后查看你的能量历史" : "暂无能量历史记录")
+                Text(store.isGuest ? AppString("登录后查看你的能量历史") : AppString("暂无能量历史记录"))
                     .font(Theme.body(13))
                     .foregroundStyle(Theme.muted(0.5))
             }
@@ -685,7 +944,7 @@ struct ProfileView: View {
         let positive = entry.isPositive ?? (points > 0)
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry.description ?? "能量变动")
+                Text(entry.description ?? AppString("能量变动"))
                     .font(Theme.body(14, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
@@ -721,7 +980,7 @@ struct ProfileView: View {
     private func activityRow(_ item: UserActionItem) -> some View {
         Button { openAction(item) } label: {
             VStack(alignment: .leading, spacing: 6) {
-                Text(item.title ?? "无标题")
+                Text(item.title ?? AppString("无标题"))
                     .font(Theme.body(15, weight: .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
@@ -751,7 +1010,7 @@ struct ProfileView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.divider).frame(height: 1).padding(.horizontal, 16)
         }
@@ -762,7 +1021,7 @@ struct ProfileView: View {
             Image(systemName: "tray")
                 .font(.system(size: 26, weight: .semibold))
                 .foregroundStyle(Theme.muted(0.35))
-            Text(store.isGuest ? "登录后查看你的\(selectedTab.rawValue)" : "还没有\(selectedTab.rawValue)")
+            Text(store.isGuest ? AppString("登录后查看你的\(selectedTab.label)") : AppString("还没有\(selectedTab.label)"))
                 .font(Theme.body(13))
                 .foregroundStyle(Theme.muted(0.5))
         }
@@ -836,15 +1095,16 @@ struct ProfileView: View {
         .overlay(Capsule().strokeBorder(color.opacity(0.22), lineWidth: 1))
     }
 
-    private func roleColor(_ role: String) -> Color {
-        switch role {
-        case "ADMIN", "MOD":
+    /// Keyed on the role's kind, never on its label — the label is translated.
+    private func roleColor(_ role: ProfileRole) -> Color {
+        switch role.kind {
+        case .admin, .moderator:
             return Theme.danger
-        case "REGULAR", "LEADER":
+        case .trustLevel(let level) where level >= 3:
             return Color(light: 0x8A36D6, dark: 0xC99BFF)
-        case "GUEST":
+        case .guest:
             return Theme.muted(0.58)
-        default:
+        case .trustLevel:
             return Color(light: 0x2F6DF6, dark: 0x7EA7FF)
         }
     }
@@ -919,4 +1179,207 @@ private struct ProfileNodeRow: View {
         .environment(app)
         .foregroundStyle(Theme.text)
         .tint(Theme.accent)
+}
+
+// MARK: - 升级进度 (discourse-upgrade-process)
+
+/// The full requirement list behind the banner's progress track.
+private struct UpgradeProgressSheet: View {
+    let report: UpgradeProgressReport
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    summary
+
+                    if !statuses.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(statuses) { statusRow($0) }
+                        }
+                    }
+
+                    if !metrics.isEmpty {
+                        LazyVGrid(columns: metricColumns, spacing: 10) {
+                            ForEach(metrics) { metricCard($0) }
+                        }
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
+                .padding(.bottom, 32)
+            }
+            .scrollIndicators(.hidden)
+            .background(Theme.bg)
+            .navigationTitle("升级进度")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .standardSheet()
+    }
+
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(headline)
+                .font(Theme.heading(18, weight: .semibold))
+                .foregroundStyle(Theme.text)
+
+            Text(report.isRetention
+                 ? AppString("维持要求 \(report.satisfiedCount)/\(report.totalConditions ?? report.allConditions.count) 项达标")
+                 : AppString("已满足 \(report.satisfiedCount)/\(report.totalConditions ?? report.allConditions.count) 项要求"))
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.muted(0.6))
+
+            // At the top level the requirements are upkeep: falling behind
+            // matters, so say so rather than implying there's nothing to do.
+            if report.isRetention, !report.allMet {
+                Label("有维持要求未达标", systemImage: "exclamationmark.triangle.fill")
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.danger)
+            }
+
+            ProgressView(value: report.fraction)
+                .tint(Theme.accent)
+                .padding(.top, 4)
+        }
+    }
+
+    private var headline: String {
+        if report.isRetention {
+            // Already at the top: this panel is about holding the level.
+            if let level = report.currentLevelName {
+                return AppString("\(level) · 维持中")
+            }
+            return AppString("等级维持")
+        }
+        if let next = report.nextLevelName {
+            return AppString("距离 \(next) 还差一步")
+        }
+        return AppString("升级进度")
+    }
+
+    // MARK: Requirements
+
+    private var metricColumns: [GridItem] {
+        [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+    }
+
+    /// Yes/no requirements read as a list; everything countable is a card, two
+    /// to a row — the same split the plugin's own panel makes.
+    private var statuses: [UpgradeCondition] { ordered.filter(\.isStatus) }
+    private var metrics: [UpgradeCondition] { ordered.filter { !$0.isStatus } }
+
+    /// Unmet first: those are what the user opened this for. Sorted on the
+    /// index as a tiebreak, since `sorted(by:)` gives no stability guarantee.
+    private var ordered: [UpgradeCondition] {
+        report.allConditions.enumerated()
+            .sorted { lhs, rhs in
+                let left = (lhs.element.met == true ? 1 : 0, lhs.offset)
+                let right = (rhs.element.met == true ? 1 : 0, rhs.offset)
+                return left < right
+            }
+            .map(\.element)
+    }
+
+    private func statusRow(_ condition: UpgradeCondition) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: condition.met == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(condition.met == true ? Theme.success : Theme.danger)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(condition.displayName)
+                    .font(Theme.body(14, weight: .medium))
+                    .foregroundStyle(Theme.text)
+
+                if let scope = condition.scope, !scope.isEmpty {
+                    Text(scope)
+                        .font(Theme.body(11))
+                        .foregroundStyle(Theme.muted(0.55))
+                }
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Theme.divider, lineWidth: 1)
+        }
+    }
+
+    private func metricCard(_ condition: UpgradeCondition) -> some View {
+        let met = condition.met == true
+        let tint = met ? Theme.success : Theme.accent
+
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 6) {
+                Text(condition.displayName)
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    // Reserved so both cards in a row are the same height even
+                    // when one name wraps.
+                    .lineLimit(2, reservesSpace: true)
+                    .multilineTextAlignment(.leading)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: met ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(met ? Theme.success : Theme.muted(0.3))
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(number(condition.value ?? 0))
+                    .font(Theme.heading(19, weight: .bold))
+                    .foregroundStyle(Theme.text)
+
+                if let target = condition.target {
+                    Text(condition.isLimit ? AppString("上限 \(number(target))") : AppString("目标 \(number(target))"))
+                        .font(Theme.body(11))
+                        .foregroundStyle(Theme.muted(0.5))
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            ProgressView(value: condition.fraction)
+                .tint(tint)
+
+            Text(hint(for: condition))
+                .font(Theme.body(10, weight: .medium))
+                .foregroundStyle(met ? Theme.success : Theme.muted(0.55))
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Theme.divider, lineWidth: 1)
+        }
+    }
+
+    /// The plugin's own wording, so the app and the site agree.
+    private func hint(for condition: UpgradeCondition) -> String {
+        if condition.met == true {
+            return condition.isLimit ? AppString("未超限") : AppString("已达标")
+        }
+        let remaining = number(condition.shortfall)
+        return condition.isLimit
+            ? AppString("超出 \(remaining)")
+            : AppString("还差 \(remaining)")
+    }
+
+    private func number(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+    }
 }

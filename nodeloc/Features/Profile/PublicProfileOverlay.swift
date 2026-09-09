@@ -12,12 +12,24 @@ import SwiftUI
 struct PublicProfileOverlay: View {
     let target: UserProfileTarget
     let onClose: () -> Void
+    @Environment(AppState.self) private var app
     @State private var store = PublicProfileStore()
 
-    @State private var showBadges = false
-    @State private var showNodes = false
+    /// One sheet, chosen by value. Several `.sheet(isPresented:)` on the same
+    /// view silently collapse to whichever was applied last — this screen had
+    /// two, so 最近访问 was opening the badge list.
+    @State private var activeSheet: ProfileSheet?
     @State private var selectedTab: ProfileStore.ProfileTab = .topics
     @State private var scrollOffset: CGFloat = 0
+    /// This person's public custom feeds — the ones they set `show_on_profile`
+    /// on. Loaded here rather than in `PublicProfileStore` because it is one
+    /// independent request that shouldn't be able to fail the whole profile.
+    @State private var publicFeeds: [CustomFeed] = []
+
+    private enum ProfileSheet: String, Identifiable {
+        case badges, nodes, privateMessage
+        var id: String { rawValue }
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -25,6 +37,7 @@ struct PublicProfileOverlay: View {
                 LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
                     profileHero
                     statsRow
+                    customFeedsRow
 
                     Section {
                         tabContent
@@ -37,6 +50,14 @@ struct PublicProfileOverlay: View {
             }
             .scrollIndicators(.hidden)
             .ignoresSafeArea(edges: .top)
+            // This screen had no refresh at all. `force` is required or a
+            // profile still inside its cache window returns immediately, and
+            // the tab is reloaded explicitly because its task id (username +
+            // tab) doesn't change across a refresh.
+            .refreshable {
+                await store.load(target: target, force: true)
+                await store.loadTab(selectedTab)
+            }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
                 max(0, geometry.contentOffset.y)
             } action: { _, newValue in
@@ -49,17 +70,31 @@ struct PublicProfileOverlay: View {
         }
         .background(Theme.bg.ignoresSafeArea())
         .task(id: target.id) { await store.load(target: target) }
+        // The feeds this person chose to show. Only public ones come back, so
+        // an empty result is the normal case and the row simply doesn't appear.
+        .task(id: target.username) {
+            publicFeeds = (try? await DiscourseClient().customFeeds(username: target.username))?
+                .customFeeds ?? []
+        }
         .task(id: "\(store.username)-\(selectedTab.rawValue)") { await store.loadTab(selectedTab) }
-        .sheet(isPresented: $showBadges) { badgeSheet }
-        .sheet(isPresented: $showNodes) { nodesSheet }
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .badges: badgeSheet
+            case .nodes: nodesSheet
+            case .privateMessage:
+                PrivateMessageSheet(recipient: store.displayName) { title, body in
+                    await store.sendPrivateMessage(title: title, body: body)
+                }
+            }
+        }
     }
 
     // MARK: Floating header (matches the post reader's chrome)
 
-    private let headerControlHeight: CGFloat = 34
-    private let headerHorizontalInset: CGFloat = 16
-    private let headerGlassTint = Theme.bg.opacity(0.34)
-    private let headerShadow = Color.black.opacity(0.08)
+    // Read from the shared metrics rather than redeclared: local copies are
+    // what let this header drift out of step with every other screen's.
+    private let headerControlHeight = FloatingHeader.controlHeight
+    private let headerHorizontalInset = FloatingHeader.horizontalInset
 
     /// 0 → 1 as the banner scrolls away, revealing the inline user pill.
     private var userRevealProgress: CGFloat {
@@ -68,7 +103,7 @@ struct PublicProfileOverlay: View {
 
     private var floatingHeader: some View {
         HStack(spacing: 8) {
-            headerGlassButton(borderShape: .circle, action: onClose) {
+            FloatingHeaderButton(action: onClose) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Theme.headerText)
@@ -79,7 +114,7 @@ struct PublicProfileOverlay: View {
                 .opacity(userRevealProgress)
                 .offset(y: (1 - userRevealProgress) * -4)
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
 
             headerTools
         }
@@ -89,7 +124,7 @@ struct PublicProfileOverlay: View {
 
     /// Avatar + username, revealed between the back button and the tool pill.
     private var userPill: some View {
-        headerGlassButton(borderShape: .capsule, action: {}) {
+        FloatingHeaderButton(borderShape: .capsule, action: {}) {
             HStack(spacing: 6) {
                 RemoteAvatar(
                     url: store.avatarURL,
@@ -109,64 +144,68 @@ struct PublicProfileOverlay: View {
         .allowsHitTesting(false)
     }
 
-    /// Search / share / more in one glass capsule. Same construction as the post
-    /// reader's tool cluster: a native glass button provides the capsule, with
-    /// the tappable icons layered on top.
+    /// 更多, as a single round glass button — the same construction the
+    /// browser's ⋯ uses, so it can't drift from the back button beside it. A
+    /// capsule sized around one 28pt-wide icon read as a vertical oval; letting
+    /// the native button style shape itself avoids that arithmetic entirely.
+    ///
+    /// The previous version layered `.plain` buttons over a capsule marked
+    /// `allowsHitTesting(false)`, so nothing in it could ever respond — and its
+    /// 搜索 / 分享 icons had no actions behind them at all.
     private var headerTools: some View {
-        ZStack {
-            headerGlassButton(borderShape: .capsule, action: {}) {
-                headerToolsChrome
-                    .opacity(0)
+        Menu {
+            userMenuContent
+        } label: {
+            FloatingHeaderIcon(systemName: "ellipsis")
+        }
+        .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
+        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        .accessibilityLabel("更多")
+    }
+
+    /// 私信 / 聊天 / 通知方式. All three need an account, and none of them makes
+    /// sense pointed at yourself.
+    @ViewBuilder
+    private var userMenuContent: some View {
+        if canInteract {
+            Button {
+                activeSheet = .privateMessage
+            } label: {
+                Label("私信", systemImage: "envelope")
             }
-            .allowsHitTesting(false)
 
-            headerToolsContent
+            Button {
+                app.openDirectMessage(username: store.username)
+                onClose()
+            } label: {
+                Label("聊天", systemImage: "bubble.left.and.bubble.right")
+            }
+
+            Divider()
+
+            Menu {
+                Picker("通知方式", selection: Binding(
+                    get: { store.notificationLevel },
+                    set: { level in Task { await store.setNotificationLevel(level) } }
+                )) {
+                    ForEach(UserNotificationLevel.allCases) { level in
+                        Label(level.label, systemImage: level.icon).tag(level)
+                    }
+                }
+            } label: {
+                Label("通知方式", systemImage: store.notificationLevel.icon)
+            }
+        } else {
+            Button {} label: { Label("暂无可用操作", systemImage: "nosign") }
+                .disabled(true)
         }
     }
 
-    private var headerToolsChrome: some View {
-        HStack(spacing: 4) {
-            headerToolIcon("magnifyingglass")
-            headerToolIcon("square.and.arrow.up")
-            headerToolIcon("ellipsis")
-        }
-        .padding(.horizontal, 7)
-        .frame(height: headerControlHeight)
-    }
-
-    private var headerToolsContent: some View {
-        HStack(spacing: 4) {
-            Button {} label: { headerToolIcon("magnifyingglass") }
-                .buttonStyle(.plain)
-            Button {} label: { headerToolIcon("square.and.arrow.up") }
-                .buttonStyle(.plain)
-            Button {} label: { headerToolIcon("ellipsis") }
-                .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 7)
-        .frame(height: headerControlHeight)
-    }
-
-    private func headerToolIcon(_ systemImage: String) -> some View {
-        Image(systemName: systemImage)
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(Theme.text)
-            .frame(width: 26, height: 26)
-    }
-
-    /// Native glass button, matching the post reader and home header chrome.
-    private func headerGlassButton<Label: View>(
-        borderShape: ButtonBorderShape,
-        action: @escaping () -> Void,
-        @ViewBuilder label: () -> Label
-    ) -> some View {
-        Button(action: action) {
-            label()
-                .frame(height: headerControlHeight)
-        }
-        .buttonStyle(.glass(.regular.tint(headerGlassTint)))
-        .buttonBorderShape(borderShape)
-        .shadow(color: headerShadow, radius: 9, y: 6)
+    /// Signed in, and this is somebody else.
+    private var canInteract: Bool {
+        DiscourseAuth.shared.isAuthenticated
+            && !store.username.isEmpty
+            && store.username.caseInsensitiveCompare(DiscourseAuth.shared.username ?? "") != .orderedSame
     }
 
     /// Banner height, including the area behind the status bar.
@@ -230,7 +269,7 @@ struct PublicProfileOverlay: View {
                     Image(systemName: store.isFollowing ? "checkmark" : "plus")
                         .font(.system(size: 10, weight: .bold))
                 }
-                Text(store.isFollowing ? "已关注" : "关注")
+                Text(store.isFollowing ? AppString("已关注") : AppString("关注"))
                     .font(Theme.body(12, weight: .semibold))
             }
             .foregroundStyle(store.isFollowing ? Theme.text : .white)
@@ -243,7 +282,7 @@ struct PublicProfileOverlay: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(store.isTogglingFollow)
     }
 
@@ -304,8 +343,8 @@ struct PublicProfileOverlay: View {
 
             if !store.roles.isEmpty {
                 FlowLayout(spacing: 8, alignment: .center) {
-                    ForEach(store.roles, id: \.self) { role in
-                        profileChip(role, color: roleColor(role))
+                    ForEach(store.roles) { role in
+                        profileChip(role.label, color: roleColor(role))
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -362,18 +401,11 @@ struct PublicProfileOverlay: View {
     }
 
     private var achievementsLink: some View {
-        Button { showBadges = true } label: {
+        Button { activeSheet = .badges } label: {
             HStack(spacing: 8) {
                 HStack(spacing: -7) {
-                    ForEach(0..<min(3, store.badges.count), id: \.self) { index in
-                        Circle()
-                            .fill(badgeColor(index))
-                            .frame(width: 22, height: 22)
-                            .overlay {
-                                Image(systemName: "rosette")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
+                    ForEach(store.badgeDetails.prefix(3)) { badge in
+                        ProfileBadgeIcon(badge: badge)
                             .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
                     }
                 }
@@ -390,22 +422,80 @@ struct PublicProfileOverlay: View {
             .background(Theme.surface, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
+    }
+
+    /// The person's public custom feeds, as a scrolling row of chips.
+    @ViewBuilder
+    private var customFeedsRow: some View {
+        if !publicFeeds.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                SectionKicker(text: AppString("Custom Feed"))
+                    .padding(.horizontal, 16)
+
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(publicFeeds) { feed in
+                            Button {
+                                openCustomFeed(feed)
+                            } label: {
+                                HStack(spacing: 7) {
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(nodeAccentColor(feed.color ?? "009966"))
+                                        .frame(width: 20, height: 20)
+                                        .overlay {
+                                            Image(systemName: "line.3.horizontal.decrease")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(.white)
+                                        }
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(feed.name)
+                                            .font(Theme.body(13, weight: .semibold))
+                                            .foregroundStyle(Theme.text)
+                                            .lineLimit(1)
+                                        Text(AppString("\(feed.nodeCount ?? 0) 个节点"))
+                                            .font(Theme.body(11))
+                                            .foregroundStyle(Theme.muted(0.55))
+                                    }
+                                }
+                                .padding(.leading, 8)
+                                .padding(.trailing, 12)
+                                .padding(.vertical, 7)
+                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                        .strokeBorder(Theme.divider, lineWidth: 1)
+                                }
+                            }
+                            .buttonStyle(.pressable)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+    }
+
+    /// Same handoff as `openTopic`: this profile is inside a cover, and the
+    /// feed page is presented at the root, so the screen goes back first.
+    private func openCustomFeed(_ feed: CustomFeed) {
+        // The by-user payload always names the owner, but fall back to the
+        // profile being viewed rather than doing nothing.
+        let username = feed.username ?? target.username
+        guard !username.isEmpty else { return }
+        onClose()
+        app.openCustomFeed(username: username, slug: feed.slug, name: feed.name)
     }
 
     private var nodesLink: some View {
-        Button { showNodes = true } label: {
+        Button { activeSheet = .nodes } label: {
             HStack(spacing: 8) {
                 HStack(spacing: -7) {
                     ForEach(store.topCategories.prefix(3)) { node in
-                        Circle()
-                            .fill(Theme.accent)
-                            .frame(width: 22, height: 22)
-                            .overlay {
-                                Text(node.letter)
-                                    .font(Theme.heading(10, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
+                        // The node's own logo, like 我的 page — an initial on an
+                        // accent disc looked the same for every node.
+                        NodeAvatar(node: node, size: 22, cornerRadius: 11)
                             .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
                     }
                 }
@@ -422,33 +512,16 @@ struct PublicProfileOverlay: View {
             .background(Theme.surface, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         }
-        .buttonStyle(.plain)
-    }
-
-    private func badgeColor(_ index: Int) -> Color {
-        let colors: [Color] = [
-            Color(light: 0xD99A00, dark: 0xF8D34B),
-            Color(light: 0x2F6DF6, dark: 0x7EA7FF),
-            Color(light: 0x8A36D6, dark: 0xC99BFF),
-            Color(light: 0x1FA36B, dark: 0x5FD6A0)
-        ]
-        return colors[index % colors.count]
+        .buttonStyle(.pressable)
     }
 
     private var badgeSheet: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(Array(store.badgeDetails.enumerated()), id: \.offset) { index, item in
+                    ForEach(store.badgeDetails) { item in
                         HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(badgeColor(index).opacity(0.14))
-                                .frame(width: 44, height: 44)
-                                .overlay {
-                                    Image(systemName: "rosette")
-                                        .font(.system(size: 18, weight: .bold))
-                                        .foregroundStyle(badgeColor(index))
-                                }
+                            ProfileBadgeIcon(badge: item, size: 44, cornerRadius: 12)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.name)
                                     .font(Theme.body(15, weight: .semibold))
@@ -486,23 +559,25 @@ struct PublicProfileOverlay: View {
                 VStack(spacing: 10) {
                     ForEach(store.topCategories) { node in
                         HStack(spacing: 12) {
-                            Avatar(letter: node.letter, variant: node.variant, size: 44, cornerRadius: 12)
+                            NodeSummaryIcon(node: node, size: 44, cornerRadius: 12)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(node.name)
                                     .font(Theme.body(15, weight: .semibold))
                                     .foregroundStyle(Theme.text)
                                     .lineLimit(1)
-                                if !node.desc.isEmpty {
-                                    Text(node.desc)
+                                if !node.description.isEmpty {
+                                    Text(node.description)
                                         .font(Theme.body(12))
                                         .foregroundStyle(Theme.muted(0.6))
                                         .lineLimit(1)
                                 }
                             }
                             Spacer(minLength: 8)
-                            Text(node.members)
-                                .font(Theme.body(11, weight: .semibold))
-                                .foregroundStyle(Theme.muted(0.48))
+                            if !node.memberCount.isEmpty {
+                                Text(node.memberCount)
+                                    .font(Theme.body(11, weight: .semibold))
+                                    .foregroundStyle(Theme.muted(0.48))
+                            }
                         }
                         .padding(14)
                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -524,24 +599,40 @@ struct PublicProfileOverlay: View {
 
     @ViewBuilder
     private var profileMeta: some View {
-        let items = [store.location, store.website].compactMap { value in
-            value?.isEmpty == false ? value : nil
-        }
-        if !items.isEmpty {
-            HStack(spacing: 14) {
-                ForEach(items, id: \.self) { item in
-                    HStack(spacing: 5) {
-                        Image(systemName: item == store.website ? "link" : "mappin.and.ellipse")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color(light: 0x2F6DF6, dark: 0x7EA7FF))
-                        Text(item)
-                            .font(Theme.body(12, weight: .medium))
-                            .foregroundStyle(Theme.muted(0.62))
-                            .lineLimit(1)
-                    }
+        HStack(spacing: 14) {
+            if let location = store.location, !location.isEmpty {
+                metaItem(icon: "mappin.and.ellipse", text: location) {
+                    openInMaps(location)
+                }
+            }
+            if let website = store.website, !website.isEmpty {
+                metaItem(icon: "link", text: website) {
+                    openProfileWebsite(url: store.websiteURL, displayText: website)
                 }
             }
         }
+    }
+
+    /// 位置 opens Maps, 网址 opens the in-app browser. Both were plain text
+    /// before, which read like links and did nothing.
+    private func metaItem(
+        icon: String,
+        text: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(light: 0x2F6DF6, dark: 0x7EA7FF))
+                Text(text)
+                    .font(Theme.body(12, weight: .medium))
+                    .foregroundStyle(Theme.muted(0.62))
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
     }
 
     /// Reddit-style stat row, matching the 我的 page.
@@ -551,7 +642,7 @@ struct PublicProfileOverlay: View {
                 VStack(spacing: 3) {
                     Text(stat.value)
                         .font(Theme.heading(17, weight: .bold))
-                        .foregroundStyle(stat.label == "能量" || stat.label == "声望" ? Theme.accent : Theme.text)
+                        .foregroundStyle(stat.isAccented ? Theme.accent : Theme.text)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                     Text(stat.label)
@@ -581,7 +672,7 @@ struct PublicProfileOverlay: View {
                         withAnimation(.quick) { selectedTab = tab }
                     } label: {
                         VStack(spacing: 7) {
-                            Text(tab.rawValue)
+                            Text(tab.label)
                                 .font(Theme.body(14, weight: selectedTab == tab ? .semibold : .medium))
                                 .foregroundStyle(selectedTab == tab ? Theme.text : Theme.muted(0.5))
                             Rectangle()
@@ -591,7 +682,7 @@ struct PublicProfileOverlay: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             .padding(.horizontal, 16)
@@ -610,7 +701,7 @@ struct PublicProfileOverlay: View {
             if store.loadingTab == .energy && store.pointsHistory.isEmpty {
                 loadingRow
             } else if store.pointsHistory.isEmpty {
-                emptyTab(icon: "bolt.slash", text: "暂无能量历史记录")
+                emptyTab(icon: "bolt.slash", text: AppString("暂无能量历史记录"))
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(store.pointsHistory) { pointsRow($0) }
@@ -621,10 +712,51 @@ struct PublicProfileOverlay: View {
         } else if let items = store.actionItems[selectedTab], !items.isEmpty {
             LazyVStack(spacing: 0) {
                 ForEach(items) { activityRow($0) }
+
+                if store.tabsWithMore.contains(selectedTab) {
+                    HStack {
+                        ProgressView().tint(Theme.accent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+                    .onScrollVisibilityChange(threshold: 0.1) { visible in
+                        guard visible else { return }
+                        Task { await store.loadMore(selectedTab) }
+                    }
+                }
             }
+        } else if store.failedTabs.contains(selectedTab) {
+            // A failed request is not an empty tab. Saying "还没有…" about one
+            // that a rate limit ate is both wrong and a dead end.
+            failedTab
         } else {
-            emptyTab(icon: "tray", text: "还没有\(selectedTab.rawValue)")
+            emptyTab(icon: "tray", text: AppString("还没有\(selectedTab.label)"))
         }
+    }
+
+    private var failedTab: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Theme.muted(0.4))
+            Text("加载失败")
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.muted(0.55))
+            Button {
+                let tab = selectedTab
+                Task { await store.loadTab(tab) }
+            } label: {
+                Text("重试")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(Theme.accent.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.pressable)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 44)
     }
 
     private var loadingRow: some View {
@@ -648,8 +780,31 @@ struct PublicProfileOverlay: View {
     }
 
     private func activityRow(_ item: UserActionItem) -> some View {
+        Button {
+            openTopic(item)
+        } label: {
+            activityRowLabel(item)
+        }
+        .buttonStyle(.pressable)
+        // Every row names a topic, and this list had no way into any of them.
+        .disabled(item.topicId == nil)
+    }
+
+    /// Opens the topic this activity refers to, at the exact reply when the
+    /// item carries one — a 赞 or a 帖子 row means a post, not just its topic.
+    private func openTopic(_ item: UserActionItem) {
+        guard let topicID = item.topicId else { return }
+        // Through `app` rather than a local presentation: this profile is
+        // already inside a cover, and `openTopic` is what the reader's own
+        // routing uses. `onClose` hands the screen back first so the reader
+        // isn't opened underneath this page.
+        onClose()
+        app.openTopic(id: topicID, postNumber: item.postNumber)
+    }
+
+    private func activityRowLabel(_ item: UserActionItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(item.title ?? "无标题")
+            Text(item.title ?? AppString("无标题"))
                 .font(Theme.body(15, weight: .semibold))
                 .foregroundStyle(Theme.text)
                 .lineLimit(2)
@@ -681,7 +836,7 @@ struct PublicProfileOverlay: View {
         let positive = entry.isPositive ?? (points > 0)
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry.description ?? "能量变动")
+                Text(entry.description ?? AppString("能量变动"))
                     .font(Theme.body(14, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
@@ -739,11 +894,84 @@ struct PublicProfileOverlay: View {
         .overlay(Capsule().strokeBorder(color.opacity(0.22), lineWidth: 1))
     }
 
-    private func roleColor(_ role: String) -> Color {
-        switch role {
-        case "ADMIN", "MOD": return Theme.danger
-        case "REGULAR", "LEADER": return Color(light: 0x8A36D6, dark: 0xC99BFF)
+    /// Keyed on the role's kind, never on its label — the label is translated.
+    private func roleColor(_ role: ProfileRole) -> Color {
+        switch role.kind {
+        case .admin, .moderator: return Theme.danger
+        case .trustLevel(let level) where level >= 3:
+            return Color(light: 0x8A36D6, dark: 0xC99BFF)
         default: return Color(light: 0x2F6DF6, dark: 0x7EA7FF)
+        }
+    }
+}
+
+// MARK: - 私信
+
+/// Composes a private message to one person. Native controls throughout, and
+/// deliberately minimal: Discourse needs a title and a body, nothing else.
+private struct PrivateMessageSheet: View {
+    let recipient: String
+    /// Returns whether it sent — a failure keeps the draft on screen.
+    let send: (String, String) async -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var message = ""
+    @State private var isSending = false
+    @FocusState private var bodyFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("标题") {
+                    TextField("这条私信的主题", text: $title)
+                        .submitLabel(.next)
+                        .onSubmit { bodyFocused = true }
+                }
+
+                Section("内容") {
+                    TextField("想说的话…", text: $message, axis: .vertical)
+                        .lineLimit(6...12)
+                        .focused($bodyFocused)
+                }
+            }
+            .navigationTitle("发给 \(recipient)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("发送") { submit() }
+                        .disabled(!canSend)
+                }
+            }
+            .disabled(isSending)
+        }
+        .standardSheet([.large])
+    }
+
+    /// Discourse rejects short titles and bodies outright, so the button stays
+    /// disabled rather than sending something the server will refuse.
+    private var canSend: Bool {
+        !isSending
+            && title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+            && message.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+    }
+
+    private func submit() {
+        guard canSend else { return }
+        isSending = true
+        Task {
+            let sent = await send(
+                title.trimmingCharacters(in: .whitespacesAndNewlines),
+                message.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            isSending = false
+            if sent {
+                ToastCenter.shared.show(AppString("私信已发送"))
+                dismiss()
+            }
         }
     }
 }

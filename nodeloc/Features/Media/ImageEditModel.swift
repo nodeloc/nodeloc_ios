@@ -55,8 +55,8 @@ nonisolated struct ImageMosaicRect: Identifiable, Sendable, Codable, Equatable {
 
         var label: String {
             switch self {
-            case .pixelate: "马赛克"
-            case .solid: "纯色"
+            case .pixelate: AppString("马赛克")
+            case .solid: AppString("纯色")
             }
         }
     }
@@ -84,14 +84,14 @@ nonisolated enum ImageFilterKind: String, Sendable, Codable, CaseIterable, Ident
 
     var label: String {
         switch self {
-        case .none: "原图"
-        case .vivid: "鲜明"
-        case .mono: "黑白"
-        case .instant: "胶片"
-        case .fade: "褪色"
-        case .cool: "冷色"
-        case .warm: "暖色"
-        case .process: "高对比"
+        case .none: AppString("原图")
+        case .vivid: AppString("鲜明")
+        case .mono: AppString("黑白")
+        case .instant: AppString("胶片")
+        case .fade: AppString("褪色")
+        case .cool: AppString("冷色")
+        case .warm: AppString("暖色")
+        case .process: AppString("高对比")
         }
     }
 }
@@ -111,8 +111,8 @@ nonisolated enum ImageCropAspect: String, Sendable, Codable, CaseIterable, Ident
 
     var label: String {
         switch self {
-        case .free: "自由"
-        case .original: "原始"
+        case .free: AppString("自由")
+        case .original: AppString("原始")
         case .square: "1:1"
         case .r4x3: "4:3"
         case .r3x4: "3:4"
@@ -232,7 +232,7 @@ nonisolated struct ComposeImageAttachment: Identifiable, Sendable {
     }
 
     private var escapedLabel: String {
-        let base = fileName.isEmpty ? "图片" : fileName
+        let base = fileName.isEmpty ? AppString("图片") : fileName
         return base
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "[", with: "\\[")
@@ -312,7 +312,7 @@ nonisolated struct ComposeVideoAttachment: Identifiable, Sendable {
 
     private var escapedLabel: String {
         let base = (fileName as NSString).deletingPathExtension
-        let cleaned = base.isEmpty ? "视频" : base
+        let cleaned = base.isEmpty ? AppString("视频") : base
         return cleaned
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "|", with: " ")

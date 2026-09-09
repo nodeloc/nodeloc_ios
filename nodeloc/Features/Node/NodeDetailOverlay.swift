@@ -22,15 +22,29 @@ struct NodeDetailOverlay: View {
     @State private var descriptionExpanded = false
     @State private var showSortPicker = false
     @State private var showAbout = false
+    /// Presented here, not through `app.overlay`: this page can itself be
+    /// inside a full-screen cover (deep link, media viewer), and an app-level
+    /// overlay would render underneath it — the button looked dead.
+    @State private var showAuth = false
     @State private var scrollOffset: CGFloat = 0
-    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
-    @State private var pull = PullToRefresh()
     /// Media opened straight from a card, without entering the post.
     @State private var viewerImages: [PostImage] = []
     @State private var viewerIndex = 0
     @State private var viewerVideo: PostVideo?
     /// The post whose media is open, for the viewer's chrome and actions.
     @State private var viewerMediaPost: Post?
+    /// The topic being read, presented from here for the same reason `showAuth`
+    /// is: this page is usually inside a full-screen cover (the sidebar route
+    /// and deep links both go through `ContentView`'s), and `app.overlay` draws
+    /// in `MainView` *behind* that cover — so opening a topic through it left
+    /// the reader invisible and every row looked dead.
+    @State private var readingPost: Post?
+    /// Writing a topic in this node, presented from here for the same reason as
+    /// `readingPost`. Going through `app.overlay = .compose` put the composer
+    /// behind this page's cover: it took keyboard focus, so the keyboard rose
+    /// over a node page that looked untouched.
+    @State private var isComposing = false
+    @Namespace private var readerNamespace
 
     private let headerControlHeight: CGFloat = 34
     /// Extends below the floating buttons; the safe-area inset is added on top.
@@ -57,17 +71,12 @@ struct NodeDetailOverlay: View {
                     .frame(maxWidth: .infinity)
                 }
                 .scrollIndicators(.hidden)
+                .refreshable { await store.refresh() }
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
-                    geo.contentOffset.y
+                    max(0, geo.contentOffset.y)
                 } action: { _, newValue in
-                    scrollOffset = max(0, newValue)
-                    pull.scrolled(to: newValue) { await store.refresh() }
+                    scrollOffset = newValue
                 }
-
-                NodelocRefreshIndicator(pull: pull)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, UIApplication.topSafeAreaInset + 66)
-                    .zIndex(5)
 
                 // Floating chrome, kept clear of the status bar. The banner still
                 // bleeds up behind it via its own safe-area padding.
@@ -81,6 +90,31 @@ struct NodeDetailOverlay: View {
         .ignoresSafeArea(edges: .top)
         .task(id: node.id) { await store.load(node: node) }
         .sheet(isPresented: $showSortPicker) { sortSheet }
+        .fullScreenCover(isPresented: $showAuth) {
+            AuthFlowOverlay(onDismiss: { showAuth = false })
+        }
+        // The reader, presented from here rather than through `app.overlay` —
+        // see `readingPost`. The environment is re-injected because a cover
+        // starts its own presentation context.
+        .fullScreenCover(item: $readingPost) { _ in
+            ZStack {
+                Theme.bg.ignoresSafeArea()
+                PostDetailOverlay(
+                    postTransitionNamespace: readerNamespace,
+                    onClose: { readingPost = nil }
+                )
+            }
+            .environment(\.mediaAutoplayEnabled, true)
+            // Without this the reader's links would open in Safari and its
+            // badges would present behind this cover.
+            .appPresentationHost(app: app)
+        }
+        // The composer, presented from here rather than through `app.overlay`
+        // — see `isComposing`.
+        .fullScreenCover(isPresented: $isComposing) {
+            ComposeOverlay(onClose: { isComposing = false })
+                .appPresentationHost(app: app)
+        }
         .sheet(isPresented: $showAbout) { aboutSheet }
         // Card media opens its viewer here, over the list, so closing returns
         // to the same scroll position rather than to a post.
@@ -155,7 +189,7 @@ struct NodeDetailOverlay: View {
                         .background(store.sort == option ? Theme.accent.opacity(0.07) : .clear)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
                 Spacer(minLength: 0)
             }
@@ -194,9 +228,9 @@ struct NodeDetailOverlay: View {
                     }
 
                     HStack(spacing: 0) {
-                        aboutStat(store.memberCount, "成员")
-                        aboutStat(store.topicCount, "主题")
-                        aboutStat(store.postCount, "帖子")
+                        aboutStat(store.memberCount, AppString("成员"))
+                        aboutStat(store.topicCount, AppString("主题"))
+                        aboutStat(store.postCount, AppString("帖子"))
                     }
 
                     if !store.moderators.isEmpty {
@@ -326,28 +360,25 @@ struct NodeDetailOverlay: View {
     /// three, against 320pt of usable width on an SE. 分享 lives in the menu.
     private var headerTools: some View {
         HStack(spacing: 6) {
-            // Guests get 登录 where compose would be — posting needs an account
-            // anyway, and the capsule has no room for a fourth control.
+            // Guests get 登录 where compose would be — posting needs an
+            // account anyway. An icon, not a text pill: this capsule is sized
+            // to the pixel (three icons already need 319pt of the 320pt an SE
+            // has), so a wider control pushed the label to zero width and left
+            // an empty blob. Same destination as every other 登录 entry point.
             if app.isGuest {
-                Button {
-                    presentAuth(app)
-                } label: {
-                    Text("登录")
-                        .font(Theme.body(13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .frame(height: 30)
-                        .background(Theme.accent, in: Capsule())
+                Button { showAuth = true } label: {
+                    toolIcon("person.crop.circle.badge.checkmark")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
+                .accessibilityLabel("登录")
             } else {
                 Button(action: startCompose) { toolIcon("plus") }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .accessibilityLabel("在本节点发帖")
             }
 
             Button(action: startNodeSearch) { toolIcon("magnifyingglass") }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .accessibilityLabel("在本节点内搜索")
 
             Menu {
@@ -363,10 +394,7 @@ struct NodeDetailOverlay: View {
         // padding rather than pinning a height that would drift if the shared
         // control height changes.
         .padding(.vertical, 7)
-        .glassEffect(
-            .regular.tint(Theme.bg.opacity(0.34)).interactive(),
-            in: .capsule
-        )
+        .glassSurface(tint: Theme.bg.opacity(0.34), interactive: true)
         .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
     }
 
@@ -417,12 +445,26 @@ struct NodeDetailOverlay: View {
         }
     }
 
+    /// Quotes a topic into a new post, presented from here for the same reason
+    /// as `startCompose`.
+    private func startRepost(of post: Post) {
+        app.composePrefillTitle = post.title
+        app.composeRepostTopic = AppState.RepostTopic(
+            id: post.id,
+            title: post.title,
+            url: DiscourseConfig.baseURL.appending(path: "t/\(post.id)"),
+            node: post.node,
+            author: post.authorUsername,
+            excerpt: post.excerpt.isEmpty ? nil : post.excerpt,
+            imageURL: post.imageURL
+        )
+        isComposing = true
+    }
+
     /// Opens the composer with this node already chosen.
     private func startCompose() {
         app.composePreselectedNode = node
-        withAnimation(.overlayPush) {
-            app.overlay = .compose
-        }
+        isComposing = true
     }
 
     /// Opens search scoped to this node. `#slug` is Discourse's own category
@@ -446,7 +488,7 @@ struct NodeDetailOverlay: View {
                 } else if !store.isJoined {
                     Image(systemName: "plus").font(.system(size: 11, weight: .bold))
                 }
-                Text(store.isJoined ? "已加入" : "加入")
+                Text(store.isJoined ? AppString("已加入") : AppString("加入"))
                     .font(Theme.body(13, weight: .semibold))
             }
             .foregroundStyle(store.isJoined ? Theme.text : .white)
@@ -459,7 +501,7 @@ struct NodeDetailOverlay: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(store.isTogglingJoin)
     }
 
@@ -540,11 +582,11 @@ struct NodeDetailOverlay: View {
                 Button {
                     withAnimation(.quick) { descriptionExpanded.toggle() }
                 } label: {
-                    Text(descriptionExpanded ? "收起" : "查看更多内容")
+                    Text(descriptionExpanded ? AppString("收起") : AppString("查看更多内容"))
                         .font(Theme.body(13, weight: .semibold))
                         .foregroundStyle(Color(light: 0x2F6DF6, dark: 0x7EA7FF))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -556,8 +598,8 @@ struct NodeDetailOverlay: View {
     /// "每周 47 千位访客 · 758 个贡献" style line under the name.
     private var statsText: String {
         var parts: [String] = []
-        if let members = store.memberCount { parts.append("\(compact(members)) 位成员") }
-        if let topics = store.topicCount { parts.append("\(compact(topics)) 主题") }
+        if let members = store.memberCount { parts.append(AppString("\(compact(members)) 位成员")) }
+        if let topics = store.topicCount { parts.append(AppString("\(compact(topics)) 主题")) }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
@@ -584,7 +626,7 @@ struct NodeDetailOverlay: View {
                 .foregroundStyle(Theme.text)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
 
             Spacer(minLength: 0)
 
@@ -618,16 +660,16 @@ struct NodeDetailOverlay: View {
 
     @ViewBuilder
     private var topicList: some View {
-        if store.isLoading && store.posts.isEmpty {
-            NodelocLoader()
+        if store.isLoading && store.visiblePosts.isEmpty {
+            ProgressView().tint(Theme.accent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 48)
-        } else if store.posts.isEmpty {
+        } else if store.visiblePosts.isEmpty {
             VStack(spacing: 8) {
                 Image(systemName: "tray")
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Theme.muted(0.35))
-                Text(store.errorText ?? "还没有主题")
+                Text(store.errorText ?? AppString("还没有主题"))
                     .font(Theme.body(13))
                     .foregroundStyle(Theme.muted(0.5))
                     .multilineTextAlignment(.center)
@@ -636,12 +678,16 @@ struct NodeDetailOverlay: View {
             .padding(.vertical, 52)
         } else {
             LazyVStack(spacing: 0) {
-                ForEach(store.posts) { post in
+                ForEach(store.visiblePosts) { post in
                     NodeTopicRow(
                         post: post,
                         mode: readingMode.mode,
                         onTap: { open(post) },
-                        onMediaTap: { openMedia(for: post) }
+                        onMediaTap: { openMedia(for: post) },
+                        // Locally, not through `app.overlay`: this page can be
+                        // inside a full-screen cover, where that draws behind
+                        // it. Same route as the 发帖 button — see `isComposing`.
+                        onRepost: { startRepost(of: post) }
                     )
                 }
 
@@ -661,10 +707,11 @@ struct NodeDetailOverlay: View {
     }
 
     private func open(_ post: Post) {
+        // `selectedPost` is what the reader reads; the local cover is only how
+        // it gets on screen. `app.overlay` is deliberately left alone.
+        app.markTopicOpened(id: post.id)
         app.selectedPost = post
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
+        readingPost = post
     }
 
 }
@@ -672,12 +719,22 @@ struct NodeDetailOverlay: View {
 /// One topic, rendered per reading mode. Internal (not private): the home feed
 /// renders its compact/expand modes with the same rows so the two lists match.
 struct NodeTopicRow: View {
+    @Environment(AppState.self) private var app
     let post: Post
     let mode: NodeReadingMode
     let onTap: () -> Void
     /// Card mode only: media opens straight into its own viewer, skipping the
     /// post. Nil elsewhere, where a tap anywhere should open the topic.
     var onMediaTap: (() -> Void)?
+    /// Opens the composer quoting this topic. Injected for the same reason as
+    /// `onMediaTap`: where this row is hosted decides how a composer can be
+    /// presented at all. Nil simply drops 转发 from the menu.
+    var onRepost: (() -> Void)?
+
+    /// The ⋯ menu — 举报 and 屏蔽作者 among the rest. Every list needs it, not
+    /// just the home feed's card mode: reporting and blocking have to be
+    /// reachable from wherever topics are read (guideline 1.2).
+    @State private var showsMoreSheet = false
 
     /// Seeded to a full-width estimate so the first variant pick is already the
     /// right size; the geometry reader refines it. Starting at 0 would pick the
@@ -701,17 +758,20 @@ struct NodeTopicRow: View {
 
     var body: some View {
         Group {
+            // None of these is a Button. A nested Button inside a Button doesn't
+            // reliably take precedence, which is what left the row's own vote
+            // arrows and comment count inert — the card mode had already been
+            // fixed this way, and the other two had the same problem.
             switch mode {
-            case .compact, .expand:
-                Button(action: onTap) {
-                    if mode == .compact { compactRow } else { expandRow }
-                }
-                .buttonStyle(.plain)
-
+            case .compact:
+                compactRow
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onTap)
+            case .expand:
+                expandRow
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onTap)
             case .card:
-                // Not a Button: the media inside needs its own tap target, and a
-                // nested Button inside a Button doesn't reliably take precedence.
-                // A tap gesture on the container plus one on the media does.
                 cardRow
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onTap)
@@ -721,6 +781,9 @@ struct NodeTopicRow: View {
         // the content width, so one row that reports an oversized minimum drags
         // every sibling out with it.
         .clampedToWidth()
+        .sheet(isPresented: $showsMoreSheet) {
+            TopicMoreSheet(post: post, onRepost: onRepost)
+        }
     }
 
     /// Discourse-mobile style: one dense line per topic with a reply count.
@@ -752,6 +815,8 @@ struct NodeTopicRow: View {
                 .font(Theme.body(13, weight: .semibold))
                 .foregroundStyle(post.comments > 0 ? Theme.accent : Theme.muted(0.4))
                 .frame(minWidth: 26, alignment: .trailing)
+
+            moreButton
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -875,6 +940,22 @@ struct NodeTopicRow: View {
         }
     }
 
+    /// Deliberately a `Button` inside a row that uses `onTapGesture` rather
+    /// than being a Button itself — the same arrangement that lets the vote
+    /// arrows work. See the note on `body`.
+    private var moreButton: some View {
+        Button {
+            showsMoreSheet = true
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.muted(0.4))
+                .frame(width: 30, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressableIcon)
+    }
+
     /// Topic tags, styled like Reddit's flair chips.
     private var tagBadges: some View {
         HStack(spacing: 6) {
@@ -912,7 +993,7 @@ struct NodeTopicRow: View {
                 .foregroundStyle(Theme.muted(0.46))
                 .fixedSize()
             if post.pinned {
-                Label("置顶", systemImage: "pin.fill")
+                Label(post.pinnedGlobally ? AppString("全站置顶") : AppString("置顶"), systemImage: "pin.fill")
                     .labelStyle(CompactLabelStyle())
                     .font(Theme.body(10, weight: .semibold))
                     .foregroundStyle(Theme.accent700)
@@ -921,19 +1002,40 @@ struct NodeTopicRow: View {
                     .background(Theme.accent.opacity(0.1), in: Capsule())
             }
             Spacer(minLength: 0)
+            moreButton
         }
     }
 
     private var actions: some View {
         HStack(spacing: 14) {
-            Label("\(post.baseVotes)", systemImage: "arrow.up")
-                .labelStyle(CompactLabelStyle())
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.6))
-            Label("\(post.comments)", systemImage: "bubble.right")
-                .labelStyle(CompactLabelStyle())
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.6))
+            // Votable where discourse-vote covers the node, a plain stat where
+            // it doesn't — the score already accounts for downvotes, so showing
+            // it beside a bare up arrow would have been misleading.
+            if let score = app.voteScore(for: post) {
+                VoteControl(
+                    score: score,
+                    direction: app.voteDirection(for: post),
+                    canVoteDown: post.canVoteDown,
+                    compact: true
+                ) { direction, reaction in
+                    app.castVote(direction, on: post, reaction: reaction)
+                }
+            } else {
+                Label("\(post.baseVotes)", systemImage: "arrow.up")
+                    .labelStyle(CompactLabelStyle())
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.6))
+            }
+            // Tapping the count opens the topic — the row's own destination,
+            // and where a reader would go to read or write a reply.
+            Button(action: onTap) {
+                Label("\(post.comments)", systemImage: "bubble.right")
+                    .labelStyle(CompactLabelStyle())
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.6))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.pressable)
             Spacer(minLength: 0)
         }
     }

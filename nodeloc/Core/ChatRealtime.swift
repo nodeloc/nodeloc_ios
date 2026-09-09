@@ -45,15 +45,17 @@ final class MessageBusClient {
     }
 
     private func pollOnce() async {
-        guard !positions.isEmpty else { return }
+        // Nothing to poll: yield with a sleep rather than returning, or the
+        // caller's `while` becomes a hot loop on the main actor with no await
+        // in it to let anything else run.
+        guard !positions.isEmpty else {
+            try? await Task.sleep(for: .seconds(1))
+            return
+        }
         do {
             let data = try await client.messageBusPoll(clientID: clientID, positions: positions)
-            // JSONSerialization rather than Codable: event payloads are
-            // heterogeneous per channel and we only need the envelope.
-            guard let events = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                return
-            }
             var fired: Set<String> = []
+            let events = Self.events(in: data)
             for event in events {
                 guard let channel = event["channel"] as? String else { continue }
                 if channel == "/__status" {
@@ -79,6 +81,29 @@ final class MessageBusClient {
             // or a dead connection would spin this loop hot.
             try? await Task.sleep(for: .seconds(4))
         }
+    }
+
+    /// The envelopes in one poll's body.
+    ///
+    /// `JSONSerialization` rather than `Codable`: payloads are heterogeneous per
+    /// channel and only the envelope matters here.
+    ///
+    /// Split on the pipe first, because MessageBus has two framings for the same
+    /// endpoint — one array, or several arrays separated by `\r\n|\r\n`. The
+    /// request asks for the former; parsing both means a proxy that strips the
+    /// header, or a server that ignores it, degrades to working rather than to
+    /// silence. A single array has no separator, so it comes through this
+    /// unchanged.
+    private static func events(in data: Data) -> [[String: Any]] {
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return text
+            .components(separatedBy: "|")
+            .compactMap { chunk -> [[String: Any]]? in
+                let trimmed = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, let chunkData = trimmed.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: chunkData) as? [[String: Any]]
+            }
+            .flatMap { $0 }
     }
 }
 

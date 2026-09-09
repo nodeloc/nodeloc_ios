@@ -265,7 +265,7 @@ private struct SettingsOptionSheet<Option: Identifiable & Equatable>: View {
                         } label: {
                             optionRow(label(option), selected: isSelected(option))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
                 .padding(.top, 4)

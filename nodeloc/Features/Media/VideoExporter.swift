@@ -37,10 +37,10 @@ nonisolated enum VideoExporter {
 
         var errorDescription: String? {
             switch self {
-            case .noVideoTrack: "这个文件里没有可用的视频轨道。"
-            case .exportUnsupported: "无法用当前格式导出这个视频。"
+            case .noVideoTrack: AppString("这个文件里没有可用的视频轨道。")
+            case .exportUnsupported: AppString("无法用当前格式导出这个视频。")
             case .exportFailed(let message): message
-            case .gifEncodingFailed: "GIF 生成失败。"
+            case .gifEncodingFailed: AppString("GIF 生成失败。")
             }
         }
     }

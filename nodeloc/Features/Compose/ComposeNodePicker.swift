@@ -63,7 +63,7 @@ struct ComposeNodePicker: View {
                         .foregroundStyle(Theme.text)
                         .frame(width: 34, height: 34)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
 
                 Spacer()
             }
@@ -120,11 +120,11 @@ struct ComposeNodePicker: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private func subtitle(for option: ComposeNodeOption) -> String {
-        let members = option.node.memberCount.isEmpty ? "" : "\(option.node.memberCount) 成员"
+        let members = option.node.memberCount.isEmpty ? "" : AppString("\(option.node.memberCount) 成员")
         return [members, option.reasonText]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
@@ -157,7 +157,7 @@ struct ComposeNodePicker: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.muted(0.4))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
         }
         .padding(.horizontal, 14)

@@ -24,9 +24,9 @@ enum InterfaceColorMode: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "自动"
-        case .light: return "浅色"
-        case .dark: return "深色"
+        case .auto: return AppString("自动")
+        case .light: return AppString("浅色")
+        case .dark: return AppString("深色")
         }
     }
 
@@ -56,11 +56,11 @@ enum TextSize: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .smallest: return "最小"
-        case .smaller: return "更小"
-        case .normal: return "正常"
-        case .larger: return "更大"
-        case .largest: return "最大"
+        case .smallest: return AppString("最小")
+        case .smaller: return AppString("更小")
+        case .normal: return AppString("正常")
+        case .larger: return AppString("更大")
+        case .largest: return AppString("最大")
         }
     }
 
@@ -87,9 +87,9 @@ enum EmailLevel: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .always: return "始终"
-        case .onlyWhenAway: return "只在离开时"
-        case .never: return "从不"
+        case .always: return AppString("始终")
+        case .onlyWhenAway: return AppString("只在离开时")
+        case .never: return AppString("从不")
         }
     }
 }
@@ -103,9 +103,9 @@ enum PreviousRepliesLevel: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .always: return "始终"
-        case .unlessEmailed: return "除非之前发送过"
-        case .never: return "从不"
+        case .always: return AppString("始终")
+        case .unlessEmailed: return AppString("除非之前发送过")
+        case .never: return AppString("从不")
         }
     }
 }
@@ -120,10 +120,10 @@ enum LikeNotificationFrequency: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .always: return "始终"
-        case .firstTimeAndDaily: return "每日帖子第一次被赞"
-        case .firstTime: return "帖子第一次被赞"
-        case .never: return "从不"
+        case .always: return AppString("始终")
+        case .firstTimeAndDaily: return AppString("每日帖子第一次被赞")
+        case .firstTime: return AppString("帖子第一次被赞")
+        case .never: return AppString("从不")
         }
     }
 }
@@ -137,9 +137,9 @@ enum PushNotificationLevel: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .none: return "已禁用"
-        case .all: return "已启用"
-        case .chatOnly: return "仅为聊天启用"
+        case .none: return AppString("已禁用")
+        case .all: return AppString("已启用")
+        case .chatOnly: return AppString("仅为聊天启用")
         }
     }
 }
@@ -152,8 +152,8 @@ enum TitleCountMode: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .notifications: return "新通知"
-        case .contextual: return "新页面内容"
+        case .notifications: return AppString("新通知")
+        case .contextual: return AppString("新页面内容")
         }
     }
 }
@@ -167,7 +167,7 @@ enum CompositionMode: Int, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .markdown: return "Markdown"
-        case .rich: return "富文本"
+        case .rich: return AppString("富文本")
         }
     }
 }
@@ -212,9 +212,9 @@ enum DefaultCalendar: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .noneSelected: return "未选择"
+        case .noneSelected: return AppString("未选择")
         case .ics: return "ICS"
-        case .google: return "Google 日历"
+        case .google: return AppString("Google 日历")
         }
     }
 
@@ -253,14 +253,76 @@ enum HomepageChoice: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .latest: return "最新"
-        case .categories: return "类别"
-        case .unread: return "未读"
-        case .new: return "新"
-        case .top: return "热门"
-        case .bookmarks: return "书签"
-        case .unseen: return "未浏览"
-        case .hot: return "热"
+        case .latest: return AppString("最新")
+        case .categories: return AppString("类别")
+        case .unread: return AppString("未读")
+        case .new: return AppString("新")
+        case .top: return AppString("热门")
+        case .bookmarks: return AppString("书签")
+        case .unseen: return AppString("未浏览")
+        case .hot: return AppString("热")
+        }
+    }
+}
+
+/// Which list the home tab shows.
+///
+/// Deliberately *not* `homepage_id`. The default is the community feed at
+/// `/best.json` (the discourse-community plugin — it answers with
+/// `filter: community_feed`), and the site's `homepage_choices` has no value
+/// for it, so this choice has nowhere to live on the server. It is therefore
+/// local: seeded once from `homepage_id` so someone who set a homepage on the
+/// website starts where they expect, and never written back — the website's own
+/// default homepage stays theirs.
+///
+/// The cases are only the lists that both come back shaped like a topic list
+/// and work while signed out. `categories` and `bookmarks` are neither, which
+/// is why the app's list is shorter than the site's.
+enum HomeFeed: Int, CaseIterable, Identifiable {
+    case best = 0
+    case latest = 1
+    case hot = 2
+    case top = 3
+
+    var id: Int { rawValue }
+
+    var path: String {
+        switch self {
+        case .best: return "best.json"
+        case .latest: return "latest.json"
+        case .hot: return "hot.json"
+        case .top: return "top.json"
+        }
+    }
+
+    /// `best` picks a fresh random ordering on every seedless request and
+    /// discloses the seed it used only in `more_topics_url`. Without carrying
+    /// that seed forward, asking for page 2 reshuffles the whole feed and
+    /// silently skips topics — so this marks the feeds whose pagination needs
+    /// it.
+    var isSeeded: Bool { self == .best }
+
+    var label: String {
+        switch self {
+        // The plugin's own name for the feed; `HomepageChoice` has no
+        // equivalent to borrow.
+        case .best: return AppString("精选")
+        // The other three are the same lists the website offers, so they keep
+        // `HomepageChoice`'s wording.
+        case .latest: return AppString("最新")
+        case .hot: return AppString("热")
+        case .top: return AppString("热门")
+        }
+    }
+
+    /// The nearest app feed to a website homepage choice, used only to pick a
+    /// starting value. Everything the home list can't render becomes `best`.
+    init(seededFrom choice: HomepageChoice?) {
+        switch choice {
+        case .latest: self = .latest
+        case .hot: self = .hot
+        case .top: self = .top
+        default: self = .best
         }
     }
 }
@@ -275,9 +337,9 @@ enum ReplyNotificationLevel: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .watchTopic: return "关注话题"
-        case .trackTopic: return "跟踪话题"
-        case .doNothing: return "不进行操作"
+        case .watchTopic: return AppString("关注话题")
+        case .trackTopic: return AppString("跟踪话题")
+        case .doNothing: return AppString("不进行操作")
         }
     }
 }
@@ -299,12 +361,12 @@ enum NewTopicDuration: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .notViewed: return "我还没看过"
-        case .lastHere: return "在我上次访问后创建"
-        case .afterOneDay: return "在过去一天内创建"
-        case .afterTwoDays: return "在过去 2 天内创建"
-        case .afterOneWeek: return "在过去一周内创建"
-        case .afterTwoWeeks: return "在过去 2 周内创建"
+        case .notViewed: return AppString("我还没看过")
+        case .lastHere: return AppString("在我上次访问后创建")
+        case .afterOneDay: return AppString("在过去一天内创建")
+        case .afterTwoDays: return AppString("在过去 2 天内创建")
+        case .afterOneWeek: return AppString("在过去一周内创建")
+        case .afterTwoWeeks: return AppString("在过去 2 周内创建")
         }
     }
 }
@@ -325,15 +387,15 @@ enum AutoTrackDuration: Int, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .never: return "从不"
-        case .immediately: return "立即"
-        case .after30Seconds: return "30 秒后"
-        case .after1Minute: return "1 分钟后"
-        case .after2Minutes: return "2 分钟后"
-        case .after3Minutes: return "3 分钟后"
-        case .after4Minutes: return "4 分钟后"
-        case .after5Minutes: return "5 分钟后"
-        case .after10Minutes: return "10 分钟后"
+        case .never: return AppString("从不")
+        case .immediately: return AppString("立即")
+        case .after30Seconds: return AppString("30 秒后")
+        case .after1Minute: return AppString("1 分钟后")
+        case .after2Minutes: return AppString("2 分钟后")
+        case .after3Minutes: return AppString("3 分钟后")
+        case .after4Minutes: return AppString("4 分钟后")
+        case .after5Minutes: return AppString("5 分钟后")
+        case .after10Minutes: return AppString("10 分钟后")
         }
     }
 }
@@ -470,6 +532,7 @@ final class UserPreferencesStore {
     private enum Key {
         static let colorMode = "prefInterfaceColorMode"
         static let textSize = "prefTextSize"
+        static let homeFeed = "prefHomeFeed"
     }
 
     private let client = DiscourseClient()
@@ -487,6 +550,14 @@ final class UserPreferencesStore {
     /// must stay a cheap stored-property read rather than a lookup.
     private(set) var textScale: CGFloat
 
+    /// Local, unlike the rest of this type — see `HomeFeed`. Nil means nobody
+    /// has chosen yet, which is what lets `homepage_id` seed it exactly once
+    /// without overwriting a later choice.
+    private var storedHomeFeed: HomeFeed?
+
+    /// Which list the home tab loads.
+    var homeFeed: HomeFeed { storedHomeFeed ?? .best }
+
     private var loaded = false
 
     private init() {
@@ -498,6 +569,17 @@ final class UserPreferencesStore {
         let size = storedSize.flatMap(TextSize.init(rawValue:)) ?? .normal
         textSize = size
         textScale = size.scale
+        storedHomeFeed = (defaults.object(forKey: Key.homeFeed) as? Int)
+            .flatMap(HomeFeed.init(rawValue:))
+    }
+
+    func setHomeFeed(_ feed: HomeFeed) {
+        storedHomeFeed = feed
+        UserDefaults.standard.set(feed.rawValue, forKey: Key.homeFeed)
+    }
+
+    var homeFeedBinding: Binding<HomeFeed> {
+        Binding(get: { self.homeFeed }, set: { self.setHomeFeed($0) })
     }
 
     // MARK: Loading
@@ -532,6 +614,19 @@ final class UserPreferencesStore {
         textSize = option.resolvedTextSize
         textScale = textSize.scale
         UserDefaults.standard.set(textSize.rawValue, forKey: Key.textSize)
+
+        seedHomeFeed(from: option)
+    }
+
+    /// Takes the website's default homepage as the *initial* app feed, once.
+    ///
+    /// Only when nothing is stored: after that the local choice stands, so
+    /// this can't undo a selection, and picking a feed in the app never
+    /// touches `homepage_id`.
+    private func seedHomeFeed(from option: UserPreferences) {
+        guard storedHomeFeed == nil else { return }
+        let choice = option.homepageId.flatMap(HomepageChoice.init(rawValue:))
+        setHomeFeed(HomeFeed(seededFrom: choice))
     }
 
     // MARK: Saving

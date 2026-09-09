@@ -23,8 +23,8 @@ struct NotificationsOverlay: View {
                         EmptyStateView(
                             icon: "bell",
                             message: DiscourseAuth.shared.isAuthenticated
-                                ? "暂无通知"
-                                : "登录后查看你的通知"
+                                ? AppString("暂无通知")
+                                : AppString("登录后查看你的通知")
                         )
                         .frame(maxWidth: .infinity)
                         .padding(.top, 80)
@@ -51,7 +51,7 @@ private struct NotificationRow: View {
         } label: {
             rowContent
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(notification.url == nil)
     }
 

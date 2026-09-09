@@ -82,7 +82,7 @@ struct PollView: View {
                     .scaledToFit()
                     .frame(width: 14, height: 14)
                     .foregroundStyle(Theme.accent)
-                Text(poll.title ?? "投票")
+                Text(poll.title ?? AppString("投票"))
                     .font(Theme.body(15, weight: .semibold))
                     .foregroundStyle(Theme.text)
                 Spacer(minLength: 0)
@@ -155,7 +155,7 @@ struct PollView: View {
                 in: RoundedRectangle(cornerRadius: 9, style: .continuous)
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(!canInteract)
     }
 
@@ -175,14 +175,14 @@ struct PollView: View {
             if poll.isMultiple, canInteract, hasStagedEdits {
                 Button("提交") { submitPending() }
                     .font(Theme.body(12, weight: .semibold))
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .foregroundStyle(Theme.accent)
             }
 
             if hasVoted, canInteract {
                 Button("取消投票") { onRemoveVote() }
                     .font(Theme.body(12))
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .foregroundStyle(Theme.muted(0.55))
             }
         }
@@ -263,12 +263,14 @@ struct LotteryView: View {
                 .frame(width: 15, height: 15)
                 .foregroundStyle(Theme.accent2)
 
-            Text(lottery.title ?? "抽奖")
+            Text(lottery.title ?? AppString("抽奖"))
                 .font(Theme.body(15, weight: .semibold))
                 .foregroundStyle(Theme.text)
                 .lineLimit(2)
 
             Spacer(minLength: 0)
+
+            LotteryRulesLink()
 
             Text(statusLabel)
                 .font(Theme.body(11, weight: .semibold))
@@ -334,10 +336,10 @@ struct LotteryView: View {
     private var stats: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 14) {
-                statistic("\(lottery.participantsCount ?? 0)", label: "参与")
-                statistic("\(lottery.ticketsCount ?? 0)", label: "总票数")
+                statistic("\(lottery.participantsCount ?? 0)", label: AppString("参与"))
+                statistic("\(lottery.ticketsCount ?? 0)", label: AppString("总票数"))
                 if (lottery.userTickets ?? 0) > 0 {
-                    statistic("\(lottery.userTickets ?? 0)", label: "我的票", highlighted: true)
+                    statistic("\(lottery.userTickets ?? 0)", label: AppString("我的票"), highlighted: true)
                 }
                 Spacer(minLength: 0)
             }
@@ -367,11 +369,18 @@ struct LotteryView: View {
         }
     }
 
+    @ViewBuilder
     private var participation: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider().overlay(Theme.divider)
 
-            if remainingTickets <= 0 {
+            if !FeatureFlags.shared.lotteryEnabled {
+                // Withdrawn server-side. Existing posts still show the prizes
+                // and the outcome; only entering is closed off.
+                Text("抽奖功能暂不可用")
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.muted(0.55))
+            } else if remainingTickets <= 0 {
                 // At the per-user cap: offering a stepper here would let the
                 // user buy one more than allowed and get rejected server-side.
                 Text("你已达到每人票数上限")
@@ -401,7 +410,7 @@ struct LotteryView: View {
                                 .frame(height: 32)
                                 .background(Theme.accent2, in: Capsule())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
 
@@ -425,10 +434,10 @@ struct LotteryView: View {
 
     private var statusLabel: String {
         switch lottery.status {
-        case "open": "进行中"
-        case "drawn": "已开奖"
-        case "closed": "已关闭"
-        case "failed": "已流抽"
+        case "open": AppString("进行中")
+        case "drawn": AppString("已开奖")
+        case "closed": AppString("已关闭")
+        case "failed": AppString("已流抽")
         default: lottery.status ?? ""
         }
     }
@@ -467,7 +476,7 @@ struct RedEnvelopeBanner: View {
 
                 Spacer(minLength: 0)
 
-                Text(isExhausted ? "已抢完" : "进行中")
+                Text(isExhausted ? AppString("已抢完") : AppString("进行中"))
                     .font(Theme.body(11, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 8)

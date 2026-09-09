@@ -9,37 +9,70 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Namespace private var postTransitionNamespace
     @State private var lastContentTab: Tab = .home
-    /// Focus handle for the system search field in the tab bar.
-    @FocusState private var searchFieldFocused: Bool
-    /// Presentation state of the system search UI (field expanded, scope row
-    /// and cancel visible). Distinct from focus: search can stay presented
-    /// with the keyboard down.
+    /// Presentation state of the system search UI, written by the system and
+    /// never by us.
+    ///
+    /// It used to be asserted from two places to force the scope row to appear,
+    /// which meant three writers on a two-way binding — the system would
+    /// present, our stale `false` would fight it, and the result was the search
+    /// chrome flickering or not appearing at all. The scope bar is the app's own
+    /// now, so nothing needs to force this.
     @State private var searchPresented = false
     @State private var profileTabAvatar = ProfileTabAvatarStore.shared
     /// Drives the Message tab's unread badge; shared with the inbox.
     @State private var inbox = MessageCenterStore.shared
 
+    /// The container's size, so the pinning rule can see the aspect ratio.
+    /// Nothing is pinned until this is known, which matches the phone layout —
+    /// and the launch animation covers the first frames anyway.
+    @State private var containerSize: CGSize = .zero
+
+    /// Pinned only on an iPad-sized container that is currently wider than it is
+    /// tall. iPad portrait deliberately keeps the phone's drawer: 834pt minus a
+    /// 320pt column leaves the feed narrower than an iPhone.
+    ///
+    /// The size classes can't answer this alone — an iPad reports regular in
+    /// *both* orientations — so the aspect ratio decides. They're still needed
+    /// to exclude phones: an iPhone Max in landscape is also wider than tall,
+    /// but reports a compact vertical size class.
+    private var isSidebarPinned: Bool {
+        horizontalSizeClass == .regular
+            && verticalSizeClass == .regular
+            && containerSize.width > containerSize.height
+    }
+
     var body: some View {
         @Bindable var app = app
 
         GeometryReader { proxy in
-            let sidebarWidth = min(proxy.size.width * 0.86, 330)
-            let sidebarOpen = app.overlay == .sidebar
+            let isPinned = isSidebarPinned
+            let sidebarWidth = isPinned ? pinnedSidebarWidth : min(proxy.size.width * 0.86, 330)
+            // The drawer is never "open" while pinned — it's simply always there.
+            let sidebarOpen = !isPinned && app.overlay == .sidebar
+            let sidebarVisible = isPinned || sidebarOpen
+            // Pinned, the content gives up the sidebar's width instead of being
+            // pushed off the far edge the way the drawer pushes it.
+            let contentWidth = isPinned ? max(proxy.size.width - sidebarWidth, 0) : proxy.size.width
+            // With no drawer to drag, the swipe gestures would only fight the
+            // content's own horizontal scrolling.
+            let drawerGestures: GestureMask = isPinned ? .none : .all
 
             ZStack(alignment: .leading) {
                 Theme.bg.ignoresSafeArea()
 
-                if sidebarOpen {
-                    SidebarOverlay(panelWidth: sidebarWidth)
-                        .gesture(closeSidebarDragGesture)
+                if sidebarVisible {
+                    SidebarOverlay(panelWidth: sidebarWidth, isPinned: isPinned)
+                        .gesture(closeSidebarDragGesture, including: drawerGestures)
                         .zIndex(0)
                 }
 
                 TabView(selection: $app.tab) {
                     SwiftUI.Tab(value: Tab.home) {
-                        tabContent {
+                        tabContent(for: .home) {
                             HomeView(postTransitionNamespace: postTransitionNamespace)
                         }
                     } label: {
@@ -48,7 +81,7 @@ struct MainView: View {
                     }
 
                     SwiftUI.Tab(value: Tab.nodes) {
-                        tabContent {
+                        tabContent(for: .nodes) {
                             BrowseNodesOverlay(showsCloseButton: false)
                         }
                     } label: {
@@ -57,7 +90,7 @@ struct MainView: View {
                     }
 
                     SwiftUI.Tab(value: Tab.chat) {
-                        tabContent {
+                        tabContent(for: .chat) {
                             ChatView()
                         }
                     } label: {
@@ -67,7 +100,7 @@ struct MainView: View {
                     .badge(inbox.unreadTotal)
 
                     SwiftUI.Tab(value: Tab.profile) {
-                        tabContent {
+                        tabContent(for: .profile) {
                             ProfileView()
                         }
                     } label: {
@@ -83,7 +116,7 @@ struct MainView: View {
                     }
 
                     SwiftUI.Tab(value: Tab.search, role: .search) {
-                        tabContent {
+                        tabContent(for: .search) {
                             NavigationStack {
                                 SearchView(postTransitionNamespace: postTransitionNamespace)
                             }
@@ -94,40 +127,40 @@ struct MainView: View {
                     }
                 }
                 .tint(Theme.accent)
-                .tabBarMinimizeBehavior(.onScrollDown)
+                // Collapses as you scroll up into the feed and expands on the
+                // pull back down, which is the same travel that hides and
+                // reveals the header wordmark (`HomeView.handleScroll`).
+                //
+                // Verified on device, because the two constants read ambiguous:
+                // "downwards scrolling" here means travelling down through the
+                // content, not dragging the content downwards. `.onScrollUp`
+                // was tried and left the bar expanded the whole way down the
+                // feed — don't flip this again.
+                //
+                // What this modifier can't do: expand only on a *quick* pull,
+                // the way the wordmark does via `quickRevealThreshold`. It
+                // reacts to any downward scroll at any speed, and there is no
+                // programmatic hook to drive it from `app.navCollapsed`
+                // instead.
+                .tabBarMinimizesOnScrollDown()
                 // Telegram-style search: the tab bar itself morphs into the
                 // search field. Selecting the search pill activates search;
                 // cancelling deselects it and restores the previous tab — all
                 // system-managed, so there is no custom close button to fight
                 // the pill for the bottom-right corner.
-                .searchable(text: $app.searchQuery, isPresented: $searchPresented, prompt: "搜索")
-                // The system scope row, shown at the top whenever search is
-                // presented (the default only reveals it once text is typed).
-                .searchScopes($app.searchScope, activation: .onSearchPresentation) {
-                    ForEach(SearchScope.allCases, id: \.self) { scope in
-                        Text(scope.rawValue).tag(scope)
-                    }
-                }
+                .searchable(text: $app.searchQuery, isPresented: $searchPresented, prompt: AppString("搜索"))
+                // No `.searchScopes`: the system row only exists while search
+                // is presented, so it depended on a presentation binding that
+                // the system writes too and kept going missing. `SearchView`
+                // draws its own scope bar in both modes now.
                 .onSubmit(of: .search) {
                     SearchHistoryStore.shared.record(app.searchQuery)
                 }
-                .tabViewSearchActivation(.searchTabSelection)
-                .searchFocused($searchFieldFocused)
-                // A tapped suggestion fills the query without presenting
-                // search; present it so the scope row and cancel appear —
-                // then retract the keyboard once the presentation settles,
-                // since the results are already on screen.
-                .onChange(of: app.searchActivationRequested) { _, requested in
-                    guard requested else { return }
-                    app.searchActivationRequested = false
-                    searchPresented = true
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(450))
-                        searchFieldFocused = false
-                    }
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
+                .searchActivatesOnTabSelection()
+                .frame(width: contentWidth, height: proxy.size.height)
                 .overlay {
+                    // Tap-to-dismiss only makes sense for the drawer; pinned,
+                    // this would swallow every tap in the content.
                     if sidebarOpen {
                         Color.clear
                             .contentShape(Rectangle())
@@ -135,15 +168,30 @@ struct MainView: View {
                             .gesture(closeSidebarDragGesture)
                     }
                 }
-                .offset(x: sidebarOpen ? sidebarWidth : 0)
+                // Inside the content column, not over the whole window: the
+                // pinned sidebar has to stay reachable while a post, node or
+                // settings page is open. On iPhone `contentWidth` is the full
+                // width and the offset is zero, so this is unchanged there.
+                .overlay { overlayLayer }
+                .offset(x: sidebarVisible ? sidebarWidth : 0)
                 .shadow(color: sidebarOpen ? .black.opacity(0.12) : .clear, radius: 24, x: -8, y: 0)
-                .simultaneousGesture(openSidebarDragGesture(containerWidth: proxy.size.width))
+                .simultaneousGesture(
+                    openSidebarDragGesture(containerWidth: proxy.size.width),
+                    including: drawerGestures
+                )
                 .zIndex(1)
             }
             .animation(.spring(response: 0.32, dampingFraction: 0.9), value: sidebarOpen)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
         }
-        .overlay {
-            overlayLayer
+        // Read by SidebarMenuButton on every root screen, so the button and this
+        // layout always agree about whether a drawer exists to open.
+        .environment(\.sidebarIsPinned, isSidebarPinned)
+        // Resizing or rotating into the pinned layout while the drawer happened
+        // to be open would otherwise leave a stale `.sidebar` overlay behind the
+        // pinned column, dimming the content and eating taps.
+        .onChange(of: isSidebarPinned) { _, pinned in
+            if pinned, app.overlay == .sidebar { app.overlay = nil }
         }
         .onAppear {
             if app.tab != .search {
@@ -159,13 +207,13 @@ struct MainView: View {
             await inbox.load()
         }
         .onChange(of: app.tab) { _, newValue in
-            // Re-entering the inbox refreshes counts (things may have been read
-            // elsewhere) and clears the notifications badge.
+            // Re-entering the inbox refreshes the counts — things may have been
+            // read elsewhere. It does *not* mark notifications read: the inbox
+            // opens on 聊天 now, and clearing the badge for notifications nobody
+            // has looked at is exactly the bug that caused. Selecting the 通知
+            // pane is what marks them (see `ChatView`).
             guard newValue == .chat else { return }
-            Task {
-                await inbox.reload()
-                await inbox.markNotificationsRead()
-            }
+            Task { await inbox.reload() }
         }
         .onChange(of: app.tab) { oldValue, newValue in
             // The search tab is a real tab; selecting it just shows the search
@@ -181,12 +229,7 @@ struct MainView: View {
                 }
                 return
             }
-            if newValue == .search {
-                // Selecting the pill focuses the field, but that doesn't
-                // reliably flow back into the isPresented binding — and the
-                // scope row keys off presentation. Assert it ourselves.
-                searchPresented = true
-            } else {
+            if newValue != .search {
                 lastContentTab = newValue
             }
             if app.overlay == .browseNodes {
@@ -258,6 +301,7 @@ struct MainView: View {
                     Theme.bg.ignoresSafeArea()
                     PostDetailOverlay(postTransitionNamespace: postTransitionNamespace)
                 }
+                .environment(\.mediaAutoplayEnabled, true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .transition(.opacity)
                 .zIndex(100)
@@ -288,7 +332,6 @@ struct MainView: View {
                     case .createNode: CreateNodeOverlay()
                     case .notifications: NotificationsOverlay()
                     case .settings: SettingsOverlay()
-                    case .pro: ProOverlay()
                     case .appsDirectory: AppsDirectoryOverlay()
                     case .appDetail: AppDetailOverlay()
                     case .auth: EmptyView()
@@ -300,7 +343,10 @@ struct MainView: View {
         }
     }
 
-    private func tabContent<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    private func tabContent<Content: View>(
+        for tab: Tab,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
         ZStack {
             content()
 
@@ -311,17 +357,43 @@ struct MainView: View {
                     .zIndex(10)
             }
         }
+        // A tab's videos are only allowed to play while that tab is the one on
+        // screen and nothing is layered over it. The views stay mounted either
+        // way, so without this a feed clip kept playing under an opened topic
+        // and behind other tabs.
+        .environment(\.mediaAutoplayEnabled, app.tab == tab && app.overlay == nil)
     }
 
+    /// Which way an overlay arrives, chosen by what it *is* rather than
+    /// uniformly.
+    ///
+    /// Pages come in from the trailing edge and modals from the bottom, which
+    /// is the platform's own distinction: a push means "deeper into the same
+    /// thing", a sheet means "a task on top of it". The drawer's destinations
+    /// are pages, so they push; they used to rise from the bottom and read as
+    /// modal.
+    ///
+    /// Note this only governs the overlays `MainView` draws. Pages presented as
+    /// full-screen covers from `ContentView` — a node, a custom feed, a profile
+    /// — are system presentations and always come up from the bottom; iOS
+    /// exposes no way to redirect them.
     private func transition(for overlay: Overlay) -> AnyTransition {
         switch overlay {
         case .sidebar:
             return .move(edge: .leading)
         case .post:
             return .redditPost
-        case .compose, .search, .browseNodes, .createNode, .appsDirectory, .auth:
+        // Pages the drawer leads to. Trailing in *and* back out the same edge,
+        // which is how a navigation push and its pop move — `.push(from:)`
+        // would leave towards the opposite edge, like a carousel advancing
+        // rather than a screen being dismissed.
+        case .browseNodes, .appsDirectory, .appDetail:
+            return .move(edge: .trailing).combined(with: .opacity)
+        // Modals: a task with a cancel, which belongs on the bottom edge —
+        // 创建节点 included, even though the drawer opens it.
+        case .compose, .search, .createNode, .auth:
             return .move(edge: .bottom).combined(with: .opacity)
-        case .notifications, .settings, .pro, .appDetail:
+        case .notifications, .settings:
             return .opacity
         }
     }
@@ -381,6 +453,8 @@ final class ProfileTabAvatarStore {
 
     private let client = DiscourseClient()
     private var loadedUsername: String?
+    /// The URL `tabImage` was rendered from, so a new one replaces it.
+    private var renderedAvatarURL: URL?
 
     var username = ""
     var displayName = ""
@@ -405,13 +479,23 @@ final class ProfileTabAvatarStore {
             return
         }
 
-        if let restoredUsername = DiscourseAuth.shared.username, !restoredUsername.isEmpty {
+        let currentUsername = DiscourseAuth.shared.username
+
+        // A different account than the one this store is holding. Drop the old
+        // identity *before* fetching the new one: `currentUser()` failing would
+        // otherwise leave the previous user's name and face in place, and the
+        // avatar URL still pointing at them.
+        if let loadedUsername, loadedUsername != currentUsername {
+            clear()
+        }
+
+        if let restoredUsername = currentUsername, !restoredUsername.isEmpty {
             username = restoredUsername
             displayName = restoredUsername
             self.isSignedIn = true
         }
 
-        guard loadedUsername != DiscourseAuth.shared.username || avatarURL == nil else {
+        guard loadedUsername != currentUsername || avatarURL == nil else {
             await renderTabImage()
             return
         }
@@ -437,14 +521,28 @@ final class ProfileTabAvatarStore {
     }
 
     /// Fetches the avatar and renders the tab-bar image once per URL.
+    ///
+    /// Keyed on the URL rather than on `tabImage == nil`, which is what the
+    /// comment always claimed but not what the code did: guarding on the image
+    /// meant this rendered once per launch, so signing out and into a second
+    /// account kept the first account's face in the tab bar. Changing your own
+    /// avatar went stale the same way.
     private func renderTabImage() async {
-        guard tabImage == nil, let url = avatarURL else { return }
+        guard let url = avatarURL else {
+            // This account has no avatar. Drop any previous one rather than
+            // leaving someone else's face above the initial-letter fallback.
+            tabImage = nil
+            renderedAvatarURL = nil
+            return
+        }
+        guard renderedAvatarURL != url else { return }
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return }
             guard let source = UIImage(data: data) else { return }
             let scale = UITraitCollection.current.displayScale
             tabImage = paddedCircularAvatar(from: source, scale: scale > 0 ? scale : 3)
+            renderedAvatarURL = url
         } catch {
             // Keep the SF Symbol fallback when the photo can't load.
         }
@@ -457,6 +555,7 @@ final class ProfileTabAvatarStore {
         isSignedIn = false
         loadedUsername = nil
         tabImage = nil
+        renderedAvatarURL = nil
     }
 }
 
@@ -483,6 +582,5 @@ private func mainPreview(tab: Tab = .home, overlay: Overlay? = nil) -> some View
 #Preview("Browse Nodes") { mainPreview(overlay: .browseNodes) }
 #Preview("Create Node") { mainPreview(overlay: .createNode) }
 #Preview("Sidebar") { mainPreview(overlay: .sidebar) }
-#Preview("Pro") { mainPreview(overlay: .pro) }
 #Preview("Notifications") { mainPreview(overlay: .notifications) }
 #Preview("Search Overlay") { mainPreview(overlay: .search) }

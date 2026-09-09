@@ -116,7 +116,7 @@ struct ComposeAttachmentStrip: View {
                         .background(Color.black.opacity(0.72), in: Circle())
                         .overlay(Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1.5))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .offset(x: 8, y: -8)
             }
     }
@@ -214,11 +214,11 @@ enum ImageEditorTool: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .text: "文本"
-        case .draw: "绘图"
-        case .filter: "效果"
-        case .crop: "裁剪"
-        case .mosaic: "打码"
+        case .text: AppString("文本")
+        case .draw: AppString("绘图")
+        case .filter: AppString("效果")
+        case .crop: AppString("裁剪")
+        case .mosaic: AppString("打码")
         }
     }
 
@@ -389,13 +389,13 @@ final class ImageEditorState {
             data = await ImageEditRenderer.exportJPEG(originalData: originalData, stack: stack)
         }
         guard let data else {
-            saveMessage = "导出失败。"
+            saveMessage = AppString("导出失败。")
             return
         }
 
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
-            saveMessage = "没有相册权限，请在设置中允许。"
+            saveMessage = AppString("没有相册权限，请在设置中允许。")
             return
         }
 
@@ -404,9 +404,9 @@ final class ImageEditorState {
                 let request = PHAssetCreationRequest.forAsset()
                 request.addResource(with: .photo, data: data, options: nil)
             }
-            saveMessage = "已保存到相册。"
+            saveMessage = AppString("已保存到相册。")
         } catch {
-            saveMessage = "保存失败：\(error.localizedDescription)"
+            saveMessage = AppString("保存失败：\(error.localizedDescription)")
         }
     }
 }
@@ -472,7 +472,7 @@ struct ImageEditorView: View {
                     .foregroundStyle(.white)
                     .frame(width: 44, height: 44)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
 
             Spacer(minLength: 0)
 
@@ -480,7 +480,7 @@ struct ImageEditorView: View {
                 toolButton(tool)
             }
 
-            toolBarButton(icon: "square.and.arrow.down", label: "保存") {
+            toolBarButton(icon: "square.and.arrow.down", label: AppString("保存")) {
                 Task { await state.saveToPhotos() }
             }
 
@@ -494,7 +494,7 @@ struct ImageEditorView: View {
                     .foregroundStyle(state.canUndo ? .white : .white.opacity(0.3))
                     .frame(width: 44, height: 44)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .disabled(!state.canUndo)
         }
         .padding(.horizontal, 8)
@@ -527,7 +527,7 @@ struct ImageEditorView: View {
             .foregroundStyle(isActive ? Color(hex: 0x4C8DFF) : .white)
             .frame(width: 52, height: 50)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     // MARK: Canvas
@@ -744,7 +744,7 @@ struct ImageEditorView: View {
                     .frame(width: 88, height: 40)
                     .background(Color(hex: 0x1B6BFF), in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 .disabled(state.isExporting)
             }
             .padding(.horizontal, 20)
@@ -773,7 +773,7 @@ struct ImageEditorView: View {
                         .foregroundStyle(state.isErasing ? Color(hex: 0x4C8DFF) : .white)
                         .frame(width: 38, height: 32)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             .padding(.horizontal, 20)
         }
@@ -843,7 +843,7 @@ struct ImageEditorView: View {
                     .foregroundStyle(isActive ? Color(hex: 0x4C8DFF) : .white.opacity(0.75))
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     private var cropPanel: some View {
@@ -869,7 +869,7 @@ struct ImageEditorView: View {
                                 in: Capsule()
                             )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
 
                 Button {
@@ -884,7 +884,7 @@ struct ImageEditorView: View {
                         .frame(height: 32)
                         .background(Color.white.opacity(0.14), in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
             .padding(.horizontal, 20)
         }
@@ -907,7 +907,7 @@ struct ImageEditorView: View {
                             in: Capsule()
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
             }
 
             Spacer()
@@ -941,7 +941,7 @@ struct ImageEditorView: View {
                         .frame(height: 32)
                         .background(Color.white, in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
 
                 if let id = state.selectedTextID,
                    let index = state.stack.texts.firstIndex(where: { $0.id == id }) {
@@ -954,7 +954,7 @@ struct ImageEditorView: View {
                             .foregroundStyle(state.stack.texts[index].hasBackdrop ? Color(hex: 0x4C8DFF) : .white)
                             .frame(width: 38, height: 32)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
 
                     Button {
                         state.checkpoint()
@@ -966,7 +966,7 @@ struct ImageEditorView: View {
                             .foregroundStyle(.white)
                             .frame(width: 38, height: 32)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
 
                 Spacer()
@@ -1002,7 +1002,7 @@ struct ImageEditorView: View {
                                 }
                             }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                 }
             }
             .padding(.horizontal, 20)
@@ -1415,7 +1415,7 @@ private func previewAttachment() -> ComposeImageAttachment {
     var uploading = previewAttachment()
     uploading.upload = .uploading
     var failed = previewAttachment()
-    failed.upload = .failed("上传失败")
+    failed.upload = .failed(AppString("上传失败"))
     var ready = previewAttachment()
     ready.upload = .ready("upload://abc")
     ready.edits.filter = .mono

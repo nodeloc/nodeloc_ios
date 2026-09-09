@@ -7,41 +7,50 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppState.self) private var app
+    /// Decided once by MainView; drives whether the bar's leading slot holds
+    /// the menu button or the wordmark.
+    @Environment(\.sidebarIsPinned) private var sidebarIsPinned
     let postTransitionNamespace: Namespace.ID
     @State private var feed = FeedStore()
     @State private var lastOffset: CGFloat = 0
     @State private var headerHiddenAmount: CGFloat = 0
+    /// Content offset when the current drag started, so its direction can be
+    /// judged on release. Nil between drags.
+    @State private var dragStartOffset: CGFloat?
     @State private var selectedProfile: UserProfileTarget?
-    /// Custom pull-to-refresh with the Lc loader (see PullToRefresh).
-    @State private var pull = PullToRefresh()
     /// Same store as the node pages, so one choice drives every list.
     private var readingMode = NodeReadingModeStore.shared
+    /// Watched for the default-homepage choice.
+    private var preferences = UserPreferencesStore.shared
 
     init(postTransitionNamespace: Namespace.ID) {
         self.postTransitionNamespace = postTransitionNamespace
     }
 
     var body: some View {
+        feedBody
+            .tabBarHeader(isPinned: sidebarIsPinned) {
+                headerWordmark
+            } trailing: {
+                headerTrailingAction
+            }
+    }
+
+    private var feedBody: some View {
         ZStack(alignment: .top) {
             // Feed
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    Color.clear.frame(height: headerHeight)
-
-                    // Keeps the refresh loader in its own gap instead of over
-                    // the first card while the reload runs.
-                    if pull.isRefreshing {
-                        Color.clear.frame(height: 44)
-                    }
+                    Color.clear.frame(height: sidebarIsPinned ? 0 : headerHeight)
 
                     if showsLoader {
                         feedSkeleton
-                    } else if feed.posts.isEmpty {
+                    } else if feed.visiblePosts.isEmpty {
                         // Load failed or nothing came back: say so instead of
                         // an unexplained blank screen.
                         feedUnavailable
                     } else {
-                        ForEach(feed.posts) { post in
+                        ForEach(feed.visiblePosts) { post in
                             switch readingMode.mode {
                             case .card:
                                 PostCard(
@@ -58,7 +67,15 @@ struct HomeView: View {
                                 NodeTopicRow(
                                     post: post,
                                     mode: readingMode.mode,
-                                    onTap: { openPost(post) }
+                                    onTap: { openPost(post) },
+                                    // This list is inside `MainView`, so the
+                                    // composer overlay presents normally here.
+                                    onRepost: {
+                                        app.startRepost(
+                                            of: post,
+                                            url: DiscourseConfig.baseURL.appending(path: "t/\(post.id)")
+                                        )
+                                    }
                                 )
                             }
                         }
@@ -80,19 +97,25 @@ struct HomeView: View {
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
+            .refreshable { await feed.load() }
             .task { await feed.loadIfNeeded() }
+            // Settings is an overlay over this view, so `task` won't run again
+            // when it closes. Reload the moment the choice changes instead.
+            .onChange(of: preferences.homeFeed) { _, _ in
+                Task { await feed.load() }
+            }
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
             } action: { _, newValue in
                 handleScroll(newValue)
-                pull.scrolled(to: newValue) { await feed.load() }
+            }
+            // The wordmark comes back on a released flick, not on any downward
+            // drag — see `handleScrollPhase`.
+            .onScrollPhaseChange { oldPhase, newPhase, context in
+                handleScrollPhase(from: oldPhase, to: newPhase, context: context)
             }
 
-            NodelocRefreshIndicator(pull: pull)
-                .frame(maxWidth: .infinity)
-                .padding(.top, headerHeight + 12)
-
-            if app.overlay != .post {
+            if app.overlay != .post, !sidebarIsPinned {
                 persistentHeaderButtons
             }
 
@@ -109,13 +132,15 @@ struct HomeView: View {
     }
 
     private let headerHeight: CGFloat = 56
-    private let quickRevealThreshold: CGFloat = 14
     private let logoHeight: CGFloat = 30
+    /// Release speed, in points per second, that counts as a flick rather than
+    /// a drag. Empirical: a deliberate flick leaves the finger at well over a
+    /// thousand, while easing the list back down sits near zero.
+    private let flickRevealSpeed: CGFloat = 500
 
-    /// The branded loader replaces the wordmark on the first load; pull-to-
-    /// refresh uses the system spinner.
+    /// First load with nothing to show yet — the skeleton stands in for it.
     private var showsLoader: Bool {
-        feed.posts.isEmpty && feed.isLoading
+        feed.visiblePosts.isEmpty && feed.isLoading
     }
 
     /// 1 when the header is fully shown, 0 once it has scrolled away.
@@ -141,17 +166,50 @@ struct HomeView: View {
             if headerHiddenAmount >= headerHeight, top > 32, !app.navCollapsed {
                 withAnimation(.spring(duration: 0.3)) { app.navCollapsed = true }
             }
-        } else if delta < 0 {
-            let pullDistance = abs(delta)
-            if pullDistance >= quickRevealThreshold {
-                revealHeader(animated: true)
-            } else if top < headerHeight {
-                headerHiddenAmount = min(headerHiddenAmount, max(0, top))
-                if headerHiddenAmount == 0, app.navCollapsed {
-                    withAnimation(.spring(duration: 0.3)) { app.navCollapsed = false }
-                }
+        } else if delta < 0, top < headerHeight {
+            // Within the header's own height the wordmark just tracks the
+            // offset. Further down the feed a downward drag deliberately does
+            // *nothing* — only a flick brings it back, decided on release in
+            // `handleScrollPhase`.
+            headerHiddenAmount = min(headerHiddenAmount, max(0, top))
+            if headerHiddenAmount == 0, app.navCollapsed {
+                withAnimation(.spring(duration: 0.3)) { app.navCollapsed = false }
             }
         }
+    }
+
+    /// Reveals the wordmark only when a downward drag is *released with
+    /// momentum*: easing the list back down leaves the header hidden, a flick
+    /// snaps it back. Replaces a per-frame delta threshold, which couldn't tell
+    /// a slow drag from a fast one reliably — one slow finger can produce the
+    /// same 14pt step as a flick, just less often.
+    ///
+    /// Direction is taken from the offset travelled during the drag, not from
+    /// the sign of `velocity`: Apple's own `onScrollPhaseChange` example works
+    /// that way, and the vector's sign convention isn't documented. Only the
+    /// magnitude comes from the velocity.
+    ///
+    /// The `top <= 0` branch in `handleScroll` stays the safety net — reaching
+    /// the very top always reveals the header, even if no flick is recognised.
+    private func handleScrollPhase(
+        from oldPhase: ScrollPhase,
+        to newPhase: ScrollPhase,
+        context: ScrollPhaseChangeContext
+    ) {
+        if newPhase == .interacting {
+            dragStartOffset = context.geometry.contentOffset.y
+            return
+        }
+
+        guard oldPhase == .interacting, let start = dragStartOffset else { return }
+        dragStartOffset = nil
+
+        // Negative travel means the content moved back toward the top, which is
+        // a downward drag.
+        let travelled = context.geometry.contentOffset.y - start
+        let speed = abs(context.velocity?.dy ?? 0)
+        guard travelled < 0, speed >= flickRevealSpeed else { return }
+        revealHeader(animated: true)
     }
 
     private func revealHeader(animated: Bool) {
@@ -169,9 +227,8 @@ struct HomeView: View {
 
     // MARK: Header
 
-    /// Always the plain wordmark: the skeleton (first load) and the pull
-    /// indicator (refresh) are the loading signals — a third one up here made
-    /// the screen show two loaders at once.
+    /// Always the plain wordmark: the skeleton (first load) and the system
+    /// refresh spinner are the loading signals, so the header stays still.
     private var headerWordmark: some View {
         Image("NodelocWordmark")
             .resizable()
@@ -180,6 +237,9 @@ struct HomeView: View {
             .accessibilityLabel("NodeLoc")
     }
 
+    /// The phone's floating header. Unused while the sidebar is pinned: there
+    /// the menu button is gone and both the wordmark and the trailing action
+    /// have moved into the tab bar's own row as toolbar items.
     private var persistentHeaderButtons: some View {
         HStack {
             SidebarMenuButton()
@@ -194,27 +254,32 @@ struct HomeView: View {
 
             Spacer()
 
-            // Guests get 登录 where compose would be — posting needs an account.
-            if app.isGuest {
-                GuestLoginButton()
-            } else {
-                Button {
-                    withAnimation(.overlayPush) {
-                        app.overlay = .compose
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.glass(.regular.tint(Theme.accent.opacity(0.14))))
-                .buttonBorderShape(.circle)
-                .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
-            }
+            headerTrailingAction
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+
+    /// 发帖 for members, 登录 for guests — posting needs an account either way.
+    /// Shared so the floating header and the iPad toolbar show the same control.
+    @ViewBuilder
+    private var headerTrailingAction: some View {
+        if app.isGuest {
+            GuestLoginButton()
+        } else {
+            Button {
+                withAnimation(.overlayPush) {
+                    app.overlay = .compose
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 34, height: 34)
+            }
+            .glassButton(tint: Theme.accent.opacity(0.14), shape: .circle)
+            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+        }
     }
 
     private func openPost(_ post: Post) {
@@ -232,7 +297,7 @@ struct HomeView: View {
             Image(systemName: feed.errorText == nil ? "tray" : "wifi.exclamationmark")
                 .font(.system(size: 30, weight: .semibold))
                 .foregroundStyle(Theme.muted(0.35))
-            Text(feed.errorText ?? "暂时没有内容")
+            Text(feed.errorText ?? AppString("暂时没有内容"))
                 .font(Theme.body(14))
                 .foregroundStyle(Theme.muted(0.55))
                 .multilineTextAlignment(.center)
@@ -343,6 +408,12 @@ struct PostCard: View {
     /// Opens the author's public profile; nil disables the avatar tap.
     var onOpenAuthor: ((UserProfileTarget) -> Void)? = nil
     @State private var selectedMediaIndex = 0
+    @State private var voteFaces = VoteFaces.shared
+    /// Which arrow's face picker is open on this card, if any.
+    @State private var pickingFaces: VoteDirection?
+    /// Which arrow is under a finger, for the pressed state.
+    @State private var pressingFaces: VoteDirection?
+    @State private var showsMoreSheet = false
     /// Media opened straight from the card, without entering the post.
     @State private var viewerImages: [PostImage] = []
     @State private var viewerIndex = 0
@@ -428,7 +499,7 @@ struct PostCard: View {
 
             if let onOpenAuthor, let target = post.authorProfileTarget {
                 Button { onOpenAuthor(target) } label: { avatar }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
             } else {
                 avatar
             }
@@ -450,7 +521,7 @@ struct PostCard: View {
                 .lineLimit(1)
 
             if app.isPinned(post) {
-                Label("Pinned", systemImage: "pin.fill")
+                Label(post.pinnedGlobally ? AppString("全站置顶") : AppString("置顶"), systemImage: "pin.fill")
                     .labelStyle(CompactLabelStyle())
                     .font(Theme.body(10, weight: .semibold))
                     .foregroundStyle(Theme.accent700)
@@ -461,13 +532,19 @@ struct PostCard: View {
 
             Spacer(minLength: 0)
 
-            Button {} label: {
+            Button {
+                showsMoreSheet = true
+            } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.muted(0.4))
                     .frame(width: 30, height: 26)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressableIcon)
+            .sheet(isPresented: $showsMoreSheet) {
+                TopicMoreSheet(post: post) { startRepost() }
+            }
         }
     }
 
@@ -512,33 +589,151 @@ struct PostCard: View {
         }
     }
 
-    private var actionRow: some View {
-        HStack(spacing: 8) {
-            Button {
-                app.toggleLike(post)
-            } label: {
+    /// Up / score / down. Two tap targets in one capsule — the arrows were a
+    /// single button before, so the down arrow was decoration.
+    private var votePill: some View {
+        let score = app.voteScore(for: post)
+        let direction = app.voteDirection(for: post)
+        return HStack(spacing: 7) {
+            // Arrow and score share one hit region, as in the reader's control:
+            // the number belongs to the upvote next to it.
+            voteArrow(target: .up, direction: direction, score: score) {
                 HStack(spacing: 7) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(app.isLiked(post) ? Theme.accent : Theme.muted(0.5))
-                    Text("\(app.voteCount(post))")
+                    voteGlyph(target: .up, direction: direction, score: score)
+
+                    Text("\(score ?? app.voteCount(post))")
                         .font(Theme.body(12, weight: .semibold))
                         .foregroundStyle(Theme.text.opacity(0.74))
-                    Rectangle()
-                        .fill(Theme.divider)
-                        .frame(width: 1, height: 14)
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Theme.muted(0.42))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .padding(.vertical, 7)
-                .padding(.horizontal, 10)
-                .background(Theme.neutral300, in: Capsule())
             }
-            .buttonStyle(.plain)
 
-            FeedActionPill(systemImage: "bubble.left", text: "\(post.comments)")
-            FeedActionPill(systemImage: "arrowshape.turn.up.right", text: "Share")
+            Rectangle()
+                .fill(Theme.divider)
+                .frame(width: 1, height: 14)
+
+            voteArrow(target: .down, direction: direction, score: score) {
+                voteGlyph(target: .down, direction: direction, score: score)
+            }
+            .opacity(post.canVoteDown || score == nil ? 1 : 0.4)
+            .disabled(score != nil && !post.canVoteDown)
+        }
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
+        .background(Theme.neutral300, in: Capsule())
+        .sheet(item: $pickingFaces) { target in
+            VoteFacePicker(direction: target) { face in
+                pickingFaces = nil
+                app.castVote(target, on: post, reaction: face)
+            }
+        }
+    }
+
+    /// Wraps a region that votes in one direction. A plain view with two
+    /// gestures, not a Button: see `VoteControl.votable` — a button swallows the
+    /// long press, and making it simultaneous casts a vote on release as well as
+    /// opening the picker.
+    private func voteArrow<Content: View>(
+        target: VoteDirection,
+        direction: VoteDirection,
+        score: Int?,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .padding(7)
+            .contentShape(Rectangle())
+            .padding(-7)
+            .scaleEffect(pressingFaces == target ? 0.88 : 1)
+            .opacity(pressingFaces == target ? 0.6 : 1)
+            .animation(.easeOut(duration: 0.12), value: pressingFaces)
+            .accessibilityAddTraits(.isButton)
+            .onTapGesture {
+                if score == nil {
+                    // No vote data: the up arrow is still the like it used to
+                    // be, and the down arrow has nothing sensible to do.
+                    if target == .up { app.toggleLike(post) }
+                } else {
+                    app.castVote(direction.next(target), on: post)
+                }
+            }
+            // Hold for the faces, as in the reader. Only where the plugin drives
+            // the row: with no score there's no vote to flavour.
+            // `onPressingChanged` also drives the pressed state above: these are
+            // gestures, not buttons, so nothing else would answer the touch.
+            .onLongPressGesture(
+                minimumDuration: 0.32,
+                perform: {
+                    guard score != nil, !voteFaces.faces(for: target).isEmpty else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    pickingFaces = target
+                },
+                onPressingChanged: { isPressing in
+                    pressingFaces = isPressing ? target : nil
+                }
+            )
+    }
+
+    private func voteGlyph(target: VoteDirection, direction: VoteDirection, score: Int?) -> some View {
+        let isCast = score == nil
+            ? (target == .up && app.isLiked(post))
+            : direction == target
+        return Image(VoteControl.assetName(for: target, filled: isCast))
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 17, height: 17)
+            .foregroundStyle(tint(target: target, direction: direction, score: score))
+    }
+
+    private func tint(target: VoteDirection, direction: VoteDirection, score: Int?) -> Color {
+        if score == nil {
+            return target == .up && app.isLiked(post) ? Theme.accent : Theme.muted(0.5)
+        }
+        guard direction == target else { return Theme.muted(0.45) }
+        return target == .down ? Theme.accent2 : Theme.accent
+    }
+
+    /// Opens the composer quoting this topic, the same shape the reader's 转发
+    /// hands over.
+    private func startRepost() {
+        app.composePrefillTitle = post.title
+        app.composeRepostTopic = AppState.RepostTopic(
+            id: post.id,
+            title: post.title,
+            url: topicURL,
+            node: post.node,
+            author: post.authorUsername,
+            excerpt: post.excerpt.isEmpty ? nil : post.excerpt,
+            imageURL: post.imageURL
+        )
+        withAnimation(.overlayPush) { app.overlay = .compose }
+    }
+
+    private var topicURL: URL {
+        DiscourseConfig.baseURL.appending(path: "t/\(post.id)")
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 8) {
+            // The pill always looked like a vote control; now both arrows are
+            // real. `voteScore` nil means discourse-vote doesn't cover this
+            // category, and the row falls back to the like it always was.
+            votePill
+
+            // Opens the topic, where replies live. The card's own tap does the
+            // same thing, but a count that looks like a button should behave
+            // like one.
+            Button(action: openPost) {
+                FeedActionPill(systemImage: "bubble.left", text: "\(post.comments)")
+            }
+            .buttonStyle(.pressable)
+
+            ShareLink(item: topicURL) {
+                FeedActionPill(systemImage: "arrowshape.turn.up.right", text: AppString("分享"))
+            }
+            .buttonStyle(.pressable)
 
             Spacer(minLength: 0)
         }
@@ -642,7 +837,7 @@ private struct FeedMediaCarousel: View {
                 .frame(width: 32, height: 32)
                 .background(.black.opacity(0.46), in: Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
     }
 
     /// Sized from the first item's real dimensions, Reddit-style: the card

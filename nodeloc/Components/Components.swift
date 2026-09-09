@@ -396,212 +396,6 @@ struct CachedRemoteImage<Content: View, Placeholder: View>: View {
     }
 }
 
-// MARK: - Brand loader
-
-/// Loading indicator built from the nodeloc wordmark. A dim copy sits underneath
-/// and a full-color copy is revealed over it — either proportionally while the
-/// user drags (`progress`), or by a repeating sweep once indeterminate.
-/// The NODELOC mark, loading — from the "Nodeloc Loader" design (La/Lb/Lc).
-/// The 11c geometry: hexagon cage, six dashed spokes, six vertex nodes, hub.
-/// Per the VI motion rule nothing rotates, nothing bounces and the dash never
-/// marches — the loading feeling is a sequence around the hexagon. Reduced
-/// motion holds the mark static at full opacity, as specced.
-struct NodelocLoader: View {
-    enum Variant {
-        /// La — spoke and node light in turn, clockwise. The safest default.
-        case relay
-        /// Lb — spokes land outward from the hub, nodes arrive behind them.
-        /// Most expressive; splash use.
-        case reachOut
-        /// Lc — ghost structure, six equal dots travel the cage. Reads small;
-        /// degrades to cage+dots ≤30pt and to dots-only ≤18pt.
-        case minimal
-    }
-
-    var variant: Variant = .relay
-    var height: CGFloat = 56
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-
-    // Design space: viewBox 23.4 20 84.2 94.5.
-    private static let designSize = CGSize(width: 84.2, height: 94.5)
-    private static let designOrigin = CGPoint(x: 23.4, y: 20)
-    private static let vertices: [CGPoint] = [
-        CGPoint(x: 65, y: 25), CGPoint(x: 99.6, y: 45), CGPoint(x: 99.6, y: 85),
-        CGPoint(x: 65, y: 105), CGPoint(x: 30.4, y: 85), CGPoint(x: 30.4, y: 45),
-    ]
-    private static let spokes: [(CGPoint, CGPoint)] = [
-        (CGPoint(x: 65, y: 49), CGPoint(x: 65, y: 33)),
-        (CGPoint(x: 79.8, y: 57.5), CGPoint(x: 92.7, y: 50.1)),
-        (CGPoint(x: 79.8, y: 72.5), CGPoint(x: 92.2, y: 79.7)),
-        (CGPoint(x: 65, y: 81), CGPoint(x: 65, y: 97)),
-        (CGPoint(x: 50.2, y: 72.5), CGPoint(x: 37.8, y: 79.7)),
-        (CGPoint(x: 50.2, y: 57.5), CGPoint(x: 37.3, y: 50.1)),
-    ]
-    private static let hub = CGPoint(x: 65, y: 65)
-    private static let nodeRadii: [CGFloat] = [5, 6.5, 8, 9.5, 7, 5.5]
-
-    var body: some View {
-        Group {
-            if reduceMotion {
-                canvas(at: nil)
-            } else {
-                TimelineView(.animation) { context in
-                    canvas(at: context.date.timeIntervalSinceReferenceDate)
-                }
-            }
-        }
-        .frame(width: height * Self.designSize.width / Self.designSize.height, height: height)
-        .accessibilityLabel("加载中")
-    }
-
-    /// One frame. `time` nil = static mark at full opacity (reduced motion).
-    private func canvas(at time: TimeInterval?) -> some View {
-        Canvas { ctx, size in
-            let scale = size.height / Self.designSize.height
-            func point(_ p: CGPoint) -> CGPoint {
-                CGPoint(x: (p.x - Self.designOrigin.x) * scale, y: (p.y - Self.designOrigin.y) * scale)
-            }
-
-            let palette = palette
-            let dotsOnly = variant == .minimal && height <= 18
-            let compact = variant == .minimal && height <= 30
-
-            // Cage.
-            if !dotsOnly {
-                var cage = Path()
-                cage.addLines(Self.vertices.map(point))
-                cage.closeSubpath()
-                let cageOpacity: Double = switch variant {
-                case .relay: 1
-                case .reachOut: time.map { breathe(phase(at: $0, duration: 1.6, delay: 0)) } ?? 1
-                case .minimal: compact ? 0.38 : 0.4
-                }
-                ctx.stroke(
-                    cage,
-                    with: .color(palette.cage.opacity(cageOpacity)),
-                    style: StrokeStyle(lineWidth: (compact ? 4 : 2.6) * scale, lineJoin: .round)
-                )
-            }
-
-            // Spokes — dashed, and the dash pattern never marches.
-            if !dotsOnly && !compact {
-                for (index, spoke) in Self.spokes.enumerated() {
-                    let opacity: Double = switch variant {
-                    case .relay:
-                        time.map { relay(phase(at: $0, duration: 1.8, delay: 0.3 * Double(index))) } ?? 1
-                    case .reachOut:
-                        time.map { reach(phase(at: $0, duration: 1.6, delay: 0.07 * Double(index))) } ?? 1
-                    case .minimal:
-                        0.22
-                    }
-                    var path = Path()
-                    path.move(to: point(spoke.0))
-                    path.addLine(to: point(spoke.1))
-                    ctx.stroke(
-                        path,
-                        with: .color(palette.spoke.opacity(opacity)),
-                        style: StrokeStyle(lineWidth: 2.4 * scale, dash: [4.4 * scale, 3.2 * scale])
-                    )
-                }
-            }
-
-            // Vertex nodes.
-            for (index, vertex) in Self.vertices.enumerated() {
-                let radius: CGFloat = switch variant {
-                case .relay, .reachOut: Self.nodeRadii[index]
-                case .minimal: dotsOnly ? 11 : (compact ? 7.5 : 5)
-                }
-                let opacity: Double = switch variant {
-                case .relay:
-                    time.map { relay(phase(at: $0, duration: 1.8, delay: 0.3 * Double(index))) } ?? 1
-                case .reachOut:
-                    time.map { reach(phase(at: $0, duration: 1.6, delay: 0.12 + 0.07 * Double(index))) } ?? 1
-                case .minimal:
-                    time.map { relay(phase(at: $0, duration: 1.5, delay: 0.25 * Double(index))) } ?? 1
-                }
-                let color = variant == .minimal ? palette.minimalDot : palette.nodes[index]
-                let center = point(vertex)
-                let r = radius * scale
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
-                    with: .color(color.opacity(opacity))
-                )
-            }
-
-            // Hub — never moves.
-            if !dotsOnly && !compact {
-                let center = point(Self.hub)
-                let r = 12 * scale
-                ctx.fill(
-                    Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
-                    with: .color(palette.hub.opacity(variant == .minimal ? 0.32 : 1))
-                )
-            }
-        }
-    }
-
-    // MARK: Motion (the design's keyframes, piecewise)
-
-    private func phase(at time: TimeInterval, duration: Double, delay: Double) -> Double {
-        let local = (time - delay).truncatingRemainder(dividingBy: duration)
-        return (local < 0 ? local + duration : local) / duration
-    }
-
-    /// nl-relay: 0.18 → 1 by 12%, back to 0.18 by 38%, rest dim. Linear.
-    private func relay(_ phase: Double) -> Double {
-        switch phase {
-        case ..<0.12: 0.18 + 0.82 * (phase / 0.12)
-        case ..<0.38: 1 - 0.82 * ((phase - 0.12) / 0.26)
-        default: 0.18
-        }
-    }
-
-    /// nl-out: in by 22%, hold to 62%, gone by 88%.
-    private func reach(_ phase: Double) -> Double {
-        switch phase {
-        case ..<0.22: phase / 0.22
-        case ..<0.62: 1
-        case ..<0.88: 1 - (phase - 0.62) / 0.26
-        default: 0
-        }
-    }
-
-    /// nl-breathe: 0.55 ↔ 1, ease-in-out.
-    private func breathe(_ phase: Double) -> Double {
-        0.55 + 0.45 * (0.5 - 0.5 * cos(phase * 2 * .pi))
-    }
-
-    // MARK: Colourways (dark, and the light ground ramp inverted)
-
-    private struct Palette {
-        let cage: Color
-        let spoke: Color
-        let hub: Color
-        let nodes: [Color]
-        let minimalDot: Color
-    }
-
-    private var palette: Palette {
-        colorScheme == .dark
-            ? Palette(
-                cage: Color(hex: 0x00A870),
-                spoke: Color(hex: 0xFF9933),
-                hub: Color(hex: 0x6FE9C5),
-                nodes: [0x00875A, 0x00A870, 0x3AD4A8, 0x3AD4A8, 0x009966, 0x00A870].map { Color(hex: $0) },
-                minimalDot: Color(hex: 0x6FE9C5)
-            )
-            : Palette(
-                cage: Color(hex: 0x009966),
-                spoke: Color(hex: 0xE0771A),
-                hub: Color(hex: 0x00593B),
-                nodes: [0x7CEBC4, 0x3AD4A8, 0x00714C, 0x00402C, 0x009966, 0x3AD4A8].map { Color(hex: $0) },
-                minimalDot: Color(hex: 0x00593B)
-            )
-    }
-}
-
 // MARK: - Group flair (资质)
 
 /// A user's group flair. Discourse stores this either as a Font Awesome icon
@@ -970,7 +764,7 @@ struct SegmentedControl<Value: Hashable>: View {
                             }
                         }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable)
                 if index < options.count - 1 {
                     Rectangle().fill(Theme.divider).frame(width: 1)
                 }
@@ -1050,10 +844,59 @@ struct HeaderIconButton: View {
                 .foregroundStyle(Theme.headerText)
                 .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
         }
-        .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
-        .buttonBorderShape(.circle)
+        .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
         .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+extension View {
+    /// Moves a root screen's header controls into the iPad tab bar's row.
+    ///
+    /// On iPad the tab bar is drawn in the navigation bar region at the top of
+    /// the content, which is why a floating header of our own lands *below* it
+    /// — the tab bar is inside the safe area the header respects. Toolbar items
+    /// are what actually sit on the same line, flanking the centred tab
+    /// capsule, so each root screen hands its leading and trailing controls
+    /// over here and hides its own bar.
+    ///
+    /// Off iPad this is a no-op, so the phone layout is untouched.
+    ///
+    /// - Parameter needsNavigationStack: False for screens that already have a
+    ///   `NavigationStack` of their own (the inbox drives one with a path);
+    ///   nesting a second would break their navigation.
+    @ViewBuilder
+    func tabBarHeader<Leading: View, Trailing: View>(
+        isPinned: Bool,
+        needsNavigationStack: Bool = true,
+        @ViewBuilder leading: @escaping () -> Leading,
+        @ViewBuilder trailing: @escaping () -> Trailing
+    ) -> some View {
+        if isPinned {
+            if needsNavigationStack {
+                NavigationStack {
+                    tabBarToolbarItems(leading: leading, trailing: trailing)
+                }
+            } else {
+                tabBarToolbarItems(leading: leading, trailing: trailing)
+            }
+        } else {
+            self
+        }
+    }
+
+    private func tabBarToolbarItems<Leading: View, Trailing: View>(
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        toolbar {
+            ToolbarItem(placement: .topBarLeading) { leading() }
+            ToolbarItem(placement: .topBarTrailing) { trailing() }
+        }
+        // The tab bar already fills this row; a navigation bar background and
+        // title would double up on it.
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -1061,12 +904,16 @@ struct HeaderIconButton: View {
 /// same control rather than copies that drift apart.
 struct SidebarMenuButton: View {
     @Environment(AppState.self) private var app
+    @Environment(\.sidebarIsPinned) private var sidebarIsPinned
 
     var body: some View {
-        HeaderIconButton(systemName: "line.3.horizontal", accessibilityLabel: "菜单") {
-            // Matches the drag-to-open animation in MainView.
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
-                app.overlay = .sidebar
+        // Nothing to open when the sidebar is already a permanent column.
+        if !sidebarIsPinned {
+            HeaderIconButton(systemName: "line.3.horizontal", accessibilityLabel: AppString("菜单")) {
+                // Matches the drag-to-open animation in MainView.
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                    app.overlay = .sidebar
+                }
             }
         }
     }
@@ -1074,7 +921,7 @@ struct SidebarMenuButton: View {
 
 /// A circular or capsule glass button for a floating header.
 struct FloatingHeaderButton<Label: View>: View {
-    var borderShape: ButtonBorderShape = .circle
+    var borderShape: GlassShape = .circle
     let action: () -> Void
     @ViewBuilder var label: Label
 
@@ -1083,8 +930,7 @@ struct FloatingHeaderButton<Label: View>: View {
             label
                 .frame(height: FloatingHeader.controlHeight)
         }
-        .buttonStyle(.glass(.regular.tint(FloatingHeader.glassTint)))
-        .buttonBorderShape(borderShape)
+        .glassButton(tint: FloatingHeader.glassTint, shape: borderShape)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
     }
 }
@@ -1276,7 +1122,7 @@ final class ToastCenter {
 
     /// The friendly line for a failed action — never the raw error.
     func showError(_ error: Error) {
-        show((error as? LocalizedError)?.errorDescription ?? "操作失败，请稍后重试")
+        show((error as? LocalizedError)?.errorDescription ?? AppString("操作失败，请稍后重试"))
     }
 }
 
@@ -1293,7 +1139,7 @@ struct ToastHost: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 11)
-                .glassEffect(.regular.tint(Theme.bg.opacity(0.5)), in: .capsule)
+                .glassSurface(tint: Theme.bg.opacity(0.5))
                 .shadow(color: .black.opacity(0.14), radius: 12, y: 6)
                 .padding(.horizontal, 32)
                 .padding(.top, 6)
@@ -1302,87 +1148,512 @@ struct ToastHost: View {
     }
 }
 
-#Preview("Nodeloc Loader") {
-    VStack(spacing: 28) {
-        HStack(spacing: 28) {
-            VStack(spacing: 8) {
-                NodelocLoader(variant: .relay, height: 96)
-                Text("La · Relay").font(.caption2)
-            }
-            VStack(spacing: 8) {
-                NodelocLoader(variant: .reachOut, height: 96)
-                Text("Lb · Reach out").font(.caption2)
-            }
-            VStack(spacing: 8) {
-                NodelocLoader(variant: .minimal, height: 96)
-                Text("Lc · Minimal").font(.caption2)
-            }
-        }
-        HStack(alignment: .bottom, spacing: 24) {
-            NodelocLoader(variant: .minimal, height: 44)
-            NodelocLoader(variant: .minimal, height: 24)
-            NodelocLoader(variant: .minimal, height: 16)
+// MARK: - Badges
+
+/// One of a user's badges, resolved to something drawable.
+///
+/// Discourse hands out a FontAwesome name in `icon` and, rarely, uploaded
+/// artwork in `image_url`. Neither was being read: the profile drew a rosette on
+/// a colour picked from the badge's *position* in the list, so every badge
+/// looked the same and none of them looked right.
+struct ProfileBadge: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let description: String
+    /// Uploaded artwork, when this badge has some.
+    let imageURL: URL?
+    /// The bundled FontAwesome glyph, or nil when this badge's icon isn't one
+    /// the app carries.
+    let assetName: String?
+    /// The badge's own colour: `custom_style.text_color` when set, otherwise
+    /// its metal.
+    let tint: Color
+
+    init(_ badge: SummaryBadge, resolveImage: (String) -> URL?) {
+        id = badge.id
+        name = badge.name ?? ""
+        description = badge.description.map { DiscourseFormat.plainText($0) } ?? ""
+        imageURL = badge.imageUrl.flatMap(resolveImage)
+        assetName = Self.asset(for: badge.icon)
+        tint = Self.tint(customHex: badge.customStyle?.textColor, badgeTypeID: badge.badgeTypeId)
+    }
+
+    /// Discourse's own FontAwesome glyphs, not lookalikes.
+    ///
+    /// The first attempt substituted SF Symbols by hand, which is how a badge
+    /// ends up wearing the wrong picture: `share-nodes` is not any SF symbol,
+    /// and a near-match reads as a bug. These are the real icons, extracted
+    /// from the site's own SVG sprite (`/svg-sprite/…`) into imagesets — every
+    /// name in use on nodeloc, all 34 of them, taken from `/badges.json` rather
+    /// than imagined.
+    ///
+    /// Font Awesome Free, CC BY 4.0 — https://fontawesome.com/license/free
+    ///
+    /// A name that isn't here falls back to an SF rosette; that is visibly a
+    /// generic badge rather than the wrong specific one.
+    private static let assetsByIcon: [String: String] = [
+        "at": "FaAt",
+        "book-open-reader": "FaBookOpenReader",
+        "cake-candles": "FaCakeCandles",
+        "certificate": "FaCertificate",
+        "cube": "FaCube",
+        "discourse-sparkles": "FaDiscourseSparkles",
+        "envelope": "FaEnvelope",
+        "eye": "FaEye",
+        "face-smile": "FaFaceSmile",
+        "far-eye": "FaFarEye",
+        "far-heart": "FaFarHeart",
+        "far-pen-to-square": "FaFarPenToSquare",
+        "far-star": "FaFarStar",
+        "file-lines": "FaFileLines",
+        "file-signature": "FaFileSignature",
+        "flag": "FaFlag",
+        "gem": "FaGem",
+        "gift": "FaGift",
+        "heart": "FaHeart",
+        "icicles": "FaIcicles",
+        "link": "FaLink",
+        "medal": "FaMedal",
+        "pen": "FaPen",
+        "pencil": "FaPencil",
+        "quote-right": "FaQuoteRight",
+        "reply": "FaReply",
+        "share-nodes": "FaShareNodes",
+        "square-check": "FaSquareCheck",
+        "stamp": "FaStamp",
+        "user": "FaUser",
+        "user-pen": "FaUserPen",
+        "user-plus": "FaUserPlus",
+        "vote-up-filled": "FaVoteUpFilled",
+        "water": "FaWater",
+    ]
+
+    private static func asset(for icon: String?) -> String? {
+        guard let icon, !icon.isEmpty else { return nil }
+        if let mapped = assetsByIcon[icon] { return mapped }
+        // An unknown name: drop FontAwesome's variant prefix and try again
+        // before giving up, so `far-gift` finds `gift`.
+        let stripped = icon.replacingOccurrences(of: #"^(far|fas|fab|fal)-"#, with: "", options: .regularExpression)
+        return assetsByIcon[stripped]
+    }
+
+    /// Discourse's own medal colours, lifted slightly in dark mode so bronze
+    /// doesn't disappear into the background.
+    private static func tint(customHex: String?, badgeTypeID: Int?) -> Color {
+        if let customHex, let parsed = Color(cssHex: customHex) { return parsed }
+        switch badgeTypeID {
+        case 1: return Color(light: 0xC9A227, dark: 0xE4CB72)
+        case 2: return Color(light: 0x8E8E93, dark: 0xC7C7CC)
+        case 3: return Color(light: 0xA9662A, dark: 0xCD7F32)
+        default: return Theme.accent
         }
     }
-    .padding(40)
-    .background(Theme.bg)
 }
 
-// MARK: - Pull to refresh (Lc)
-
-/// Drives a custom pull-to-refresh: feed it the scroll's top offset from
-/// onScrollGeometryChange and it reports pull progress, fires `onRefresh`
-/// once past the threshold, and re-arms after the scroll settles. Exists
-/// because `.refreshable` can't restyle its ProgressView, and the design
-/// names Lc as the pull-to-refresh spinner.
-@MainActor
-@Observable
-final class PullToRefresh {
-    private(set) var progress: Double = 0
-    private(set) var isRefreshing = false
-
-    private let threshold: CGFloat = 72
-    private var triggered = false
-
-    /// `top` is contentOffset.y — negative while rubber-banding past the top.
-    func scrolled(to top: CGFloat, onRefresh: @escaping () async -> Void) {
-        let pull = max(0, -top)
-        if !isRefreshing {
-            progress = min(1, Double(pull / threshold))
-        }
-        if pull <= 2 { triggered = false }
-        guard pull >= threshold, !triggered, !isRefreshing else { return }
-
-        triggered = true
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        withAnimation(.quick) { isRefreshing = true }
-        Task {
-            let start = Date()
-            await onRefresh()
-            // Hold through at least one loop step so the loader doesn't blink.
-            let elapsed = Date().timeIntervalSince(start)
-            if elapsed < 0.6 {
-                try? await Task.sleep(for: .seconds(0.6 - elapsed))
-            }
-            withAnimation(.quick) {
-                self.isRefreshing = false
-                self.progress = 0
-            }
-        }
-    }
-}
-
-/// The Lc dot loop fading and growing in with the pull, steady while
-/// refreshing. Place near the top of the screen, over the rubber-band gap.
-struct NodelocRefreshIndicator: View {
-    let pull: PullToRefresh
+/// A badge's artwork: the uploaded image when it has one, otherwise its symbol
+/// on a tinted disc. One implementation, so the 22pt row of overlapping badges
+/// and the 44pt tile in the sheet can't drift.
+struct ProfileBadgeIcon: View {
+    let badge: ProfileBadge
+    var size: CGFloat = 22
+    var cornerRadius: CGFloat?
 
     var body: some View {
-        if pull.progress > 0.02 || pull.isRefreshing {
-            NodelocLoader(variant: .minimal, height: 26)
-                .opacity(pull.isRefreshing ? 1 : 0.25 + 0.75 * pull.progress)
-                .scaleEffect(pull.isRefreshing ? 1 : 0.7 + 0.3 * pull.progress)
-                .transition(.opacity)
+        Group {
+            if let imageURL = badge.imageURL {
+                CachedRemoteImage(url: imageURL) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    symbolTile
+                }
+            } else {
+                symbolTile
+            }
         }
+        .frame(width: size, height: size)
+        .clipShape(shape)
+    }
+
+    private var symbolTile: some View {
+        badge.tint.opacity(0.16)
+            .overlay {
+                glyph
+                    .foregroundStyle(badge.tint)
+            }
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        if let assetName = badge.assetName {
+            // Template-rendered so it takes the badge's colour, and sized to
+            // ~54% of the disc so the artwork sits inside it rather than
+            // filling it edge to edge.
+            Image(assetName)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size * 0.54, height: size * 0.54)
+        } else {
+            Image(systemName: "rosette")
+                .font(.system(size: size * 0.5, weight: .semibold))
+        }
+    }
+
+    private var shape: AnyShape {
+        if let cornerRadius {
+            return AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        }
+        return AnyShape(Circle())
+    }
+}
+
+// MARK: - @ / # completion
+
+/// The completion list for a composer's `@` or `#` token.
+///
+/// A horizontal row rather than a dropdown: the keyboard owns the bottom half of
+/// the screen while typing, and a vertical list either fights it for space or
+/// covers the draft the suggestion is meant to go into.
+struct MentionSuggestionBar: View {
+    let suggestions: [MentionSuggestion]
+    let onPick: (MentionSuggestion) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(suggestions) { suggestion in
+                    Button { onPick(suggestion) } label: {
+                        row(suggestion)
+                    }
+                    .buttonStyle(.pressable)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .scrollIndicators(.hidden)
+        .background(Theme.bg)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.divider).frame(height: 1)
+        }
+    }
+
+    private func row(_ suggestion: MentionSuggestion) -> some View {
+        HStack(spacing: 7) {
+            icon(suggestion)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(suggestion.title)
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let subtitle = suggestion.subtitle {
+                    Text(subtitle)
+                        .font(Theme.body(10))
+                        .foregroundStyle(Theme.muted(0.5))
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 12)
+        .padding(.vertical, 6)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func icon(_ suggestion: MentionSuggestion) -> some View {
+        switch suggestion.kind {
+        case .user:
+            RemoteAvatar(
+                url: suggestion.avatarURL,
+                letter: String(suggestion.title.prefix(1)).uppercased(),
+                variant: abs(suggestion.title.hashValue),
+                size: 22
+            )
+        case .node:
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(cssHex: suggestion.colorHex ?? "") ?? Theme.accent)
+                .frame(width: 22, height: 22)
+                .overlay {
+                    Text(String(suggestion.title.prefix(1)))
+                        .font(Theme.heading(10, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+        case .tag:
+            Image(systemName: "tag.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 22, height: 22)
+        }
+    }
+}
+
+// MARK: - Voting
+
+/// Overrides the neutral colours in `VoteControl` for dark surfaces.
+///
+/// The greys it uses read fine on a card and vanish over video, so the
+/// full-screen player sets this to white. Voted arrows keep their own tint
+/// either way — that colour *is* the state.
+private struct VoteControlTintKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
+extension EnvironmentValues {
+    var voteControlTint: Color? {
+        get { self[VoteControlTintKey.self] }
+        set { self[VoteControlTintKey.self] = newValue }
+    }
+}
+
+/// Up / score / down, the control discourse-vote puts in place of the like
+/// button.
+///
+/// The score is `like_count - vote_down_count`, so it can be negative — which is
+/// the whole point of having it. Tapping the way you already voted retracts,
+/// matching the plugin's `nextDirection`.
+struct VoteControl: View {
+    let score: Int
+    let direction: VoteDirection
+    /// False when the site doesn't let this member downvote; the arrow then
+    /// reads as unavailable rather than silently failing.
+    var canVoteDown: Bool = true
+    var isEnabled: Bool = true
+    var compact = false
+    /// The rule between the two directions. On in a filled capsule, where it
+    /// marks where the upvote's hit region ends; off in a bare row, where there
+    /// is no container for it to divide.
+    var showsDivider = true
+    /// `reaction` nil casts the direction's default face.
+    let onVote: (VoteDirection, String?) -> Void
+
+    @State private var faces = VoteFaces.shared
+    /// Set by dark surfaces; nil keeps the light-surface greys.
+    @Environment(\.voteControlTint) private var neutralTint
+    /// Which arrow's picker is open, if any.
+    @State private var picking: VoteDirection?
+    /// Which side is under a finger. These are gestures rather than buttons, so
+    /// the pressed state has to be tracked by hand to give the touch an answer.
+    @State private var pressing: VoteDirection?
+
+    var body: some View {
+        HStack(spacing: compact ? 2 : 4) {
+            // Arrow *and* score in one hit region: the number belongs to the
+            // upvote beside it, so tapping or holding it should do what the
+            // arrow does rather than nothing.
+            votable(.up) {
+                HStack(spacing: compact ? 2 : 4) {
+                    glyph(.up)
+
+                    Text("\(score)")
+                        .font(Theme.body(compact ? 12 : 13, weight: .semibold))
+                        .foregroundStyle(scoreColor)
+                        .monospacedDigit()
+                        // A score never wraps: three digits in a tight capsule
+                        // split across two lines without this, which grew the
+                        // whole row.
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        // Minimum, so the row doesn't jump between "9" and
+                        // "-10", but it still grows for "128".
+                        .frame(minWidth: compact ? 16 : 20)
+                }
+            }
+
+            if showsDivider {
+                // Separates the two directions, and marks where the upvote's
+                // hit region ends.
+                Rectangle()
+                    .fill(neutralTint?.opacity(0.35) ?? Theme.divider)
+                    .frame(width: 1, height: compact ? 12 : 14)
+                    .padding(.horizontal, compact ? 1 : 2)
+            }
+
+            votable(.down) { glyph(.down) }
+                .opacity(canVoteDown ? 1 : 0.35)
+                .disabled(!canVoteDown)
+        }
+        .task { await faces.loadIfNeeded() }
+        // One sheet on the row, not one per arrow: several `.sheet` on the same
+        // view collapse to whichever was applied last.
+        .sheet(item: $picking) { target in
+            VoteFacePicker(direction: target) { face in
+                picking = nil
+                onVote(target, face)
+            }
+        }
+    }
+
+    /// Wraps whatever region votes in that direction.
+    ///
+    /// Not a `Button`. A button consumes the whole touch sequence, so
+    /// `.onLongPressGesture` on one never fires — and adding the long press as a
+    /// simultaneous gesture instead makes the button's action *also* run on
+    /// release, casting a vote while the picker opens. A plain view with both
+    /// gestures is the combination SwiftUI resolves correctly: quick release
+    /// taps, holding past the duration long-presses and the tap is suppressed.
+    private func votable<Content: View>(
+        _ target: VoteDirection,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            // Hit area wider than the drawing, without the control taking the
+            // space: pad, take the shape at that size, then give the layout its
+            // room back.
+            .padding(6)
+            .contentShape(Rectangle())
+            .padding(-6)
+            .scaleEffect(pressing == target ? 0.88 : 1)
+            .opacity(pressing == target ? 0.6 : 1)
+            .animation(.easeOut(duration: 0.12), value: pressing)
+            .accessibilityAddTraits(.isButton)
+            .onTapGesture {
+                guard isEnabled else { return }
+                onVote(direction.next(target), nil)
+            }
+            // Hold for the faces — the gesture the web control binds on touch,
+            // where a pointer gets hover instead. `onPressingChanged` is also
+            // what drives the pressed state above; without it these have no
+            // feedback at all, unlike the buttons around them.
+            .onLongPressGesture(
+                minimumDuration: 0.32,
+                perform: {
+                    guard isEnabled, !faces.faces(for: target).isEmpty else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    picking = target
+                },
+                onPressingChanged: { isPressing in
+                    guard isEnabled else { return }
+                    pressing = isPressing ? target : nil
+                }
+            )
+    }
+
+    private func glyph(_ target: VoteDirection) -> some View {
+        let isCast = direction == target
+        return Image(VoteControl.assetName(for: target, filled: isCast))
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: compact ? 15 : 17, height: compact ? 15 : 17)
+            .foregroundStyle(isCast ? tint(for: target) : (neutralTint ?? Theme.muted(0.45)))
+            .frame(width: compact ? 22 : 26, height: compact ? 22 : 26)
+    }
+
+    /// Shared with the feed card, which draws its own pill.
+    static func assetName(for direction: VoteDirection, filled: Bool) -> String {
+        let base = direction == .down ? "LucideArrowBigDown" : "LucideArrowBigUp"
+        return filled ? base + "Filled" : base
+    }
+
+    /// The score takes the colour of the way *you* voted, which is how a reader
+    /// finds their own vote without hunting for a filled arrow.
+    private var scoreColor: Color {
+        switch direction {
+        case .up: return tint(for: .up)
+        case .down: return tint(for: .down)
+        case .none: return neutralTint ?? Theme.muted(0.6)
+        }
+    }
+
+    private func tint(for direction: VoteDirection) -> Color {
+        direction == .down ? Theme.accent2 : Theme.accent
+    }
+}
+
+/// The faces one vote direction offers, as a bottom sheet.
+///
+/// Picking one always *casts* that direction — only the bare arrow toggles,
+/// which is the web control's rule too.
+struct VoteFacePicker: View {
+    let direction: VoteDirection
+    let onPick: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var faces = VoteFaces.shared
+
+    private let side: CGFloat = 56
+
+    var body: some View {
+        let names = faces.faces(for: direction)
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: side), spacing: 6)], spacing: 6) {
+                    ForEach(names, id: \.self) { name in
+                        Button { onPick(name) } label: {
+                            CachedRemoteImage(url: VoteFaces.imageURL(for: name)) { image in
+                                image.resizable().scaledToFit()
+                            } placeholder: {
+                                Color.clear
+                            }
+                            .frame(width: 32, height: 32)
+                            .frame(width: side, height: side)
+                            .background(
+                                Theme.surface,
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.pressable)
+                        .accessibilityLabel(name)
+                    }
+                }
+                .padding(16)
+            }
+            .scrollIndicators(.hidden)
+            .background(Theme.bg)
+            .navigationTitle(direction == .down ? AppString("选择反对表情") : AppString("选择赞同表情"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+        // Fitted to the rows it has: sixteen faces upward and thirty downward,
+        // so one fixed detent is either half empty or a scroll for no reason.
+        .presentationDetents([.height(sheetHeight(for: names.count)), .large])
+        .presentationDragIndicator(.visible)
+        .task { await faces.loadIfNeeded() }
+    }
+
+    /// Five to a row is what the adaptive grid lands on at phone width; the
+    /// sheet caps the result either way.
+    private func sheetHeight(for count: Int) -> CGFloat {
+        let rows = max(1, (count + 4) / 5)
+        return min(CGFloat(rows) * (side + 6) + 110, 460)
+    }
+}
+
+// MARK: - Press feedback
+
+/// A button style that answers the touch: `.plain` leaves custom labels with no
+/// pressed state at all, so an icon or a chip looked inert even though it worked.
+///
+/// Scale rather than a fill, because these sit on chips and capsules that
+/// already have their own background.
+struct PressableButtonStyle: ButtonStyle {
+    /// Gentle by default, because this is applied app-wide and most buttons are
+    /// rows or chips where a big scale would look like a bounce.
+    var scale: CGFloat = 0.97
+    var opacity: Double = 0.55
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .opacity(configuration.isPressed ? opacity : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == PressableButtonStyle {
+    /// `.buttonStyle(.pressable)` — for rows, chips and anything wide.
+    static var pressable: PressableButtonStyle { PressableButtonStyle() }
+
+    /// A firmer press for small icons, where 3% is invisible.
+    static var pressableIcon: PressableButtonStyle {
+        PressableButtonStyle(scale: 0.88, opacity: 0.5)
     }
 }

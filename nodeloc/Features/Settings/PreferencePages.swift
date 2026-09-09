@@ -22,13 +22,13 @@ enum PreferenceGroup: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .interface: return "界面"
-        case .notifications: return "通知"
-        case .emails: return "电子邮件"
-        case .tracking: return "跟踪"
-        case .privacy: return "隐私"
-        case .other: return "其他"
-        case .webOnly: return "网页端设置"
+        case .interface: return AppString("界面")
+        case .notifications: return AppString("通知")
+        case .emails: return AppString("电子邮件")
+        case .tracking: return AppString("跟踪")
+        case .privacy: return AppString("隐私")
+        case .other: return AppString("其他")
+        case .webOnly: return AppString("网页端设置")
         }
     }
 
@@ -89,8 +89,7 @@ struct PreferencePage: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: 34, height: 34)
             }
-            .buttonStyle(.glass(.regular.tint(Theme.bg.opacity(0.34))))
-            .buttonBorderShape(.circle)
+            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
 
             Text(group.title).font(Theme.body(15, weight: .medium))
 
@@ -109,31 +108,34 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var interfaceSection: some View {
-        SettingsSection(title: "外观") {
+        SettingsSection(title: AppString("外观")) {
             SettingsPickerRow(
-                title: "颜色模式",
+                title: AppString("颜色模式"),
                 options: InterfaceColorMode.allCases,
                 label: \.label,
                 selection: prefs.colorModeBinding
             )
             SettingsPickerRow(
-                title: "文本大小",
+                title: AppString("文本大小"),
                 options: TextSize.ordered,
                 label: \.label,
                 selection: prefs.textSizeBinding
             )
         }
 
-        SettingsSection(title: "浏览") {
+        SettingsSection(title: AppString("浏览")) {
+            // Local, and only the lists the home card list can render — see
+            // `HomeFeed`. Deliberately does not write `homepage_id`, so the
+            // website's own default homepage is left as the person set it.
             SettingsPickerRow(
-                title: "默认首页",
-                options: HomepageChoice.allCases,
+                title: AppString("默认首页"),
+                options: HomeFeed.allCases,
                 label: \.label,
-                selection: prefs.choice(\.homepageId, "homepage_id", default: HomepageChoice.latest)
+                selection: prefs.homeFeedBinding
             )
             SettingsToggleRow(
-                title: "自动翻译",
-                detail: "自动翻译以其他语言发布的话题和帖子",
+                title: AppString("自动翻译"),
+                detail: AppString("自动翻译以其他语言发布的话题和帖子"),
                 isOn: prefs.toggle(\.automaticallyTranslate, "automatically_translate", default: true)
             )
         }
@@ -143,9 +145,9 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var notificationsSection: some View {
-        SettingsSection(title: "推送通知") {
+        SettingsSection(title: AppString("推送通知")) {
             SettingsPickerRow(
-                title: "推送通知",
+                title: AppString("推送通知"),
                 options: PushNotificationLevel.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -155,9 +157,9 @@ struct PreferencePage: View {
             )
         }
 
-        SettingsSection(title: "提醒我") {
+        SettingsSection(title: AppString("提醒我")) {
             SettingsPickerRow(
-                title: "被赞时通知",
+                title: AppString("被赞时通知"),
                 options: LikeNotificationFrequency.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -166,13 +168,13 @@ struct PreferencePage: View {
                 )
             )
             SettingsToggleRow(
-                title: "链接提醒",
-                detail: "当有人分享我的帖子链接时通知我",
+                title: AppString("链接提醒"),
+                detail: AppString("当有人分享我的帖子链接时通知我"),
                 isOn: prefs.toggle(\.notifyOnLinkedPosts, "notify_on_linked_posts", default: true)
             )
             SettingsToggleRow(
-                title: "即将推出的更改",
-                detail: "当即将推出的更改可供预览时通知我",
+                title: AppString("即将推出的更改"),
+                detail: AppString("当即将推出的更改可供预览时通知我"),
                 isOn: prefs.toggle(
                     \.enableUpcomingChangeAvailableNotifications,
                     "enable_upcoming_change_available_notifications",
@@ -186,17 +188,17 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var emailSection: some View {
-        SettingsSection(title: "电子邮件") {
+        SettingsSection(title: AppString("电子邮件")) {
             SettingsPickerRow(
-                title: "活动邮件",
-                detail: "当我被引用、回复、被提及，或我关注的内容有新活动时",
+                title: AppString("活动邮件"),
+                detail: AppString("当我被引用、回复、被提及，或我关注的内容有新活动时"),
                 options: EmailLevel.allCases,
                 label: \.label,
                 selection: prefs.choice(\.emailLevel, "email_level", default: EmailLevel.onlyWhenAway)
             )
             SettingsPickerRow(
-                title: "私信邮件",
-                detail: "当我收到个人消息时",
+                title: AppString("私信邮件"),
+                detail: AppString("当我收到个人消息时"),
                 options: EmailLevel.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -205,8 +207,8 @@ struct PreferencePage: View {
                 )
             )
             SettingsPickerRow(
-                title: "包含以前的回复",
-                detail: "在电子邮件底部",
+                title: AppString("包含以前的回复"),
+                detail: AppString("在电子邮件底部"),
                 options: PreviousRepliesLevel.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -215,31 +217,31 @@ struct PreferencePage: View {
                 )
             )
             SettingsToggleRow(
-                title: "包含回复节选",
-                detail: "在电子邮件中包含帖子回复节选",
+                title: AppString("包含回复节选"),
+                detail: AppString("在电子邮件中包含帖子回复节选"),
                 isOn: prefs.toggle(\.emailInReplyTo, "email_in_reply_to", default: true)
             )
         }
 
-        SettingsSection(title: "活动总结") {
+        SettingsSection(title: AppString("活动总结")) {
             SettingsToggleRow(
-                title: "发送总结邮件",
-                detail: "当我不访问这里时，向我发送热门话题和回复的电子邮件总结",
+                title: AppString("发送总结邮件"),
+                detail: AppString("当我不访问这里时，向我发送热门话题和回复的电子邮件总结"),
                 isOn: prefs.toggle(\.emailDigests, "email_digests", default: true)
             )
             SettingsToggleRow(
-                title: "包含新用户内容",
-                detail: "在总结电子邮件中包含来自新用户的内容",
+                title: AppString("包含新用户内容"),
+                detail: AppString("在总结电子邮件中包含来自新用户的内容"),
                 isOn: prefs.toggle(\.includeTl0InDigests, "include_tl0_in_digests")
             )
         }
 
         SettingsSection(
-            title: "邮寄名单模式",
-            footer: "开启后，每个新帖子都会发一封邮件。"
+            title: AppString("邮寄名单模式"),
+            footer: AppString("开启后，每个新帖子都会发一封邮件。")
         ) {
             SettingsToggleRow(
-                title: "启用邮寄名单模式",
+                title: AppString("启用邮寄名单模式"),
                 isOn: prefs.toggle(\.mailingListMode, "mailing_list_mode")
             )
         }
@@ -249,9 +251,9 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var trackingSection: some View {
-        SettingsSection(title: "话题") {
+        SettingsSection(title: AppString("话题")) {
             SettingsPickerRow(
-                title: "何时视为新话题",
+                title: AppString("何时视为新话题"),
                 options: NewTopicDuration.ordered,
                 label: \.label,
                 selection: prefs.choice(
@@ -260,7 +262,7 @@ struct PreferencePage: View {
                 )
             )
             SettingsPickerRow(
-                title: "自动跟踪我进入的话题",
+                title: AppString("自动跟踪我进入的话题"),
                 options: AutoTrackDuration.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -269,7 +271,7 @@ struct PreferencePage: View {
                 )
             )
             SettingsPickerRow(
-                title: "发帖时",
+                title: AppString("发帖时"),
                 options: ReplyNotificationLevel.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -278,12 +280,12 @@ struct PreferencePage: View {
                 )
             )
             SettingsToggleRow(
-                title: "话题关闭时视为未读",
+                title: AppString("话题关闭时视为未读"),
                 isOn: prefs.toggle(\.topicsUnreadWhenClosed, "topics_unread_when_closed", default: true)
             )
             SettingsToggleRow(
-                title: "关注优先于免打扰",
-                detail: "如果我正在关注的类别或标签中有我已设为免打扰的话题，请通知我",
+                title: AppString("关注优先于免打扰"),
+                detail: AppString("如果我正在关注的类别或标签中有我已设为免打扰的话题，请通知我"),
                 isOn: prefs.toggle(\.watchedPrecedenceOverMuted, "watched_precedence_over_muted")
             )
         }
@@ -293,24 +295,24 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var privacySection: some View {
-        SettingsSection(title: "个人资料") {
+        SettingsSection(title: AppString("个人资料")) {
             SettingsToggleRow(
-                title: "隐藏我的公开个人资料",
+                title: AppString("隐藏我的公开个人资料"),
                 isOn: prefs.toggle(\.hideProfile, "hide_profile")
             )
             SettingsToggleRow(
-                title: "隐藏在线状态",
+                title: AppString("隐藏在线状态"),
                 isOn: prefs.toggle(\.hidePresence, "hide_presence")
             )
         }
 
-        SettingsSection(title: "个人消息") {
+        SettingsSection(title: AppString("个人消息")) {
             SettingsToggleRow(
-                title: "允许其他用户向我发送个人消息",
+                title: AppString("允许其他用户向我发送个人消息"),
                 isOn: prefs.toggle(\.allowPrivateMessages, "allow_private_messages", default: true)
             )
             SettingsToggleRow(
-                title: "仅允许指定用户发送消息",
+                title: AppString("仅允许指定用户发送消息"),
                 isOn: prefs.toggle(\.enableAllowedPmUsers, "enable_allowed_pm_users")
             )
         }
@@ -320,14 +322,14 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var otherSection: some View {
-        SettingsSection(title: "常规") {
+        SettingsSection(title: AppString("常规")) {
             SettingsTextRow(
-                title: "时区",
+                title: AppString("时区"),
                 placeholder: TimeZone.current.identifier,
                 text: prefs.timezoneBinding
             )
             SettingsPickerRow(
-                title: "默认日历",
+                title: AppString("默认日历"),
                 options: DefaultCalendar.allCases,
                 label: \.label,
                 selection: prefs.nameChoice(
@@ -338,7 +340,7 @@ struct PreferencePage: View {
                 )
             )
             SettingsPickerRow(
-                title: "编辑器模式",
+                title: AppString("编辑器模式"),
                 options: CompositionMode.allCases,
                 label: \.label,
                 selection: prefs.choice(
@@ -347,11 +349,11 @@ struct PreferencePage: View {
                 )
             )
             SettingsToggleRow(
-                title: "跳过新用户入门提示",
+                title: AppString("跳过新用户入门提示"),
                 isOn: prefs.toggle(\.skipNewUserTips, "skip_new_user_tips")
             )
             SettingsToggleRow(
-                title: "到达底部时自动取消置顶话题",
+                title: AppString("到达底部时自动取消置顶话题"),
                 isOn: prefs.toggle(\.automaticallyUnpinTopics, "automatically_unpin_topics", default: true)
             )
         }
@@ -362,40 +364,40 @@ struct PreferencePage: View {
     @ViewBuilder
     private var webOnlySection: some View {
         SettingsSection(
-            title: "网页端设置",
-            footer: "这些设置会保存到你的账号并在网页端生效，但对本 app 没有影响。"
+            title: AppString("网页端设置"),
+            footer: AppString("这些设置会保存到你的账号并在网页端生效，但对本 app 没有影响。")
         ) {
             SettingsToggleRow(
-                title: "在新标签页中打开外部链接",
+                title: AppString("在新标签页中打开外部链接"),
                 isOn: prefs.toggle(\.externalLinksInNewTab, "external_links_in_new_tab")
             )
             SettingsToggleRow(
-                title: "在浏览器图标上显示数量",
+                title: AppString("在浏览器图标上显示数量"),
                 isOn: prefs.toggle(\.dynamicFavicon, "dynamic_favicon")
             )
             SettingsToggleRow(
-                title: "为高亮显示的文字启用引用回复",
+                title: AppString("为高亮显示的文字启用引用回复"),
                 isOn: prefs.toggle(\.enableQuoting, "enable_quoting", default: true)
             )
             SettingsToggleRow(
-                title: "在编辑器中启用智能列表",
+                title: AppString("在编辑器中启用智能列表"),
                 isOn: prefs.toggle(\.enableSmartLists, "enable_smart_lists", default: true)
             )
             SettingsToggleRow(
-                title: "Markdown 模式使用等宽字体",
+                title: AppString("Markdown 模式使用等宽字体"),
                 isOn: prefs.toggle(
                     \.enableMarkdownMonospaceFont, "enable_markdown_monospace_font",
                     default: true
                 )
             )
             SettingsPickerRow(
-                title: "页面标题显示数量",
+                title: AppString("页面标题显示数量"),
                 options: TitleCountMode.allCases,
                 label: \.label,
                 selection: prefs.titleCountModeBinding
             )
             SettingsPickerRow(
-                title: "聊天编辑器发送方式",
+                title: AppString("聊天编辑器发送方式"),
                 options: SendShortcut.allCases,
                 label: \.label,
                 selection: prefs.nameChoice(
@@ -406,11 +408,11 @@ struct PreferencePage: View {
                 )
             )
             SettingsToggleRow(
-                title: "侧边栏链接到筛选列表",
+                title: AppString("侧边栏链接到筛选列表"),
                 isOn: prefs.toggle(\.sidebarLinkToFilteredList, "sidebar_link_to_filtered_list")
             )
             SettingsToggleRow(
-                title: "侧边栏显示新内容数量",
+                title: AppString("侧边栏显示新内容数量"),
                 isOn: prefs.toggle(\.sidebarShowCountOfNewItems, "sidebar_show_count_of_new_items")
             )
         }
