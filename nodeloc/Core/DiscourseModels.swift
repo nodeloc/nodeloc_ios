@@ -1048,7 +1048,10 @@ struct PostRawResponse: Decodable {
 /// `/images/emoji/unicode/<name>.png`, and the site's custom ones as uploads,
 /// grouped under whatever the admin named the group ("ac", "simsimi" here).
 /// `tonable` is only present on the standard set.
-struct DiscourseEmoji: Decodable, Identifiable, Hashable {
+/// `Codable`, not just `Decodable`: the catalogue is written back out to disk
+/// (`EmojiDiskCache`). Safe to encode because every property maps straight to a
+/// key — there is no custom `init(from:)` for an `encode(to:)` to contradict.
+struct DiscourseEmoji: Codable, Identifiable, Hashable {
     let name: String
     let url: String?
     let group: String?
@@ -1530,7 +1533,13 @@ struct FeatureFlagConfig: Decodable {
     let lotteryEnabled: Bool?
     /// Whether `/mobile/profile.json` is deployed. Unlike the two above, this
     /// one stays off until the server says otherwise — see `FeatureFlags`.
-    let profileAggregateEnabled: Bool?
+    ///
+    /// Named for the wire key, which is `profile_aggregate` and not
+    /// `profile_aggregate_enabled` like its neighbours: the requirement doc's
+    /// example spelled it that way and the server followed the doc. Renaming it
+    /// to match the pattern would silently switch the feature off, since a
+    /// missing key decodes to nil.
+    let profileAggregate: Bool?
 }
 
 // MARK: - Profile aggregate (discourse-mobile)

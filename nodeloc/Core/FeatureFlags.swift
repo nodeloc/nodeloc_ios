@@ -74,7 +74,7 @@ final class FeatureFlags {
             lotteryEnabled = value
             defaults.set(value, forKey: Key.lottery)
         }
-        if let value = config.profileAggregateEnabled {
+        if let value = config.profileAggregate {
             profileAggregateEnabled = value
             defaults.set(value, forKey: Key.profileAggregate)
         }

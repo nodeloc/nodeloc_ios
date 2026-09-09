@@ -1,28 +1,53 @@
-# App Review Notes — NodeLoc iOS 1.0
+# App Review Notes — NodeLoc iOS 1.1
+
+**1.0 was approved.** Everything below was written for that submission and is
+kept because the guideline answers still apply — the features it describes all
+still ship. What changed for 1.1 is listed under `WHATS_NEW_FOR_REVIEW`.
 
 Paste the block below into **App Store Connect → App Review Information → Notes**.
 It is written in English because that is what App Review reads.
 
-Fill in the two placeholders first:
-- `<<DEMO_USERNAME>>` / `<<DEMO_PASSWORD>>` — a real working account
-- Confirm the mini-app and lottery sections still match what ships
+Before submitting 1.1:
+- [ ] Demo account still signs in. It was filled in and working for 1.0 —
+      re-verify rather than assume, because 1.2 depends on it.
 
-> **This is not optional.** Submission f85c73dd was rejected under 1.2 for
-> report/block "not found". Both write to the server and so need an account:
-> without a working demo login the reviewer cannot reach either, no matter
-> how the app is built. If these placeholders went to App Review unfilled,
-> that alone explains the rejection.
+      > 1.0's first submission (f85c73dd) was rejected under 1.2 for
+      > report/block "not found". Both write to the server and so need an
+      > account: without a working demo login the reviewer cannot reach
+      > either, no matter how the app is built. Keep this box honest.
 
-Before resubmitting, also check off:
-- [ ] Demo account filled in above **and verified by signing in with it**
-- [ ] App Store Connect → App Information → Age Rating: "Parental Controls"
-      and "Age Assurance" both set to **None** (guideline 2.3.6 — the app
-      has neither; see `AGE_RATING` below)
-- [x] https://www.nodeloc.com/tos contains an explicit no-tolerance clause —
-      done, §7 "Content Standards and Zero-Tolerance Policy" (verified
-      2026-09-06); §8 covers reporting and blocking. See `TERMS_WORDING`.
-- [ ] Screen recording attached to App Review Information → Notes
+- [ ] Confirm the mini-app and lottery sections still match what ships
+- [ ] Re-attach the screen recording if the 1.2 flows changed visually
       (see `RECORDING_SCRIPT` at the bottom of this file)
+
+Settled during the 1.0 review and not expected to need work again:
+- [x] Age Rating: "Parental Controls" and "Age Assurance" both **None**
+      (guideline 2.3.6 — see `AGE_RATING` below)
+- [x] https://www.nodeloc.com/tos contains an explicit no-tolerance clause —
+      §7 "Content Standards and Zero-Tolerance Policy" (verified 2026-09-06);
+      §8 covers reporting and blocking. See `TERMS_WORDING`.
+
+--------------------------------------------------------------------
+WHATS_NEW_FOR_REVIEW — changes since the approved 1.0
+--------------------------------------------------------------------
+Nothing here changes the answers given for guidelines 1.2, 2.3.6, 3.1.1, 4.7,
+4.8, 5.1.1(v) or 5.3. Summarised because a reviewer comparing builds will see
+a large diff:
+
+* **Minimum iOS lowered from 26 to 18.** The interface is drawn with the
+  system's Liquid Glass materials where available and standard system
+  materials below that. No private API is used for either.
+* **Sign-in screen simplified** to Apple / email / one "continue another way"
+  button — see GUIDELINE 4.8 below. Sign in with Apple is unchanged and still
+  prominent.
+* **Blocking, reporting and the blocked-user list** are unchanged in behaviour
+  from the approved build; only the list's presentation moved.
+* **Author-gated post sections** (reply-to-see / paid) are now drawn in an
+  explanatory frame. Paid sections still offer **no** purchase control inside
+  the app — see GUIDELINE 3.1.1.
+* Performance work: the profile screen caches its last response on the device
+  so it renders before the network answers. No new data is collected; see
+  `PrivacyInfo.xcprivacy`.
 
 ---
 
@@ -150,10 +175,30 @@ explicitly, in the user's language:
 --------------------------------------------------------------------
 GUIDELINE 4.8 — LOGIN SERVICES
 --------------------------------------------------------------------
-Sign in with Apple is offered alongside the third-party providers, and is
-live in production. The sign-in sheet lists whatever the site advertises;
-"Continue with Apple" appears there. Email/username sign-in is also
-available.
+Sign in with Apple is offered alongside the third-party providers, is live in
+production, and uses the native AuthenticationServices control.
+
+The sign-in sheet offers exactly three routes:
+
+  1. Sign in with Apple (native, no web view)
+  2. Email or username (entirely in-app)
+  3. "Continue another way" — opens the site's own sign-in page in the system
+     browser, where the third-party providers (Google, GitHub, X, Telegram)
+     live
+
+Route 3 is one neutral button rather than one button per provider because all
+of them do the same thing: the flow opens Discourse's own login page, and that
+page carries the provider buttons. Only Apple and email are distinct code
+paths, which is why only those two are named.
+
+The browser route deliberately uses the shared system browser session
+(ASWebAuthenticationSession with prefersEphemeralWebBrowserSession = false), so
+a reader already signed in to Google is offered their account rather than
+having to type a password into a blank web view.
+
+An emailed "login link" option is deliberately absent: the link Discourse
+mails establishes a browser session, and the app adopts credentials from one
+place only, so offering it would be a button that appears to work and doesn't.
 
 --------------------------------------------------------------------
 GUIDELINE 5.1.1(v) — ACCOUNT DELETION
