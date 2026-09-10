@@ -272,6 +272,21 @@ final class DiscourseLogin {
                 // the password), and the challenge goes back reversed.
                 "password_confirmation": honeypot.value,
                 "challenge": String(honeypot.challenge.reversed()),
+                // The site requires an invite code (`require_invite_code`), and
+                // asking an app user to find one would make signing up
+                // impossible from here — so the app carries the one the admin
+                // set aside for it.
+                //
+                // Sent unconditionally. `UsersController#create` does
+                // `params.require(:invite_code)` when the setting is on, so
+                // omitting it is a 400 rather than a message about the code;
+                // and when the setting is *off* the parameter is ignored, so
+                // there is nothing to detect or branch on.
+                //
+                // Not a secret: it ships inside the binary and `strings` will
+                // find it. It is a speed bump for casual spam, not an access
+                // control — see the note on `DiscourseConfig.appInviteCode`.
+                "invite_code": DiscourseConfig.appInviteCode,
             ].merging(
                 // `user_fields[3]=Male`, the shape Rails parses back into a
                 // hash. Blank answers are dropped rather than sent empty: an

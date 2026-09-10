@@ -18,6 +18,26 @@ nonisolated enum DiscourseConfig {
     /// enable the native GIF search. Empty = GIF button disabled.
     static let klipyAPIKey = "EzZHqISrqNDXf1Jy8TdgG9WQzM1gqPlUYHoQrkZhL0X8WZIM8KL3XTSYatDZ83Bt"
 
+    /// The invite code the app registers with.
+    ///
+    /// The site has `require_invite_code` on, so `POST /users` refuses a signup
+    /// without one — and an app user has nowhere to get a code from. The admin
+    /// set this value aside for the app, so signing up from here works without
+    /// asking for something the reader doesn't have.
+    ///
+    /// **This is not a secret.** It ships in the binary, and anyone can read it
+    /// out of the IPA with `strings`. Once it is public, the site's invite gate
+    /// is open to anyone who bothers — including on the web, since the server
+    /// compares against one global value (`strip.downcase`, so case and spacing
+    /// don't matter). Treat it as a speed bump against casual spam, not as
+    /// access control.
+    ///
+    /// If the gate needs to mean something, the code has to stop being a shared
+    /// constant: the companion plugin would issue a short-lived or per-install
+    /// code that the app fetches, so revoking it doesn't require an App Store
+    /// release. Rotating this one does.
+    static let appInviteCode = "nodelocapp"
+
     /// Stable per-install id, generated once and memoized (static lets are
     /// initialized lazily and thread-safely) so authenticated requests don't
     /// hit UserDefaults on every call.
