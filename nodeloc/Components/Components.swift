@@ -872,14 +872,17 @@ struct HeaderIconButton: View {
                         .renderingMode(.original)
                         .resizable()
                         .scaledToFit()
-                        // Width only, height follows. The mark is 360×300, so
-                        // constraining a square would letterbox it and cost
-                        // ~17% of the width for nothing. Larger than the 14pt
-                        // symbol above because a symbol is drawn to read at
-                        // its nominal size while artwork fills its box; the
-                        // number came from rendering it beside the hamburger
-                        // it replaces.
-                        .frame(width: 24)
+                        // Width only, height follows: the mark is 1.76:1, and
+                        // a square frame would letterbox it.
+                        //
+                        // 28 of the 34pt control, which looks aggressive until
+                        // you know the asset was cropped first. As delivered,
+                        // the artwork filled 76% of its viewBox horizontally
+                        // and 50% vertically — the padding was drawn into the
+                        // file, so a bigger frame made the *box* bigger and the
+                        // mark no less lost. The viewBox now hugs the artwork
+                        // (97% × 95%), so this number is the mark's real size.
+                        .frame(width: 28)
                 }
             }
             .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)

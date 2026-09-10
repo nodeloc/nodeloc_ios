@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="360" height="300" viewBox="0 0 360 300" role="img" aria-label="NodeLoc nl ribbon (duotone)">
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="159" viewBox="34 67 280 159" role="img" aria-label="NodeLoc nl ribbon (duotone)">
   
   <defs><linearGradient id="nlGrad" x1="30" y1="230" x2="312" y2="70" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#009966"/><stop offset="0.55" stop-color="#22a35a"/><stop offset="1" stop-color="#ff9933"/></linearGradient></defs>
   <g fill="url(#nlGrad)"><path d="M38,222&#10;    C46,155 52,122 76,99 C106,71 156,77 170,129 C174,151 172,186 170,214&#10;    L136,214 C138,187 140,156 136,139 C127,112 98,112 88,139 C80,159 76,190 72,222&#10;    L55,202 L38,222 Z"/><path d="M138,206&#10;    C185,158 240,112 287,71&#10;    L289,93 L310,97&#10;    C262,140 210,182 170,215&#10;    L136,215 L138,206 Z"/></g>
