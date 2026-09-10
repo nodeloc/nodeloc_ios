@@ -56,6 +56,9 @@ struct PostDetailOverlay: View {
     /// Reports read progress (posts seen + time) so the server records it and
     /// the topic's unread dot clears.
     @State private var reader = TopicReadTracker()
+    /// Latches the pull-to-close, so the gesture can't fire `close()` on every
+    /// frame it stays past the threshold.
+    @State private var isClosing = false
     @State private var showSortDialog = false
     /// The user being replied to (drives the composer's "回复xxx" header). Its
     /// post number becomes `reply_to_post_number` on submit.
@@ -139,7 +142,19 @@ struct PostDetailOverlay: View {
             // later, unrelated topic opened in the same overlay.
             scrollTarget = app.pendingReplyPostNumber
             app.pendingReplyPostNumber = nil
+            // Reset per topic: the overlay is reused, and a latched close from
+            // the last one would fire on this one's first rubber-band.
+            isClosing = false
             await topic.load(topicID: post.id)
+            // Subscribed after loading, so a reply that arrives during the
+            // fetch is either already in the response or counted — never both,
+            // since the handler checks what is on screen.
+            topic.startLiveUpdates(topicID: post.id)
+        }
+        .onDisappear {
+            // A long poll for a topic nobody is reading is a connection and a
+            // rate-limit budget spent on nothing.
+            topic.stopLiveUpdates()
         }
         .task(id: post.id) {
             // Read-progress heartbeat: credit on-screen posts each second,
@@ -813,6 +828,20 @@ struct PostDetailOverlay: View {
         } action: { _, newValue in
             reveal.progress = newValue
         }
+        // Pull down past the top to close, the way a sheet does.
+        //
+        // A separate observer because the one above deliberately clamps at
+        // zero — the overscroll this needs is exactly what that throws away.
+        // Rubber-banding at the top produces small negative offsets all the
+        // time, so the threshold has to be well past anything a scroll
+        // produces on its own; 110pt is a deliberate pull.
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.y
+        } action: { _, offset in
+            guard !isClosing, offset < -110 else { return }
+            isClosing = true
+            close()
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg)
     }
@@ -828,10 +857,19 @@ struct PostDetailOverlay: View {
                     .frame(width: readerHeaderControlHeight, height: readerHeaderControlHeight)
             }
 
-            // Only this subview reads `reveal`, so scroll updates re-render the
-            // pill alone rather than the whole reader body.
-            RevealingView(reveal: reveal) {
-                nodePill(for: post)
+            // Updates take the pill over while there are any, and are shown
+            // at full opacity: the node name is decoration and can fade with
+            // the scroll, but "3 条更新" is the only thing telling the reader
+            // the page is behind, so hiding it at the top of the page — where
+            // a reader most plausibly sits waiting — would defeat it.
+            if topic.pendingUpdateCount > 0 {
+                updatePill
+            } else {
+                // Only this subview reads `reveal`, so scroll updates re-render
+                // the pill alone rather than the whole reader body.
+                RevealingView(reveal: reveal) {
+                    nodePill(for: post)
+                }
             }
 
             Spacer(minLength: 0)
@@ -882,6 +920,29 @@ struct PostDetailOverlay: View {
            let resolved = await NodeCatalog.shared.node(slug: post.node) {
             nodeSummary = resolved
         }
+    }
+
+    /// Replaces the node pill while replies are waiting.
+    private var updatePill: some View {
+        readerHeaderGlassButton(
+            borderShape: .capsule,
+            action: {
+                Task { await topic.loadPendingUpdates() }
+            }
+        ) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.accent)
+                Text("\(topic.pendingUpdateCount) 条更新")
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: readerHeaderControlHeight)
+        }
+        .transition(.scale(scale: 0.9).combined(with: .opacity))
     }
 
     private func nodePill(for post: Post) -> some View {

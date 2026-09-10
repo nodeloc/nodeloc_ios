@@ -194,6 +194,19 @@ final class TopicStore {
     /// How top-level reply threads are ordered.
     private(set) var replySort: ReplySort = .oldest
     private(set) var firstPostID: Int?
+    /// Replies that arrived while the reader was open and haven't been shown.
+    ///
+    /// Held rather than inserted, deliberately: dropping a reply into the
+    /// middle of a page someone is reading moves the text under their thumb.
+    /// Reddit's answer is a pill that says how many are waiting and lets the
+    /// reader decide, which is what this feeds.
+    private(set) var pendingUpdateIDs: [Int] = []
+    var pendingUpdateCount: Int { pendingUpdateIDs.count }
+
+    /// Live topic events, over the same MessageBus transport chat uses.
+    private let bus = MessageBusClient()
+    private var liveTopicID: Int?
+
     /// Whether this topic is a private message.
     ///
     /// PMs differ in more than styling: their replies are not served by the
@@ -852,22 +865,92 @@ final class TopicStore {
             redEnvelope = topic.redEnvelope
         }
 
-        // Fetched rather than assembled: this is the server's own row, with the
-        // cooked body, avatar and 小尾巴 already on it. One post, not a page.
-        guard let response = try? await client.topicPosts(topicID: topicID, postIDs: [id]),
-              let post = response.postStream.posts.first(where: { $0.id == id }) else { return }
+        // Shares the insertion path with replies that arrive over the bus —
+        // the placement rules are the same and were duplicated before.
+        // `totalReplyCount` is incremented there, so it is undone here to
+        // avoid counting this reply twice.
+        totalReplyCount -= 1
+        await insertFetchedReplies(ids: [id], topicID: topicID)
+    }
 
-        await parseContents(for: [post])
+    /// Subscribes to the topic's own bus channel, so new replies announce
+    /// themselves instead of being discovered by polling.
+    func startLiveUpdates(topicID: Int) {
+        guard liveTopicID != topicID else { return }
+        liveTopicID = topicID
+        bus.subscribe(channels: ["/topic/\(topicID)"]) { [weak self] event in
+            Task { @MainActor in
+                self?.handleTopicEvent(event)
+            }
+        }
+    }
 
-        let parentNumber = replyToPostNumber.flatMap { $0 > 1 ? $0 : nil }
-        if let parentNumber, attach(post, under: parentNumber, in: &nestedRoots) {
-            // Nested under the post it answers.
-        } else if replySort == .newest {
-            nestedRoots.insert(post, at: 0)
-        } else {
-            nestedRoots.append(post)
+    func stopLiveUpdates() {
+        bus.stop()
+        liveTopicID = nil
+        pendingUpdateIDs = []
+    }
+
+    /// Notes a newly created reply.
+    ///
+    /// Only `created`. Edits, likes and rebakes also come down this channel and
+    /// none of them is something to interrupt a reader for; if the payload
+    /// isn't shaped as expected nothing happens, which is the right failure —
+    /// a missing pill is invisible, a wrong one is a lie.
+    private func handleTopicEvent(_ event: MessageBusEvent) {
+        guard let payload = event.payload,
+              let root = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              root["type"] as? String == "created",
+              let id = root["id"] as? Int
+        else { return }
+
+        // Already on screen — most often this reader's own reply, which
+        // `insertPostedReply` has already placed.
+        guard !isLoaded(postID: id), !pendingUpdateIDs.contains(id) else { return }
+        pendingUpdateIDs.append(id)
+    }
+
+    private func isLoaded(postID: Int) -> Bool {
+        if firstPostID == postID { return true }
+        return flatten(nestedRoots).contains { $0.id == postID }
+    }
+
+    /// Shows the replies the pill has been counting.
+    func loadPendingUpdates() async {
+        guard let topicID, !pendingUpdateIDs.isEmpty else { return }
+        let ids = pendingUpdateIDs
+        // Cleared first: the pill should stop offering work already in flight.
+        pendingUpdateIDs = []
+        await insertFetchedReplies(ids: ids, topicID: topicID)
+    }
+
+    /// Fetches replies by id and threads them in, leaving everything already
+    /// on screen where it is.
+    ///
+    /// The server's own rows — cooked body, avatar and 小尾巴 included — rather
+    /// than anything assembled here, and one request for the batch.
+    private func insertFetchedReplies(ids: [Int], topicID: Int) async {
+        guard let response = try? await client.topicPosts(topicID: topicID, postIDs: ids) else { return }
+        let posts = response.postStream.posts.filter { ids.contains($0.id) }
+        guard !posts.isEmpty else { return }
+
+        await parseContents(for: posts)
+
+        // Oldest first, so a reply whose parent is also new finds it already
+        // attached rather than landing at the root.
+        for post in posts.sorted(by: { ($0.postNumber ?? 0) < ($1.postNumber ?? 0) }) {
+            let parentNumber = post.replyToPostNumber.flatMap { $0 > 1 ? $0 : nil }
+            if let parentNumber, attach(post, under: parentNumber, in: &nestedRoots) {
+                continue
+            }
+            if replySort == .newest {
+                nestedRoots.insert(post, at: 0)
+            } else {
+                nestedRoots.append(post)
+            }
         }
 
+        totalReplyCount += posts.count
         comments = buildNestedComments(from: nestedRoots)
     }
 
