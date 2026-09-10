@@ -14,9 +14,31 @@ nonisolated enum DiscourseConfig {
     static let appName = "NODELOC iOS"
     static let clientIDDefaultsKey = "nodeloc.client_id"
     /// Klipy API key for the GIF picker (nodeloc's discourse-gifs runs the Klipy
-    /// provider). It's a public theme setting on the web; paste it here to
-    /// enable the native GIF search. Empty = GIF button disabled.
-    static let klipyAPIKey = "EzZHqISrqNDXf1Jy8TdgG9WQzM1gqPlUYHoQrkZhL0X8WZIM8KL3XTSYatDZ83Bt"
+    /// provider). Empty = GIF button disabled, which is why a clone builds and
+    /// runs without one.
+    ///
+    /// Read from `Secrets.plist` rather than written here, because this
+    /// repository is public. The previous key was committed and therefore lives
+    /// in the git history for good — removing it from this file would not have
+    /// unpublished it, so it was rotated at Klipy instead and the replacement
+    /// never enters the repository.
+    ///
+    /// To enable GIF search locally, put a `Secrets.plist` beside `Info.plist`:
+    ///
+    ///     <dict><key>KlipyAPIKey</key><string>…</string></dict>
+    ///
+    /// It is gitignored, and the app folder is a synchronized group, so Xcode
+    /// picks it up with no project changes.
+    static let klipyAPIKey: String = {
+        guard let url = Bundle.main.url(forResource: "Secrets", withExtension: "plist"),
+              let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data, options: [], format: nil
+              ) as? [String: Any],
+              let key = plist["KlipyAPIKey"] as? String
+        else { return "" }
+        return key.trimmingCharacters(in: .whitespacesAndNewlines)
+    }()
 
     /// The invite code the app registers with.
     ///
