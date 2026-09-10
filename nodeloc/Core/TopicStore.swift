@@ -194,6 +194,14 @@ final class TopicStore {
     /// How top-level reply threads are ordered.
     private(set) var replySort: ReplySort = .oldest
     private(set) var firstPostID: Int?
+    /// Whether this topic is a private message.
+    ///
+    /// PMs differ in more than styling: their replies are not served by the
+    /// nested-replies route, and there is no reply tree to draw.
+    private(set) var isPrivateMessage = false
+    /// The `post_stream` from the last fetch, so the PM branch can build its
+    /// replies without asking again.
+    private var privateMessagePosts: [TopicPost] = []
     private var loadedID: Int?
     private var topicID: Int?
     private var allPosts: [TopicPost] = []
@@ -262,6 +270,9 @@ final class TopicStore {
         do {
             let topic = try await client.topic(id: topicID)
             let posts = topic.postStream.posts
+            // Kept for the private-message branch below, which builds its
+            // reply list from these rather than from the nested endpoint.
+            privateMessagePosts = posts
             firstPostID = posts.first?.id
             if let firstPost = posts.first {
                 firstAuthor = UserProfileTarget(
@@ -309,6 +320,7 @@ final class TopicStore {
             topicPinnedUntil = DiscourseFormat.date(topic.pinnedUntil)
             isPinClearedForMe = topic.unpinned ?? false
             isTopicBanner = topic.archetype == "banner"
+            isPrivateMessage = topic.archetype == "private_message"
             topicCategoryID = topic.categoryId
             let details = topic.details
             canEditTopic = details?.canEdit ?? false
@@ -328,8 +340,25 @@ final class TopicStore {
         } catch {
             // Leave content empty; the overlay falls back to the excerpt.
         }
-        // Replies come from the nested view (server-sorted).
-        await loadNested(reset: true)
+        if isPrivateMessage {
+            // A private message's replies come from the topic's own
+            // `post_stream`, which was already fetched and parsed above.
+            //
+            // Not from the nested view: that is discourse-community's route
+            // for public categories, and for a PM it answers with nothing — so
+            // a message thread showed its first post and then stopped, which
+            // is what "看不到回复" was. A PM has no reply tree to render
+            // anyway; it is a flat conversation.
+            nestedRoots = Array(privateMessagePosts.dropFirst())
+            comments = buildNestedComments(from: nestedRoots)
+            totalReplyCount = nestedRoots.count
+            // Nothing to page: `post_stream` came back whole, and the nested
+            // route — which is what `nestedHasMore` describes — was not asked.
+            nestedHasMore = false
+        } else {
+            // Replies come from the nested view (server-sorted).
+            await loadNested(reset: true)
+        }
         isLoading = false
     }
 
