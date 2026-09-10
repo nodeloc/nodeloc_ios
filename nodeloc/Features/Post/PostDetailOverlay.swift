@@ -828,17 +828,22 @@ struct PostDetailOverlay: View {
         } action: { _, newValue in
             reveal.progress = newValue
         }
-        // Pull down past the top to close, the way a sheet does.
+        // Pull down from the top to close, the way a sheet does.
         //
-        // A separate observer because the one above deliberately clamps at
-        // zero — the overscroll this needs is exactly what that throws away.
-        // Rubber-banding at the top produces small negative offsets all the
-        // time, so the threshold has to be well past anything a scroll
-        // produces on its own; 110pt is a deliberate pull.
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentOffset.y
-        } action: { _, offset in
-            guard !isClosing, offset < -110 else { return }
+        // Keyed on the *release*, not on the offset: an offset threshold alone
+        // closed the reader when you flung upward and momentum carried past
+        // the top, which is not a request to leave. At the moment a fling is
+        // released the offset is still positive — the overshoot happens
+        // afterwards, while decelerating — so requiring the finger to have
+        // just lifted separates "I pulled down" from "it bounced".
+        //
+        // Which is also how a sheet behaves, so the gesture should feel
+        // familiar rather than merely correct.
+        .onScrollPhaseChange { oldPhase, _, context in
+            guard !isClosing,
+                  oldPhase == .interacting || oldPhase == .tracking,
+                  context.geometry.contentOffset.y < -90
+            else { return }
             isClosing = true
             close()
         }
