@@ -95,6 +95,7 @@ private enum ChatRoute: Hashable {
 struct ChatView: View {
     @Environment(AppState.self) private var app
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
+    @Environment(\.usesTopTabBar) private var usesTopTabBar
     @State private var store = MessageCenterStore.shared
     @State private var selection: MessagePane = .chat
     @State private var chatFilter: ChatInboxFilter = .messages
@@ -130,8 +131,8 @@ struct ChatView: View {
                             .toolbar(.hidden, for: .tabBar)
                     }
                 }
-                .toolbar(sidebarIsPinned ? .visible : .hidden, for: .navigationBar)
-                .tabBarHeader(isPinned: sidebarIsPinned, needsNavigationStack: false) {
+                .toolbar(usesTopTabBar ? .visible : .hidden, for: .navigationBar)
+                .tabBarHeader(isPinned: usesTopTabBar, needsNavigationStack: false) {
                     inboxTitle
                 } trailing: {
                     inboxHeaderTools
@@ -141,7 +142,7 @@ struct ChatView: View {
 
     private var inboxBody: some View {
         VStack(spacing: 0) {
-            if !sidebarIsPinned {
+            if !usesTopTabBar {
                 messageHeader
             }
             messageTabs

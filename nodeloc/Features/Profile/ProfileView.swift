@@ -8,6 +8,7 @@ import SwiftUI
 struct ProfileView: View {
     @Environment(AppState.self) private var app
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
+    @Environment(\.usesTopTabBar) private var usesTopTabBar
     /// Shared so switching tabs doesn't discard the loaded profile.
     private var store = ProfileStore.shared
     /// Which sheet is up. A single `.sheet(item:)` rather than one modifier
@@ -68,14 +69,14 @@ struct ProfileView: View {
             .overlay(alignment: .top) {
                 // Hidden once its controls have moved into the iPad tab bar's
                 // row, or they would appear twice.
-                if !sidebarIsPinned {
+                if !usesTopTabBar {
                     floatingHeaderButtons(scrollProxy: proxy)
                         .padding(.top, UIApplication.topSafeAreaInset)
                 }
             }
             // Applied inside the ScrollViewReader because the identity capsule
             // scrolls back to the top, which needs this proxy.
-            .tabBarHeader(isPinned: sidebarIsPinned) {
+            .tabBarHeader(isPinned: usesTopTabBar) {
                 identityCapsule(scrollProxy: proxy)
                     .opacity(identityRevealProgress)
                     .allowsHitTesting(identityRevealProgress > 0.9)

@@ -12,6 +12,7 @@ import SwiftUI
 struct BrowseNodesOverlay: View {
     @Environment(AppState.self) private var app
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
+    @Environment(\.usesTopTabBar) private var usesTopTabBar
     @Environment(\.openURL) private var openURL
     @State private var store = NodeBrowseStore()
     @State private var query = ""
@@ -88,7 +89,9 @@ struct BrowseNodesOverlay: View {
 
     /// True only for the nodes tab on iPad. Presented as a modal this screen
     /// sits over another one, so there is no tab bar row for it to join.
-    private var usesTabBarRow: Bool { sidebarIsPinned && !showsCloseButton }
+    /// The tab bar's row is only available to a screen shown *as a tab*.
+    /// Opened as an overlay (with a close button) it draws its own header.
+    private var usesTabBarRow: Bool { usesTopTabBar && !showsCloseButton }
 
     private var browseTitle: some View {
         Text(headerTitle)

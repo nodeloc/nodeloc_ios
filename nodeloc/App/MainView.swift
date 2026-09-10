@@ -39,6 +39,13 @@ struct MainView: View {
     /// *both* orientations — so the aspect ratio decides. They're still needed
     /// to exclude phones: an iPhone Max in landscape is also wider than tall,
     /// but reports a compact vertical size class.
+    /// iPad draws the tab bar at the top in *both* orientations.
+    ///
+    /// Keyed on the idiom, not the size class: an iPhone Max in landscape also
+    /// reports a regular width and must keep the phone layout — which is the
+    /// same trap `isSidebarPinned` works around with its aspect-ratio check.
+    static let usesTopTabBar = UIDevice.current.userInterfaceIdiom == .pad
+
     private var isSidebarPinned: Bool {
         horizontalSizeClass == .regular
             && verticalSizeClass == .regular
@@ -148,7 +155,13 @@ struct MainView: View {
                 // cancelling deselects it and restores the previous tab — all
                 // system-managed, so there is no custom close button to fight
                 // the pill for the bottom-right corner.
-                .searchable(text: $app.searchQuery, isPresented: $searchPresented, prompt: AppString("搜索"))
+                // Phone only — see `searchFieldIfNeeded`.
+                .searchFieldIfNeeded(
+                    enabled: !Self.usesTopTabBar,
+                    text: $app.searchQuery,
+                    isPresented: $searchPresented,
+                    prompt: AppString("搜索")
+                )
                 // No `.searchScopes`: the system row only exists while search
                 // is presented, so it depended on a presentation binding that
                 // the system writes too and kept going missing. `SearchView`
@@ -187,6 +200,7 @@ struct MainView: View {
         // Read by SidebarMenuButton on every root screen, so the button and this
         // layout always agree about whether a drawer exists to open.
         .environment(\.sidebarIsPinned, isSidebarPinned)
+        .environment(\.usesTopTabBar, Self.usesTopTabBar)
         // Resizing or rotating into the pinned layout while the drawer happened
         // to be open would otherwise leave a stale `.sidebar` overlay behind the
         // pinned column, dimming the content and eating taps.
@@ -591,3 +605,30 @@ private func mainPreview(tab: Tab = .home, overlay: Overlay? = nil) -> some View
 #Preview("Sidebar") { mainPreview(overlay: .sidebar) }
 #Preview("Notifications") { mainPreview(overlay: .notifications) }
 #Preview("Search Overlay") { mainPreview(overlay: .search) }
+
+private extension View {
+    /// `.searchable`, applied only where it isn't a duplicate.
+    ///
+    /// On iPad the tab bar sits at the top and already carries the search tab,
+    /// so `.searchable` put a second search affordance in the toolbar for the
+    /// same destination. The tab is the one that survives: it is where search
+    /// actually lives, and the field was only ever added for the phone, whose
+    /// tab bar morphs into it.
+    ///
+    /// A modifier rather than an `if` around the whole chain, because the
+    /// branches would otherwise be two different view types and every
+    /// modifier after this one would have to be written twice.
+    @ViewBuilder
+    func searchFieldIfNeeded(
+        enabled: Bool,
+        text: Binding<String>,
+        isPresented: Binding<Bool>,
+        prompt: String
+    ) -> some View {
+        if enabled {
+            searchable(text: text, isPresented: isPresented, prompt: prompt)
+        } else {
+            self
+        }
+    }
+}

@@ -10,6 +10,7 @@ struct HomeView: View {
     /// Decided once by MainView; drives whether the bar's leading slot holds
     /// the menu button or the wordmark.
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
+    @Environment(\.usesTopTabBar) private var usesTopTabBar
     let postTransitionNamespace: Namespace.ID
     @State private var feed = FeedStore()
     @State private var lastOffset: CGFloat = 0
@@ -29,10 +30,17 @@ struct HomeView: View {
 
     var body: some View {
         feedBody
-            .tabBarHeader(isPinned: sidebarIsPinned) {
-                headerWordmark
+            .tabBarHeader(isPinned: usesTopTabBar) {
+                // The mark, not the wordmark. In the tab bar's own row the
+                // wordmark reads as a title for the row rather than as the
+                // app, and on iPad portrait it was doing that directly above
+                // a tab bar that already says where you are.
+                toolbarLeadingMark
             } trailing: {
-                headerTrailingAction
+                // No glass of our own here: the toolbar already puts each item
+                // in a glass container on iOS 26, and ours nested a circle
+                // inside that rounded rectangle.
+                headerTrailingAction(inToolbar: true)
             }
     }
 
@@ -41,7 +49,7 @@ struct HomeView: View {
             // Feed
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    Color.clear.frame(height: sidebarIsPinned ? 0 : headerHeight)
+                    Color.clear.frame(height: usesTopTabBar ? 0 : headerHeight)
 
                     if showsLoader {
                         feedSkeleton
@@ -115,7 +123,7 @@ struct HomeView: View {
                 handleScrollPhase(from: oldPhase, to: newPhase, context: context)
             }
 
-            if app.overlay != .post, !sidebarIsPinned {
+            if app.overlay != .post, !usesTopTabBar {
                 persistentHeaderButtons
             }
 
@@ -263,28 +271,68 @@ struct HomeView: View {
 
             Spacer()
 
-            headerTrailingAction
+            headerTrailingAction(inToolbar: false)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
     }
 
+    /// The app mark, for the tab bar's leading slot.
+    ///
+    /// Tappable only where there is a drawer to open: pinned, the sidebar is
+    /// already a column and a button that does nothing is worse than a logo.
+    @ViewBuilder
+    private var toolbarLeadingMark: some View {
+        if sidebarIsPinned {
+            Image("NodelocMark")
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 26)
+                .accessibilityLabel("NodeLoc")
+        } else {
+            SidebarMenuButton()
+        }
+    }
+
     /// 发帖 for members, 登录 for guests — posting needs an account either way.
     /// Shared so the floating header and the iPad toolbar show the same control.
+    ///
+    /// - Parameter inToolbar: drops this view's own glass, because a toolbar
+    ///   item on iOS 26 already sits in a glass container and the two nest
+    ///   visibly — a circle inside a rounded rectangle.
     @ViewBuilder
-    private var headerTrailingAction: some View {
-        if app.isGuest {
-            GuestLoginButton()
+    private func headerTrailingAction(inToolbar: Bool) -> some View {
+        Group {
+            if app.isGuest {
+                GuestLoginButton()
+            } else {
+                composeButton(inToolbar: inToolbar)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func composeButton(inToolbar: Bool) -> some View {
+        let label = Image(systemName: "plus")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(Theme.accent)
+            .frame(width: 34, height: 34)
+
+        // Not `glassButton(tint: nil)` for the toolbar case: an untinted glass
+        // is still a glass, and what doubles up there is the glass itself
+        // rather than its colour.
+        if inToolbar {
+            Button {
+                withAnimation(.overlayPush) { app.overlay = .compose }
+            } label: {
+                label
+            }
         } else {
             Button {
-                withAnimation(.overlayPush) {
-                    app.overlay = .compose
-                }
+                withAnimation(.overlayPush) { app.overlay = .compose }
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 34, height: 34)
+                label
             }
             .glassButton(tint: Theme.accent.opacity(0.14), shape: .circle)
             .shadow(color: .black.opacity(0.08), radius: 9, y: 6)

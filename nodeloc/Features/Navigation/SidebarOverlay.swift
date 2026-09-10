@@ -16,6 +16,16 @@ extension EnvironmentValues {
     /// *regular* horizontal size class, so `horizontalSizeClass` alone would
     /// hide the menu button on a phone that still needs it.
     @Entry var sidebarIsPinned: Bool = false
+    /// Whether the tab bar is drawn at the top of the content, so a screen's
+    /// own controls belong in its toolbar row rather than in a floating header
+    /// of their own.
+    ///
+    /// Distinct from `sidebarIsPinned`, which answers a different question —
+    /// whether the sidebar is a permanent column. One flag was doing both, and
+    /// they disagree on iPad portrait: the drawer is still a drawer there, but
+    /// the tab bar is still at the top, so the floating header ended up as a
+    /// second row underneath it.
+    @Entry var usesTopTabBar: Bool = false
 }
 
 /// The width of the sidebar when it's pinned open beside the content.
