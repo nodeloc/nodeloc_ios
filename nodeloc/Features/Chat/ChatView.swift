@@ -1220,6 +1220,7 @@ private struct ChatConversationView: View {
     @State private var failedMessage: ChatConversationMessage?
     /// Watched so the outbox sends itself the moment a network path returns.
     @State private var reachability = NetworkReachability.shared
+    @Environment(\.scenePhase) private var scenePhase
     /// Set by the pinned bar; consumed by the transcript's scroll.
     @State private var pinJumpTarget: Int?
     @State private var isShowingAddMembers = false
@@ -1381,6 +1382,20 @@ private struct ChatConversationView: View {
         .onChange(of: reachability.isOnline) { _, isOnline in
             guard isOnline else { return }
             Task { await store.drainOutbox(channelID: chat.id, includingFailed: true) }
+        }
+        // A long poll cannot be serviced by a suspended app, and iOS tears the
+        // connection down regardless — so it is stopped on the way out and
+        // reconnected on the way back, which is also the moment to ask what
+        // was missed. Without this the transcript came back silently stale.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                Task { await store.resumeLiveUpdates(chat: chat) }
+            case .background, .inactive:
+                store.stopLiveUpdates()
+            @unknown default:
+                break
+            }
         }
         .onDisappear {
             store.stopLiveUpdates()

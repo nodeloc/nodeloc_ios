@@ -47,12 +47,20 @@ struct SearchOverlay: View {
     /// Text to open with, e.g. "#slug " when scoped to a node. Defaults to
     /// empty so the existing call sites are unaffected.
     var initialQuery: String = ""
+    /// How to close. Nil means "clear `app.overlay`", which is how `MainView`
+    /// presents this.
+    ///
+    /// A page that presents this itself must pass its own dismissal, because
+    /// `app.overlay` draws in `MainView` — beneath any full-screen cover. The
+    /// node page needs that: it can be inside one.
+    var onClose: (() -> Void)?
 
     var body: some View {
         SearchExperience(
             postTransitionNamespace: postTransitionNamespace,
             mode: .overlay,
-            initialQuery: initialQuery
+            initialQuery: initialQuery,
+            onClose: onClose
         )
     }
 }
@@ -67,6 +75,7 @@ private struct SearchExperience: View {
     let postTransitionNamespace: Namespace.ID
     let mode: SearchExperienceMode
     var initialQuery: String = ""
+    var onClose: (() -> Void)?
 
     @State private var store = SearchStore()
     private let history = SearchHistoryStore.shared
@@ -581,6 +590,10 @@ private struct SearchExperience: View {
     private func dismissOverlay() {
         guard isOverlay else { return }
         searchFocused = false
+        if let onClose {
+            onClose()
+            return
+        }
         withAnimation(.overlayPush) {
             app.overlay = nil
         }

@@ -222,6 +222,13 @@ struct MainView: View {
             // with the tab bar's search pill, and the UIKit pill wins that hit
             // test. That tap was aimed at the X — bounce the selection and
             // close the overlay.
+            //
+            // Currently unreachable: node-scoped search moved to a local
+            // `fullScreenCover` (it has to — `app.overlay` draws under any
+            // cover, and the node page can be inside one), so nothing sets
+            // `.search` here now. Kept because the conflict it describes is
+            // real and would come straight back with any app-level search
+            // overlay.
             if newValue == .search, app.overlay == .search {
                 app.tab = oldValue == .search ? lastContentTab : oldValue
                 withAnimation(.overlayPush) {

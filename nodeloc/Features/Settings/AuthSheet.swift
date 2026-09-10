@@ -167,30 +167,33 @@ struct AuthFlowOverlay: View {
                 }
 
                 VStack(spacing: 12) {
-                    TextField("电子邮件地址或用户名", text: $loginIdentifier)
-                        .textFieldStyle(.roundedBorder)
-                        .textContentType(.username)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.next)
+                    AuthInputField(
+                        AppString("电子邮件地址或用户名"),
+                        text: $loginIdentifier,
+                        keyboard: .emailAddress,
+                        contentType: .username,
+                        submitLabel: .next
+                    )
 
-                    SecureField("密码", text: $loginPassword)
-                        .textFieldStyle(.roundedBorder)
-                        .textContentType(.password)
-                        .submitLabel(.go)
-                        .onSubmit { if canContinueLogin { submitLogin() } }
+                    AuthInputField(
+                        AppString("密码"),
+                        text: $loginPassword,
+                        secure: true,
+                        contentType: .password,
+                        submitLabel: .go,
+                        onSubmit: { if canContinueLogin { submitLogin() } }
+                    )
 
                     if needsSecondFactor {
-                        TextField(usingBackupCode ? AppString("备用码") : AppString("两步验证码"), text: $otpCode)
-                            .id(Self.otpFieldID)
-                            .focused($otpFocused)
-                            .textFieldStyle(.roundedBorder)
-                            .textContentType(.oneTimeCode)
-                            .keyboardType(usingBackupCode ? .asciiCapable : .numberPad)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .onSubmit { if canContinueLogin { submitLogin() } }
+                        AuthInputField(
+                            usingBackupCode ? AppString("备用码") : AppString("两步验证码"),
+                            text: $otpCode,
+                            keyboard: usingBackupCode ? .asciiCapable : .numberPad,
+                            contentType: .oneTimeCode,
+                            onSubmit: { if canContinueLogin { submitLogin() } },
+                            focus: $otpFocused
+                        )
+                        .id(Self.otpFieldID)
 
                         HStack {
                             Label("此账号已开启两步验证", systemImage: "lock.shield")
@@ -340,14 +343,14 @@ struct AuthFlowOverlay: View {
             VStack(spacing: 0) {
                 stepHeader("输入你的电子邮件", subtitle: "我们会向这个地址发送账户激活邮件。")
 
-                TextField("电子邮件", text: $email)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.emailAddress)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.next)
-                    .onSubmit { if canContinueEmail { path.append(.username) } }
+                AuthInputField(
+                    AppString("电子邮件"),
+                    text: $email,
+                    keyboard: .emailAddress,
+                    contentType: .emailAddress,
+                    submitLabel: .next,
+                    onSubmit: { if canContinueEmail { path.append(.username) } }
+                )
 
                 inlineError
             }
@@ -376,16 +379,16 @@ struct AuthFlowOverlay: View {
                     subtitle: "挑选一个要在 NODELOC 上使用的名字。请谨慎选择，选定后无法修改。"
                 )
 
-                TextField("用户名", text: $username)
-                    .textFieldStyle(.roundedBorder)
-                    .textContentType(.username)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.next)
-                    .onChange(of: username) { _, newValue in
-                        scheduleUsernameCheck(newValue)
-                    }
-                    .onSubmit { if canContinueUsername { path.append(.password) } }
+                AuthInputField(
+                    AppString("用户名"),
+                    text: $username,
+                    contentType: .username,
+                    submitLabel: .next,
+                    onSubmit: { if canContinueUsername { path.append(.password) } }
+                )
+                .onChange(of: username) { _, newValue in
+                    scheduleUsernameCheck(newValue)
+                }
 
                 if let usernameAvailable, !username.isEmpty {
                     Label(
@@ -424,13 +427,16 @@ struct AuthFlowOverlay: View {
             VStack(spacing: 0) {
                 stepHeader("设置密码", subtitle: nil)
 
-                SecureField("密码", text: $password)
-                    .textFieldStyle(.roundedBorder)
+                AuthInputField(
+                    AppString("密码"),
+                    text: $password,
+                    secure: true,
                     // .newPassword is what triggers the system's strong-password
                     // suggestion and the keychain/Face ID save prompt.
-                    .textContentType(.newPassword)
-                    .submitLabel(.next)
-                    .onSubmit { if canContinuePassword { advancePastPassword() } }
+                    contentType: .newPassword,
+                    submitLabel: .next,
+                    onSubmit: { if canContinuePassword { advancePastPassword() } }
+                )
 
                 Label(
                     AppString("密码必须至少包含 10 个字符"),

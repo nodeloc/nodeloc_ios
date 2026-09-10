@@ -4574,10 +4574,92 @@ final class ChatConversationStore {
     private func startLiveUpdates(_ chat: Chat) {
         guard liveChannelID != chat.id else { return }
         liveChannelID = chat.id
-        bus.subscribe(channels: ["/chat/\(chat.id)"]) { [weak self] _ in
+        bus.subscribe(channels: ["/chat/\(chat.id)"]) { [weak self] event in
             guard let self else { return }
-            Task { await self.refreshLatest(channelID: chat.id) }
+            Task { await self.handle(event, channelID: chat.id) }
         }
+    }
+
+    /// Handles one live event.
+    ///
+    /// The cheap path first: a `sent` event carries the whole message, so it
+    /// can be appended without asking the server anything. Everything else —
+    /// edits, deletions, reactions — and any payload that isn't shaped the way
+    /// this expects falls back to refetching the newest page.
+    ///
+    /// That fallback is deliberate rather than defensive padding: the payload
+    /// contract belongs to a plugin that can change, and being one round trip
+    /// slower is a much better failure than a transcript that silently stops
+    /// updating.
+    private func handle(_ event: MessageBusEvent, channelID: Int) async {
+        if let payload = event.payload, await appendFromBus(payload, channelID: channelID) {
+            return
+        }
+        await refreshLatest(channelID: channelID)
+    }
+
+    /// Appends a message straight from a bus payload. Returns whether it did.
+    private func appendFromBus(_ payload: Data, channelID: Int) async -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              root["type"] as? String == "sent",
+              let message = root["chat_message"] as? [String: Any],
+              let id = message["id"] as? Int
+        else { return false }
+
+        // A thread reply doesn't belong in the channel transcript; the thread
+        // view reads its own list.
+        guard message["thread_id"] == nil || message["thread_id"] is NSNull else {
+            return false
+        }
+
+        // Already here: our own message that the send already reconciled, or a
+        // duplicate publication. Handled rather than refetched — this is the
+        // common case for anything you send yourself.
+        if messages.contains(where: { $0.id == id }) { return true }
+
+        guard let messageData = try? JSONSerialization.data(withJSONObject: message),
+              let messageText = String(data: messageData, encoding: .utf8),
+              let envelope = "{\"messages\":[\(messageText)]}".data(using: .utf8),
+              let response = Self.decodeSnapshot(envelope),
+              let mapped = ChatMessageMapper.messages(from: response).first
+        else { return false }
+
+        try? await ChatStorage.shared.store(
+            messages: [StoredMessage(
+                id: id,
+                threadID: nil,
+                createdAt: message["created_at"] as? String,
+                payload: messageText
+            )],
+            channelID: channelID,
+            // Appending the very next message onto what is already there.
+            isContiguous: true
+        )
+
+        // If this is the server's copy of something queued here, the queued
+        // row goes — otherwise the message would appear twice, once as the
+        // optimistic bubble and once as itself.
+        if mapped.isMine, let match = pending.first(where: { $0.channelID == channelID && $0.body == mapped.text }) {
+            try? await ChatStorage.shared.dequeue(localID: match.localID)
+            pending.removeAll { $0.localID == match.localID }
+        }
+
+        applyChannelMessages(messages.filter { $0.id > 0 } + [mapped])
+        channelInitialScrollMessageID = id
+        channelInitialScrollIsUnread = false
+        return true
+    }
+
+    /// Reconnects after the app was in the background, and catches up.
+    ///
+    /// Two steps, both needed: the long poll is stopped on the way out (a
+    /// suspended app cannot service it, and iOS tears the connection down
+    /// anyway), and whatever arrived while it was down is only learned by
+    /// asking.
+    func resumeLiveUpdates(chat: Chat) async {
+        startLiveUpdates(chat)
+        await refreshLatest(channelID: chat.id)
+        await drainOutbox(channelID: chat.id, includingFailed: true)
     }
 
     /// Whether there is more history above what is on screen.

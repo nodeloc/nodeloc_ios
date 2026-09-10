@@ -5,9 +5,10 @@
 //  The two pieces that make chat feel like a messenger:
 //
 //  - MessageBusClient: a minimal client for Discourse's MessageBus long-poll
-//    endpoint — the same transport the web client uses for live chat. Events
-//    are treated purely as "this channel changed" signals; the store refetches
-//    through its existing mappers, which keeps this client tiny.
+//    endpoint — the same transport the web client uses for live chat. The
+//    payload is handed on intact, because for the common event — someone sent
+//    a message — it already *contains* that message, and refetching a page to
+//    learn what the server just told us is a round trip per message.
 //
 //  Per-channel snapshots used to live here too. They were replaced by
 //  `ChatStorage`, which keeps message history and the send queue in SQLite —
@@ -18,17 +19,33 @@
 
 import Foundation
 
+/// One MessageBus publication.
+struct MessageBusEvent {
+    let channel: String
+    /// The event's own `data`, still JSON.
+    ///
+    /// Passed as bytes rather than a parsed dictionary so the consumer can
+    /// decode it with the very models a REST response goes through — the
+    /// message inside a chat event is the same shape `/chat/:id/messages`
+    /// returns, and having one decoder for both is what keeps the live path
+    /// and the fetched path from drifting.
+    let payload: Data?
+}
+
 @MainActor
 final class MessageBusClient {
     private let client = DiscourseClient()
     private let clientID = UUID().uuidString
     private var positions: [String: Int] = [:]
     private var pollTask: Task<Void, Never>?
-    private var handler: ((String) -> Void)?
+    private var handler: ((MessageBusEvent) -> Void)?
+    /// Consecutive failures, for backing off.
+    private var failures = 0
 
     /// Subscribes to a set of bus channels, replacing any previous set.
-    /// `onEvent` fires with the channel name whenever it publishes.
-    func subscribe(channels: [String], onEvent: @escaping (String) -> Void) {
+    /// `onEvent` fires with the channel name and its payload whenever one
+    /// publishes.
+    func subscribe(channels: [String], onEvent: @escaping (MessageBusEvent) -> Void) {
         stop()
         positions = Dictionary(uniqueKeysWithValues: channels.map { ($0, -1) })
         handler = onEvent
@@ -44,7 +61,12 @@ final class MessageBusClient {
         pollTask?.cancel()
         pollTask = nil
         handler = nil
+        failures = 0
     }
+
+    /// Whether a subscription is currently running, so a caller resuming from
+    /// the background can tell "reconnect" from "already connected".
+    var isRunning: Bool { pollTask != nil }
 
     private func pollOnce() async {
         // Nothing to poll: yield with a sleep rather than returning, or the
@@ -56,7 +78,7 @@ final class MessageBusClient {
         }
         do {
             let data = try await client.messageBusPoll(clientID: clientID, positions: positions)
-            var fired: Set<String> = []
+            var fired: [MessageBusEvent] = []
             let events = Self.events(in: data)
             for event in events {
                 guard let channel = event["channel"] as? String else { continue }
@@ -73,15 +95,26 @@ final class MessageBusClient {
                 guard positions[channel] != nil,
                       let id = event["message_id"] as? Int else { continue }
                 positions[channel] = id
-                fired.insert(channel)
+
+                // The payload, not just the fact that something happened.
+                let payload = event["data"].flatMap { data -> Data? in
+                    try? JSONSerialization.data(withJSONObject: data)
+                }
+                fired.append(MessageBusEvent(channel: channel, payload: payload))
             }
-            for channel in fired {
-                handler?(channel)
+            failures = 0
+            for event in fired {
+                handler?(event)
             }
         } catch {
-            // Transient network trouble: back off briefly before re-polling,
-            // or a dead connection would spin this loop hot.
-            try? await Task.sleep(for: .seconds(4))
+            // Exponential, with jitter. A flat delay meant a device that is
+            // simply offline retried at a fixed rate forever — on the phone's
+            // battery and the server's connection budget — and every client
+            // that lost the network at the same moment came back in lockstep.
+            failures = min(failures + 1, 6)
+            let backoff = min(pow(2, Double(failures)), 60)
+            let jitter = Double.random(in: 0...(backoff * 0.3))
+            try? await Task.sleep(for: .seconds(backoff + jitter))
         }
     }
 

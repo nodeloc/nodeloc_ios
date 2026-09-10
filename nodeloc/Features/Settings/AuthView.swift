@@ -918,6 +918,14 @@ struct AuthInputField: View {
     @Binding var text: String
     var secure = false
     var keyboard: UIKeyboardType = .default
+    /// Passed through because it is load-bearing, not decoration:
+    /// `.newPassword` is what triggers the system's strong-password suggestion
+    /// and the keychain save prompt, and `.oneTimeCode` is what lets a texted
+    /// code autofill. A field without it looks identical and quietly loses
+    /// both.
+    var contentType: UITextContentType?
+    var submitLabel: SubmitLabel = .return
+    var onSubmit: (() -> Void)?
     /// Optional, so callers that never move focus don't have to own a
     /// `FocusState` just to use the field.
     var focus: FocusState<Bool>.Binding?
@@ -934,12 +942,18 @@ struct AuthInputField: View {
         text: Binding<String>,
         secure: Bool = false,
         keyboard: UIKeyboardType = .default,
+        contentType: UITextContentType? = nil,
+        submitLabel: SubmitLabel = .return,
+        onSubmit: (() -> Void)? = nil,
         focus: FocusState<Bool>.Binding? = nil
     ) {
         self.placeholder = placeholder
         self._text = text
         self.secure = secure
         self.keyboard = keyboard
+        self.contentType = contentType
+        self.submitLabel = submitLabel
+        self.onSubmit = onSubmit
         self.focus = focus
     }
 
@@ -956,6 +970,9 @@ struct AuthInputField: View {
             .textFieldStyle(.plain)
             .tint(Color(hex: 0x3366FF))
             .keyboardType(keyboard)
+            .textContentType(contentType)
+            .submitLabel(submitLabel)
+            .onSubmit { onSubmit?() }
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .focused($isFocused)

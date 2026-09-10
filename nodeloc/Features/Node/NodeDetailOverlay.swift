@@ -44,6 +44,12 @@ struct NodeDetailOverlay: View {
     /// behind this page's cover: it took keyboard focus, so the keyboard rose
     /// over a node page that looked untouched.
     @State private var isComposing = false
+    /// Node-scoped search, presented here rather than through `app.overlay`.
+    ///
+    /// Same reason as `isComposing`: this page can itself be inside a
+    /// full-screen cover, and `app.overlay` draws in `MainView` — underneath
+    /// that cover. Setting it opened a search screen nobody could see.
+    @State private var isSearching = false
     @Namespace private var readerNamespace
 
     private let headerControlHeight: CGFloat = 34
@@ -111,6 +117,15 @@ struct NodeDetailOverlay: View {
         }
         // The composer, presented from here rather than through `app.overlay`
         // — see `isComposing`.
+        .fullScreenCover(isPresented: $isSearching) {
+            SearchOverlay(
+                // This page's own namespace, the same one its post reader
+                // uses — there is no outer one to inherit here.
+                postTransitionNamespace: readerNamespace,
+                initialQuery: app.searchInitialQuery,
+                onClose: { isSearching = false }
+            )
+        }
         .fullScreenCover(isPresented: $isComposing) {
             ComposeOverlay(onClose: { isComposing = false })
                 .appPresentationHost(app: app)
@@ -472,9 +487,7 @@ struct NodeDetailOverlay: View {
     private func startNodeSearch() {
         let slug = store.slug.isEmpty ? node.slug : store.slug
         app.searchInitialQuery = "#\(slug) "
-        withAnimation(.panelSlide) {
-            app.overlay = .search
-        }
+        isSearching = true
     }
 
     /// Inline 加入 button, sitting on the name row like Reddit's.
