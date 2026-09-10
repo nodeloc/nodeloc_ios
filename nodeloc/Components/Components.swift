@@ -833,16 +833,55 @@ enum FloatingHeader {
 /// A circular glass icon button for a screen's top bar. One definition so the
 /// sidebar toggle, settings gear and friends are visually identical.
 struct HeaderIconButton: View {
-    let systemName: String
+    /// A symbol or a bundled image, so the brand mark can sit in one of these
+    /// without a second copy of the glass, shadow and sizing below.
+    private enum Icon {
+        case symbol(String)
+        case asset(String)
+    }
+
+    private let icon: Icon
     var accessibilityLabel: String
     let action: () -> Void
 
+    init(systemName: String, accessibilityLabel: String, action: @escaping () -> Void) {
+        self.icon = .symbol(systemName)
+        self.accessibilityLabel = accessibilityLabel
+        self.action = action
+    }
+
+    init(asset: String, accessibilityLabel: String, action: @escaping () -> Void) {
+        self.icon = .asset(asset)
+        self.accessibilityLabel = accessibilityLabel
+        self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Theme.headerText)
-                .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
+            Group {
+                switch icon {
+                case .symbol(let name):
+                    Image(systemName: name)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.headerText)
+                case .asset(let name):
+                    // `.original`, or the asset is template-tinted to
+                    // `Theme.headerText` and the mark loses its colours — the
+                    // whole point of using it.
+                    Image(name)
+                        .renderingMode(.original)
+                        .resizable()
+                        .scaledToFit()
+                        // Larger than the 14pt symbol above: a symbol is drawn
+                        // to read at its nominal size, while artwork fills its
+                        // box, and at 14 the mark's inner dot was all that
+                        // registered. 22 matches the hamburger's visual weight
+                        // — measured by rendering them side by side, not
+                        // guessed.
+                        .frame(width: 22, height: 22)
+                }
+            }
+            .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
         }
         .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
         .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
@@ -909,7 +948,11 @@ struct SidebarMenuButton: View {
     var body: some View {
         // Nothing to open when the sidebar is already a permanent column.
         if !sidebarIsPinned {
-            HeaderIconButton(systemName: "line.3.horizontal", accessibilityLabel: AppString("菜单")) {
+            // The brand mark rather than a hamburger. It keeps the
+            // accessibility label "菜单", because the mark does not say
+            // "menu" to anyone who hasn't already learned it — VoiceOver
+            // users and the tap target should not have to.
+            HeaderIconButton(asset: "NodelocMark", accessibilityLabel: AppString("菜单")) {
                 // Matches the drag-to-open animation in MainView.
                 withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
                     app.overlay = .sidebar
