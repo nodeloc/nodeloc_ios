@@ -4076,7 +4076,7 @@ final class ChatConversationStore {
                 threadID: thread.id,
                 targetMessageID: targetMessageID
             )
-            threadMessages = ChatMessageMapper.messages(from: response)
+            applyThreadMessages(ChatMessageMapper.messages(from: response), threadID: thread.id)
             let target = initialScrollTarget(
                 for: threadMessages,
                 targetMessageID: targetMessageID ?? response.meta?.targetMessageId,
@@ -4664,7 +4664,10 @@ final class ChatConversationStore {
                     threadID: selectedThread.id
                 )
                 let previousThreadLast = threadMessages.last?.id
-                threadMessages = ChatMessageMapper.messages(from: threadResponse)
+                applyThreadMessages(
+                    ChatMessageMapper.messages(from: threadResponse),
+                    threadID: selectedThread.id
+                )
                 if let last = threadMessages.last?.id, last != previousThreadLast {
                     threadInitialScrollMessageID = last
                     threadInitialScrollIsUnread = false
