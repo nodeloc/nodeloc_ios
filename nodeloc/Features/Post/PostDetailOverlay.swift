@@ -152,7 +152,13 @@ struct PostDetailOverlay: View {
                 if Task.isCancelled { break }
                 reader.tick()
                 ticks += 1
-                if ticks % 10 == 0 { await reader.flush() }
+                // Every 30s, not every 10. This is read-progress reporting, so
+                // nothing a reader sees depends on it being prompt — and at
+                // ten seconds it was six writes a minute per open topic,
+                // sharing a rate-limit budget with the requests that actually
+                // draw the screen. The flush below still runs on leaving, so
+                // nothing is lost by batching harder.
+                if ticks % 30 == 0 { await reader.flush() }
             }
             await reader.flush()
         }

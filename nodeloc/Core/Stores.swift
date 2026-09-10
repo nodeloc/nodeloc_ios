@@ -4038,6 +4038,13 @@ final class ChatConversationStore {
     /// so a message survives the app being killed between pressing send and
     /// the request completing.
     private(set) var pending: [OutboxItem] = []
+    /// Whether this site serves chat threads at all.
+    ///
+    /// Static because it describes the install, not a channel or a store, and
+    /// it only ever moves one way: a 404 means the feature is off and will
+    /// stay off for this launch.
+    private static var chatThreadsAvailable = true
+
     /// Optimistic rows are given negative ids so they can never collide with a
     /// server id, which makes `id > 0` the test for "acknowledged".
     private var loadedChannelID: Int?
@@ -4196,12 +4203,23 @@ final class ChatConversationStore {
         startLiveUpdates(chat)
         await loadChannelSettings(chat.id)
 
-        do {
-            let response = try await client.chatThreads(channelID: chat.id)
-            channelThreads = ChatThreadMapper.threads(from: response)
-        } catch DiscourseError.badResponse(let code, _) where code == 404 {
-            channelThreads = []
-        } catch {
+        // Threads are a chat feature this install may not have enabled, and a
+        // 404 is how it says so. Asked once per launch rather than once per
+        // channel open: the answer is a property of the site, not of the
+        // channel, and it was costing a guaranteed-to-fail request every time
+        // a conversation was opened — which counts against the rate limit
+        // exactly as much as a useful one.
+        if Self.chatThreadsAvailable {
+            do {
+                let response = try await client.chatThreads(channelID: chat.id)
+                channelThreads = ChatThreadMapper.threads(from: response)
+            } catch DiscourseError.badResponse(let code, _) where code == 404 {
+                Self.chatThreadsAvailable = false
+                channelThreads = []
+            } catch {
+                channelThreads = []
+            }
+        } else {
             channelThreads = []
         }
 

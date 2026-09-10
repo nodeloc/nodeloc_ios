@@ -170,19 +170,25 @@ struct DiscourseClient {
         // once) can trip it. One short retry turns a screen that came up empty
         // into one that just took a moment.
         //
-        // Reads only: replaying a POST could double-post. The server says how
-        // long to wait in `Retry-After`; the clamp keeps a long value from
-        // hanging the view.
+        // Reads only: replaying a POST could double-post.
         if let http = response as? HTTPURLResponse,
            http.statusCode == 429,
            retriesRemaining > 0,
            (request.httpMethod ?? "GET").uppercased() == "GET" {
-            let wait = Self.retryDelay(from: http)
+            let asked = Self.retryDelay(from: http, body: data) ?? 0.8
+            if asked <= Self.maximumRetryWait {
+                // A little jitter, so several calls rejected together don't
+                // return in lockstep and trip the limit again as a group.
+                let wait = max(asked, 0.4) + Double.random(in: 0...0.3)
+                #if DEBUG
+                print("[DiscourseAPI] 429 \(request.url?.path ?? "") — retrying in \(String(format: "%.1f", wait))s")
+                #endif
+                try? await Task.sleep(for: .seconds(wait))
+                return try await perform(request, retriesRemaining: retriesRemaining - 1)
+            }
             #if DEBUG
-            print("[DiscourseAPI] 429 \(request.url?.path ?? "") — retrying in \(wait)s")
+            print("[DiscourseAPI] 429 \(request.url?.path ?? "") — server asked for \(asked)s, giving up rather than retrying early")
             #endif
-            try? await Task.sleep(for: .seconds(wait))
-            return try await perform(request, retriesRemaining: retriesRemaining - 1)
         }
 
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -234,9 +240,30 @@ struct DiscourseClient {
 
     /// `Retry-After` when the server sends one, else a short default. Clamped
     /// so a generous server value can't leave a screen waiting.
-    private static func retryDelay(from response: HTTPURLResponse) -> Double {
-        let advertised = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-        return min(max(advertised ?? 0.8, 0.4), 3)
+    /// The longest a retry will wait before giving up instead.
+    ///
+    /// Past this the request is abandoned rather than delayed. Waiting 20s
+    /// behind a screen is not a fix, and — more to the point — *retrying early*
+    /// is strictly worse than not retrying: it earns a second 429, and each
+    /// rejected request extends the window. That is visible in the wild as a
+    /// countdown that never counts down (20s → 16s → 12s → 9s across
+    /// successive attempts), which is the client feeding its own block.
+    private static let maximumRetryWait: Double = 5
+
+    /// How long the server asked us to wait, or nil if it didn't say.
+    ///
+    /// The body is authoritative for Discourse — it answers with
+    /// `extras.wait_seconds` — and `Retry-After` is the HTTP-level fallback,
+    /// which a proxy may round or drop. Neither is clamped downwards any more;
+    /// the old code capped the answer at 3s, so a server asking for 20 was
+    /// always retried 17s too early.
+    private static func retryDelay(from response: HTTPURLResponse, body: Data) -> Double? {
+        if let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let extras = object["extras"] as? [String: Any] {
+            if let seconds = extras["wait_seconds"] as? Double { return seconds }
+            if let seconds = extras["wait_seconds"] as? Int { return Double(seconds) }
+        }
+        return response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
