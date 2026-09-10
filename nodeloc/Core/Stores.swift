@@ -2854,6 +2854,10 @@ private enum ChatCookedContentParser {
 
 @MainActor
 @Observable
+/// Unused. `MessageCenterStore` owns the chat channel list — see its
+/// `refreshChats`. Kept only because deleting a type is a separate decision
+/// from noticing it is orphaned; nothing constructs this, so editing it has no
+/// effect on the app.
 final class ChatStore {
     private let client = DiscourseClient()
 
@@ -3200,10 +3204,18 @@ final class MessageCenterStore {
     /// Re-reads just the channel list. Cheap enough to run per event, and it
     /// carries everything a row shows: last message, unread count, ordering.
     private func refreshChats() async {
-        guard let response = try? await client.chatChannels() else { return }
-        chats = ChatListMapper.chats(from: response)
+        guard let result = try? await client.chatChannelsWithRaw() else { return }
+        chats = ChatListMapper.chats(from: result.response)
         unreadChat = chats.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
         watchChannels()
+        // Kept current here too, not just on the first load — otherwise the
+        // stored copy would be whatever the list looked like when the app last
+        // started, and every message that arrived since would be missing from
+        // the first frame of the next launch.
+        try? await ChatStorage.shared.storePayload(
+            result.raw,
+            key: ChatStorage.PayloadKey.chatChannels
+        )
     }
 
     /// The direct-message channel with one person, opening it if the two have
@@ -3309,13 +3321,37 @@ final class MessageCenterStore {
             }
         }
 
+        // The stored list renders before the request goes out. Opening 消息
+        // used to be a spinner until the network answered, for data that had
+        // usually not changed.
+        //
+        // Only when there is nothing on screen: a reload with a list already
+        // up must not step backwards to an older copy.
+        if chats.isEmpty,
+           let cached = try? await ChatStorage.shared.cachedPayload(
+               key: ChatStorage.PayloadKey.chatChannels
+           ),
+           let response = try? DiscourseClient.decodeChatChannels(cached) {
+            let stored = ChatListMapper.chats(from: response)
+            if !stored.isEmpty {
+                chats = stored
+                unreadChat = stored.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
+            }
+        }
+
         do {
-            let response = try await client.chatChannels()
+            let (response, raw) = try await client.chatChannelsWithRaw()
             chats = ChatListMapper.chats(from: response)
             unreadChat = chats.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
             watchChannels()
+            try? await ChatStorage.shared.storePayload(
+                raw,
+                key: ChatStorage.PayloadKey.chatChannels
+            )
         } catch {
-            if errorText == nil {
+            // A stored list is already up; reporting a failed refresh over the
+            // top of it would be noise, not information.
+            if errorText == nil, chats.isEmpty {
                 errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
         }

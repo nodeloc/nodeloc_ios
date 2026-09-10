@@ -39,7 +39,9 @@ actor ChatStorage {
 
     private enum Schema {
         /// Bump to rebuild. The outbox survives; everything else refetches.
-        static let version = 1
+        ///
+        /// 2 added `payload_cache` for the channel list.
+        static let version = 2
     }
 
     private let database: SQLiteDatabase
@@ -121,6 +123,17 @@ actor ChatStorage {
 
             CREATE INDEX IF NOT EXISTS outbox_channel
                 ON outbox(channel_id, created_at);
+
+            -- Whole responses, keyed by what they are. The channel list is one
+            -- ordered snapshot with unread counts and last messages on it, not
+            -- a set of independent rows, so storing it as the server's own
+            -- document is both simpler and more honest than inventing columns
+            -- that would have to be reassembled in the same order anyway.
+            CREATE TABLE IF NOT EXISTS payload_cache (
+                key        TEXT PRIMARY KEY,
+                payload    TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """)
     }
 
@@ -168,7 +181,50 @@ actor ChatStorage {
     /// the account that wrote them.
     func clearAll() throws {
         try prepareIfNeeded()
-        try database.execute("DELETE FROM message; DELETE FROM outbox;")
+        try database.execute("DELETE FROM message; DELETE FROM outbox; DELETE FROM payload_cache;")
+    }
+
+    // MARK: Cached payloads
+
+    /// A stored response, if it is younger than `maxAge`.
+    ///
+    /// Age rather than an unconditional read: a channel list is a snapshot of
+    /// something that moves, and showing a week-old one because the network
+    /// happens to be slow would be worse than showing nothing. The default is
+    /// generous because this is only ever the *first* frame — a fetch always
+    /// follows it.
+    func cachedPayload(key: String, maxAge: TimeInterval = 7 * 24 * 60 * 60) throws -> Data? {
+        try prepareIfNeeded()
+        let rows = try database.rows(
+            "SELECT payload, updated_at FROM payload_cache WHERE key = ?;",
+            [.text(key)]
+        )
+        guard let row = rows.first,
+              let payload = row["payload"]?.stringValue
+        else { return nil }
+
+        let updatedAt: Double
+        switch row["updated_at"] {
+        case .double(let value): updatedAt = value
+        case .int(let value): updatedAt = Double(value)
+        default: return nil
+        }
+        guard Date().timeIntervalSince1970 - updatedAt < maxAge else { return nil }
+        return payload.data(using: .utf8)
+    }
+
+    func storePayload(_ data: Data, key: String) throws {
+        try prepareIfNeeded()
+        guard let text = String(data: data, encoding: .utf8) else { return }
+        try database.run(
+            "INSERT OR REPLACE INTO payload_cache (key, payload, updated_at) VALUES (?, ?, ?);",
+            [.text(key), .text(text), .double(Date().timeIntervalSince1970)]
+        )
+    }
+
+    /// Keys in `payload_cache`.
+    enum PayloadKey {
+        static let chatChannels = "chat_channels"
     }
 
     // MARK: Messages

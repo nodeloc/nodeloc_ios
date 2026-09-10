@@ -624,6 +624,11 @@ struct DiscourseClient {
         try? decode(data)
     }
 
+    /// Same, for a stored chat channel list.
+    static func decodeChatChannels(_ data: Data) throws -> ChatChannelsResponse {
+        try decode(data)
+    }
+
     /// Pins (or unpins — it toggles) a top-level reply, discourse-community's
     /// nested-replies feature. Staff only; the answer is the topic's full set of
     /// pinned post ids, so callers replace rather than patch.
@@ -958,10 +963,24 @@ struct DiscourseClient {
     }
 
     func chatChannels() async throws -> ChatChannelsResponse {
+        try await chatChannelsWithRaw().response
+    }
+
+    /// Raw variant, for the same reason `chatMessagesWithRaw` exists: the
+    /// stored copy is the bytes the server sent, so opening the chat list from
+    /// disk re-decodes through the identical path a live response takes.
+    ///
+    /// Keeps the two-path fallback — `chat/api/me/channels.json` is the newer
+    /// route and older installs only answer the second.
+    func chatChannelsWithRaw() async throws -> (response: ChatChannelsResponse, raw: Data) {
+        func fetch(_ path: String) async throws -> (ChatChannelsResponse, Data) {
+            let data = try await perform(makeRequest(path: path, includeCSRF: false))
+            return (try Self.decode(data), data)
+        }
         do {
-            return try await get("chat/api/me/channels.json")
+            return try await fetch("chat/api/me/channels.json")
         } catch DiscourseError.badResponse(let code, _) where code == 404 {
-            return try await get("chat/api/channels.json")
+            return try await fetch("chat/api/channels.json")
         }
     }
 
