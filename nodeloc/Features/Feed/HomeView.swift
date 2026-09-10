@@ -114,12 +114,6 @@ struct HomeView: View {
             .onScrollPhaseChange { oldPhase, newPhase, context in
                 handleScrollPhase(from: oldPhase, to: newPhase, context: context)
             }
-            // The feed runs under its own floating glass buttons, so iOS 26's
-            // edge effect is a second background over a solved problem — and a
-            // visible one: it lifted a lighter band across the top 56pt in
-            // dark mode while looking identical in light, because the effect
-            // is a translucent light material.
-            .scrollEdgeEffectHiddenCompat(for: .top)
 
             if app.overlay != .post, !sidebarIsPinned {
                 persistentHeaderButtons
@@ -135,6 +129,15 @@ struct HomeView: View {
                 .zIndex(30)
             }
         }
+        // The page colour, safe area included.
+        //
+        // Every row paints `Theme.bg` itself, but the strip above the first
+        // one — the status bar and the 56pt spacer the floating header sits
+        // over — was painted by nobody, so it showed the window's black. In
+        // dark mode that is a visible seam at 107pt: pure black above,
+        // 0x0B0F0E below. In light mode white-on-white hid it, which is why it
+        // read as "only dark mode is wrong".
+        .background(Theme.bg.ignoresSafeArea())
     }
 
     private let headerHeight: CGFloat = 56
