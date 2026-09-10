@@ -114,6 +114,12 @@ struct HomeView: View {
             .onScrollPhaseChange { oldPhase, newPhase, context in
                 handleScrollPhase(from: oldPhase, to: newPhase, context: context)
             }
+            // The feed runs under its own floating glass buttons, so iOS 26's
+            // edge effect is a second background over a solved problem — and a
+            // visible one: it lifted a lighter band across the top 56pt in
+            // dark mode while looking identical in light, because the effect
+            // is a translucent light material.
+            .scrollEdgeEffectHiddenCompat(for: .top)
 
             if app.overlay != .post, !sidebarIsPinned {
                 persistentHeaderButtons

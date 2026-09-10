@@ -99,6 +99,27 @@ extension View {
         }
     }
 
+    /// Hides the scroll edge effect iOS 26 draws where content meets a bar.
+    ///
+    /// Wanted off wherever this app supplies its own floating chrome. The
+    /// effect exists to keep bar content legible over whatever scrolls under
+    /// it, but the header buttons here are already glass capsules with their
+    /// own backing — so the system's layer is a second treatment on top of a
+    /// solved problem.
+    ///
+    /// It shows up as a *dark mode only* bug, which is worth knowing when
+    /// hunting the next one: the effect is a translucent light material, so it
+    /// is invisible over a white background and lifts a visible band out of a
+    /// near-black one.
+    @ViewBuilder
+    func scrollEdgeEffectHiddenCompat(for edges: Edge.Set = .top) -> some View {
+        if #available(iOS 26.0, *) {
+            scrollEdgeEffectHidden(true, for: edges)
+        } else {
+            self
+        }
+    }
+
     /// `.tabBarMinimizeBehavior(.onScrollDown)`.
     ///
     /// The tab bar simply stays put before 26. Nothing else in the app depends
