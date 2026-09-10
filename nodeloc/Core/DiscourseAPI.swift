@@ -931,6 +931,16 @@ struct DiscourseClient {
         try await send("PUT", path: "notifications/mark-read")
     }
 
+    /// Marks one notification read.
+    ///
+    /// Same endpoint; Discourse narrows it to a single row when given an `id`,
+    /// which is what opening one notification should do. Without the id it
+    /// clears the whole list — a much bigger claim than "I read this one".
+    @discardableResult
+    func markNotificationRead(id: Int) async throws -> Data {
+        try await formItems("PUT", path: "notifications/mark-read", items: [("id", String(id))])
+    }
+
     /// Reports read progress for a topic: `topicTimeMs` is time spent in the
     /// topic this batch, `timings` maps post number → ms it was on screen. The
     /// server marks those posts read, accrues the user's read time and

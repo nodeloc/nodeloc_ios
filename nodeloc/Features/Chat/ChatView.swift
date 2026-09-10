@@ -433,7 +433,10 @@ struct ChatView: View {
     private func notificationList(_ items: [AppNotification], emptyTitle: String, emptyIcon: String) -> some View {
         Group {
             ForEach(items) { notification in
-                MessageNotificationRow(notification: notification)
+                MessageNotificationRow(
+                    notification: notification,
+                    onOpen: { store.markNotificationRead(id: notification.id) }
+                )
             }
 
             if !store.isLoading && items.isEmpty {
@@ -757,10 +760,14 @@ private struct ChatPublicProfileView: View {
 
 private struct MessageNotificationRow: View {
     let notification: AppNotification
+    /// Clears this row's unread dot. Passed in rather than reached for, so the
+    /// row stays a view and the store stays the owner of read state.
+    var onOpen: (() -> Void)?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
         Button {
+            onOpen?()
             if let url = notification.url { openURL(url) }
         } label: {
             rowContent

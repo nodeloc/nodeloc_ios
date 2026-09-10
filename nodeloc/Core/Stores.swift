@@ -3046,6 +3046,27 @@ final class MessageCenterStore {
     /// Called when the 通知 pane is *shown*, not when the inbox is opened — the
     /// inbox lands on 聊天, and clearing the badge on entry meant unread
     /// notifications were gone before they had been seen.
+    /// Marks one notification read, here and on the server.
+    ///
+    /// Opening a notification used to do neither: the row just opened its link,
+    /// so the green dot stayed put and came back on every launch. The list has
+    /// only ever had a "mark everything read" path, which is not what tapping
+    /// a single row means.
+    func markNotificationRead(id: Int) {
+        guard let index = notifications.firstIndex(where: { $0.id == id }),
+              notifications[index].unread
+        else { return }
+
+        notifications[index].unread = false
+        unreadNotifications = max(0, unreadNotifications - 1)
+
+        // Fire-and-forget: the dot is already gone, and a failure is corrected
+        // by the next fetch rather than being worth interrupting a tap for.
+        Task { [client] in
+            try? await client.markNotificationRead(id: id)
+        }
+    }
+
     func markNotificationsRead() async {
         guard unreadNotifications > 0 else { return }
         unreadNotifications = 0
@@ -3421,6 +3442,24 @@ final class NotificationsStore {
         isLoading = false
     }
 
+    /// Marks one notification read, here and on the server.
+    ///
+    /// The same omission as in the message tab's list: the row only opened its
+    /// link, so its dot survived the tap and every relaunch. Two lists, two
+    /// stores, one missing call in each.
+    func markRead(id: Int) {
+        guard let index = items.firstIndex(where: { $0.id == id }),
+              items[index].unread
+        else { return }
+
+        items[index].unread = false
+        Task { [client] in
+            try? await client.markNotificationRead(id: id)
+        }
+        // The tab badge is owned by the message centre, which counts its own
+        // copy of the list — so it has to hear about this too.
+        MessageCenterStore.shared.markNotificationRead(id: id)
+    }
 }
 
 // MARK: - Public profile

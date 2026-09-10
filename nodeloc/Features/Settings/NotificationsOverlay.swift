@@ -30,7 +30,10 @@ struct NotificationsOverlay: View {
                         .padding(.top, 80)
                     }
                     ForEach(store.items) { notification in
-                        NotificationRow(notification: notification)
+                        NotificationRow(
+                            notification: notification,
+                            onOpen: { store.markRead(id: notification.id) }
+                        )
                     }
                 }
             }
@@ -43,10 +46,13 @@ struct NotificationsOverlay: View {
 
 private struct NotificationRow: View {
     let notification: AppNotification
+    /// Clears this row's unread dot.
+    var onOpen: (() -> Void)?
     @Environment(\.openURL) private var openURL
 
     var body: some View {
         Button {
+            onOpen?()
             if let url = notification.url { openURL(url) }
         } label: {
             rowContent
