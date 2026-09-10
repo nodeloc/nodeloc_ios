@@ -3076,11 +3076,52 @@ final class MessageCenterStore {
     /// Clears a conversation's unread dot and the PM count when it's opened.
     /// The server marks the topic read once its posts are viewed; this keeps
     /// the badge honest immediately.
+    /// Marks a private message read, on this device *and* on the server.
+    ///
+    /// It used to be local only: the row lost its dot, the badge went down, and
+    /// the server was never told — so the message stayed unread on the web and
+    /// came back unread on the next install. The app was quietly disagreeing
+    /// with the truth.
+    ///
+    /// `topics/timings` is the same mechanism Discourse's own client uses; the
+    /// reader sends it too, but only for posts that actually scrolled into
+    /// view, which is not the same as "I opened this and dealt with it".
+    ///
+    /// Both inboxes are searched. The personal list was the only one before,
+    /// so tapping a row in a *group* inbox flipped nothing and sent nothing —
+    /// the guard simply failed and the whole call was a no-op.
     func markConversationRead(id: Int) {
-        guard let index = conversations.firstIndex(where: { $0.id == id }),
-              conversations[index].unread else { return }
-        conversations[index].unread = false
+        var conversation: PMConversation?
+
+        if let index = conversations.firstIndex(where: { $0.id == id }) {
+            conversation = conversations[index]
+            conversations[index].unread = false
+        }
+        if let index = groupConversations.firstIndex(where: { $0.id == id }) {
+            conversation = conversation ?? groupConversations[index]
+            groupConversations[index].unread = false
+        }
+
+        guard let conversation, conversation.unread else { return }
         unreadPrivateMessages = conversations.filter(\.unread).count
+
+        // Fire-and-forget: the local state is already right, and a failure
+        // here is corrected by the next inbox fetch.
+        let topicID = conversation.id
+        let highest = conversation.highestPostNumber
+        Task { [client] in
+            // One millisecond per post. The server only needs *which* posts to
+            // mark read; the durations feed reading-time statistics, and
+            // inventing minutes the reader didn't spend would corrupt those.
+            let timings = Dictionary(
+                uniqueKeysWithValues: (1...max(highest, 1)).map { ($0, 1) }
+            )
+            try? await client.sendTopicTimings(
+                topicID: topicID,
+                topicTimeMs: timings.count,
+                timings: timings
+            )
+        }
     }
 
     /// Switches the PM pane's filter. `nil` shows the personal inbox (already
@@ -3309,7 +3350,8 @@ final class MessageCenterStore {
                 letter: String(name.prefix(1)).uppercased(),
                 variant: topic.id % 5,
                 time: DiscourseFormat.relative(topic.lastPostedAt ?? topic.bumpedAt),
-                unread: unread
+                unread: unread,
+                highestPostNumber: max(highest, 1)
             )
         }
     }

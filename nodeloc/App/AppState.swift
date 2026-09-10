@@ -468,6 +468,9 @@ struct PMConversation: Identifiable {
     let variant: Int
     let time: String
     var unread: Bool
+    /// The thread's last post number, so marking it read can tell the server
+    /// *how far* was read rather than just that something was.
+    var highestPostNumber: Int = 1
 }
 
 struct Community: Identifiable {
