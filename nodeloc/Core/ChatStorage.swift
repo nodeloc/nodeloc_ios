@@ -268,6 +268,18 @@ actor ChatStorage {
         return Self.envelope(messagePayloads: payloads)
     }
 
+    /// Which channels have any stored history at all.
+    ///
+    /// Used to decide what to warm: a channel that has never been opened while
+    /// online has nothing to show offline, and that is the gap worth closing —
+    /// history only ever appeared for conversations the reader had already
+    /// visited on a working connection.
+    func channelsWithHistory() throws -> Set<Int> {
+        try prepareIfNeeded()
+        let rows = try database.rows("SELECT DISTINCT channel_id FROM message;")
+        return Set(rows.compactMap { $0["channel_id"]?.intValue })
+    }
+
     /// The newest stored id, for deciding whether a fetched page continues the
     /// stored history or starts a new one.
     func newestMessageID(channelID: Int) throws -> Int? {

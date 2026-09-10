@@ -3201,6 +3201,30 @@ final class MessageCenterStore {
         }
     }
 
+    /// Fetches the newest page for the top channels that have no stored
+    /// history, so they are readable offline.
+    ///
+    /// Bounded hard, and on purpose. History used to exist only for
+    /// conversations already opened on a working connection, which meant
+    /// turning the network off and tapping a chat showed nothing — the cache
+    /// was real but empty for anything untouched. Warming the whole list would
+    /// be one request per channel on every list load; warming only what is
+    /// missing means this costs nothing from the second launch onwards.
+    private func warmChatHistory(limit: Int = 5) async {
+        guard let existing = try? await ChatStorage.shared.channelsWithHistory() else { return }
+
+        let missing = chats.prefix(20).filter { !existing.contains($0.id) }.prefix(limit)
+        guard !missing.isEmpty else { return }
+
+        // Sequential and unhurried: this is speculative work for a screen the
+        // reader may never open, and it must not compete with what they are
+        // actually looking at.
+        for chat in missing {
+            guard let result = try? await client.chatMessagesWithRaw(channelID: chat.id) else { continue }
+            try? await ChatStorage.shared.absorb(rawPage: result.raw, channelID: chat.id)
+        }
+    }
+
     /// Re-reads just the channel list. Cheap enough to run per event, and it
     /// carries everything a row shows: last message, unread count, ordering.
     private func refreshChats() async {
@@ -3348,6 +3372,7 @@ final class MessageCenterStore {
                 raw,
                 key: ChatStorage.PayloadKey.chatChannels
             )
+            await warmChatHistory()
         } catch {
             // A stored list is already up; reporting a failed refresh over the
             // top of it would be noise, not information.
@@ -4155,7 +4180,15 @@ final class ChatConversationStore {
             if !showedCache {
                 loadedChannelID = nil
                 loadedChannelTargetMessageID = nil
-                errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                // Offline with nothing stored is a cold cache, not a fault to
+                // fix: "检查网络连接" sends the reader off to repair something
+                // that isn't broken, when the real answer is that this
+                // conversation has never been opened on a connection.
+                if NetworkReachability.shared.isOnline {
+                    errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                } else {
+                    errorText = AppString("当前离线，这个会话还没有本地记录。")
+                }
                 return
             }
         }
@@ -4321,7 +4354,14 @@ final class ChatConversationStore {
                 try? await ChatStorage.shared.markAttempt(localID: item.localID, error: description)
                 await refreshPending(channelID: channelID)
                 redrawOptimisticRows(threadID: item.threadID)
-                errorText = description
+                // The row itself now says 未发送 and offers a retry, so a
+                // banner adds nothing when the cause is simply being offline —
+                // and it was the "请检查网络连接" that appeared on merely
+                // *opening* a conversation with something queued. A refusal
+                // from a server we did reach still deserves words.
+                if NetworkReachability.shared.isOnline {
+                    errorText = description
+                }
                 // Later messages wait: sending them now would reorder the
                 // conversation around the one that failed.
                 return
