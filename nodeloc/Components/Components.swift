@@ -866,19 +866,20 @@ struct HeaderIconButton: View {
                         .foregroundStyle(Theme.headerText)
                 case .asset(let name):
                     // `.original`, or the asset is template-tinted to
-                    // `Theme.headerText` and the mark loses its colours — the
-                    // whole point of using it.
+                    // `Theme.headerText` and the mark loses the gradient that
+                    // is the whole point of using it.
                     Image(name)
                         .renderingMode(.original)
                         .resizable()
                         .scaledToFit()
-                        // Larger than the 14pt symbol above: a symbol is drawn
-                        // to read at its nominal size, while artwork fills its
-                        // box, and at 14 the mark's inner dot was all that
-                        // registered. 22 matches the hamburger's visual weight
-                        // — measured by rendering them side by side, not
-                        // guessed.
-                        .frame(width: 22, height: 22)
+                        // Width only, height follows. The mark is 360×300, so
+                        // constraining a square would letterbox it and cost
+                        // ~17% of the width for nothing. Larger than the 14pt
+                        // symbol above because a symbol is drawn to read at
+                        // its nominal size while artwork fills its box; the
+                        // number came from rendering it beside the hamburger
+                        // it replaces.
+                        .frame(width: 24)
                 }
             }
             .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)

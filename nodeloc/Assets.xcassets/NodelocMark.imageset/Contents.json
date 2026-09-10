@@ -1,14 +1,7 @@
 {
   "images" : [
     {
-      "filename" : "mark-light.svg",
-      "idiom" : "universal"
-    },
-    {
-      "appearances" : [
-        { "appearance" : "luminosity", "value" : "dark" }
-      ],
-      "filename" : "mark-dark.svg",
+      "filename" : "mark-nl-ribbon.svg",
       "idiom" : "universal"
     }
   ],
