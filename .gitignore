@@ -1,0 +1,28 @@
+# Xcode per-user state: window layout, breakpoints, which scheme you last ran.
+# Carries the developer's username in the path, and causes pointless conflicts.
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Build products. DerivedData normally lives outside the repo, but a custom
+# build location or an in-place archive would drop it here.
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM.zip
+
+# Credentials that must never be committed. Listed even though none exist
+# today, because the cost of forgetting once is a rotation and a history
+# rewrite.
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.pem
+Secrets.plist
+Secrets.swift
+.env
+
+# macOS
+.DS_Store
