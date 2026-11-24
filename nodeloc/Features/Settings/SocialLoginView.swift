@@ -39,7 +39,7 @@ struct SocialAuthProvider: Identifiable, Hashable {
         // official translations of those — 「通过 Apple 继续」 is the zh-Hans
         // form of the second, and it matches the row's existing phrasing.
         case "apple": return AppString("通过 Apple 继续")
-        case "google_oauth2": return AppString("通过 Google 继续")
+        case "google_oauth2", "google": return AppString("通过 Google 继续")
         case "github": return AppString("通过 GitHub 继续")
         case "twitter": return AppString("通过 X 继续")
         case "telegram": return AppString("通过 Telegram 继续")
@@ -53,7 +53,7 @@ struct SocialAuthProvider: Identifiable, Hashable {
     /// Nil for a provider the site has enabled but we ship no mark for.
     var assetName: String? {
         switch name {
-        case "google_oauth2": return "SocialGoogle"
+        case "google_oauth2", "google": return "SocialGoogle"
         case "github": return "SocialGitHub"
         case "twitter": return "SocialX"
         case "telegram": return "SocialTelegram"
