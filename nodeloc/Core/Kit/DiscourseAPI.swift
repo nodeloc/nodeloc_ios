@@ -73,7 +73,16 @@ struct DiscourseClient {
         if !force, state.nodesFresh { return state.allNodes }
         let list: NLNodeList = try await get("api/v1/nodes")
         state.store(nodes: list.nodes)
+        await loadMyNodes()
         return list.nodes
+    }
+
+    /// Which nodes the reader joined (with role and bell), favorited, muted.
+    func loadMyNodes() async {
+        guard auth.isAuthenticated, let mine: NLMyNodes = try? await get("api/v1/me/nodes") else { return }
+        state.myNodes = Dictionary(mine.joined.map { ($0.slug, $0) }, uniquingKeysWith: { first, _ in first })
+        state.mutedNodes = Set(mine.muted ?? [])
+        state.favoriteNodes = (mine.favorites ?? []).map(\.slug)
     }
 
     func nodeSlug(categoryID: Int) async throws -> String {
@@ -219,6 +228,7 @@ struct DiscourseClient {
         let slug = try await nodeSlug(categoryID: categoryID)
         try await send("PUT", "api/v1/nodes/\(slug)/membership")
         state.invalidateNodes()
+        await loadMyNodes()
         return try Self.shaped(["success": true, "joined": true])
     }
 
@@ -226,17 +236,22 @@ struct DiscourseClient {
         let slug = try await nodeSlug(categoryID: categoryID)
         try await send("DELETE", "api/v1/nodes/\(slug)/membership")
         state.invalidateNodes()
+        await loadMyNodes()
         return try Self.shaped(["success": true, "joined": false])
     }
 
     func setCategoryNotification(categoryID: Int, level: Int) async throws -> Data {
         let slug = try await nodeSlug(categoryID: categoryID)
-        return try await send("PUT", "api/v1/nodes/\(slug)/notification", json: ["level": DiscourseShape.nodeLevel(fromDiscourse: level)])
+        let data = try await send("PUT", "api/v1/nodes/\(slug)/notification", json: ["level": DiscourseShape.nodeLevel(fromDiscourse: level)])
+        await loadMyNodes()
+        return data
     }
 
     func setTopicNotification(topicID: Int, level: Int) async throws -> Data {
         let mapped = level >= 3 ? "watching" : (level == 0 ? "muted" : "normal")
-        return try await send("PUT", "api/v1/topics/\(topicID)/follow", json: ["level": mapped])
+        let data = try await send("PUT", "api/v1/topics/\(topicID)/follow", json: ["level": mapped])
+        state.topicLevels[topicID] = level >= 3 ? 3 : (level == 0 ? 0 : 1)
+        return data
     }
 
     func categories(includeSubcategories: Bool = false) async throws -> CategoriesResponse {
@@ -251,7 +266,7 @@ struct DiscourseClient {
     /// The drawer's node list: the nodes the reader joined.
     func sidebarNodes() async throws -> SidebarCommunitiesResponse {
         let nodes = try await loadNodes()
-        let mine = nodes.filter { $0.joined == true && $0.parentId != nil }
+        let mine = nodes.filter { ($0.joined == true || state.myNodes[$0.slug] != nil) && $0.parentId != nil }
         return try Self.shaped(["communities": mine.map { DiscourseShape.category($0, isMine: $0.ownerId == state.me?.id) }])
     }
 
@@ -414,13 +429,15 @@ struct DiscourseClient {
         let detail: NLTopicDetail = try await get("api/v1/topics/\(id)", query: [URLQueryItem(name: "limit", value: "1")])
         state.store(posts: detail.posts, topicID: id)
         if detail.permissions?.moderate == true { state.topicModerators.insert(id) }
-        let extras = await topicExtras(topicID: id, posts: detail.posts)
+        let extras = await topicExtras(topicID: id, topic: detail.topic, posts: detail.posts)
         return try Self.shaped(DiscourseShape.topicResponse(
             detail, polls: extras.polls, lottery: extras.lottery, redEnvelope: extras.redEnvelope
         ))
     }
 
-    private func topicExtras(topicID: Int, posts: [NLPost]) async -> (polls: [Int: [NLPoll]], lottery: NLLottery?, redEnvelope: NLRedEnvelope?) {
+    /// Polls are marked in the HTML; lottery and red envelope come only when
+    /// the topic says it has one.
+    private func topicExtras(topicID: Int, topic: NLTopicDetail.Topic, posts: [NLPost]) async -> (polls: [Int: [NLPoll]], lottery: NLLottery?, redEnvelope: NLRedEnvelope?) {
         var polls: [Int: [NLPoll]] = [:]
         for post in posts where post.html.contains("class=\"poll\"") {
             if let list: NLPolls = try? await get("api/v1/posts/\(post.id)/polls") {
@@ -428,10 +445,13 @@ struct DiscourseClient {
             }
         }
         var lottery: NLLottery?
-        if let first = posts.first(where: { $0.postNumber == 1 }) {
+        if topic.hasLottery ?? true, let first = posts.first(where: { $0.postNumber == 1 }) {
             lottery = (try? await get("api/v1/posts/\(first.id)/lottery") as NLLotteryEnvelope)?.lottery
         }
-        let envelope = (try? await get("api/v1/topics/\(topicID)/red-envelope") as NLRedEnvelopeEnvelope)?.redEnvelope
+        var envelope: NLRedEnvelope?
+        if topic.hasRedEnvelope ?? true {
+            envelope = (try? await get("api/v1/topics/\(topicID)/red-envelope") as NLRedEnvelopeEnvelope)?.redEnvelope
+        }
         return (polls, lottery, envelope)
     }
 
@@ -780,8 +800,9 @@ struct DiscourseClient {
 
     // MARK: Search
 
-    /// Topics and posts come from the server's search when it has one; users
-    /// and nodes from their own lookups.
+    /// The server's search: posts (one per topic for the topic list), users,
+    /// nodes. Users and nodes fall back to their own lookups on a server
+    /// without it.
     func search(_ term: String, filters: String? = nil) async throws -> SearchResponse {
         _ = try? await loadNodes()
         var object: [String: Any] = [:]
@@ -790,23 +811,24 @@ struct DiscourseClient {
             var posts: [[String: Any]] = []
             var seenTopics = Set<Int>()
             for hit in results.posts ?? [] {
+                if let author = hit.author { state.remember(username: author, id: hit.authorId) }
                 if seenTopics.insert(hit.topicId).inserted {
                     var topic: [String: Any] = [
                         "id": hit.topicId,
-                        "title": DiscourseFormat.plainText(hit.title ?? ""),
+                        "title": DiscourseFormat.plainText(hit.topicTitle ?? ""),
                         "slug": "topic",
-                        "posts_count": (hit.replies ?? 0) + 1,
+                        "posts_count": (hit.replyCount ?? 0) + 1,
                         "created_at": DiscourseShape.time(hit.createdAt),
                     ]
                     if let slug = hit.nodeSlug { topic["category_id"] = state.nodeID(forSlug: slug) }
                     topics.append(topic)
                 }
                 posts.append([
-                    "id": hit.postId ?? hit.topicId,
+                    "id": hit.id,
                     "topic_id": hit.topicId,
-                    "blurb": DiscourseFormat.plainText(hit.excerpt ?? ""),
+                    "blurb": DiscourseFormat.plainText(hit.folded == true ? "" : (hit.blurb ?? hit.excerpt ?? "")),
                     "username": DiscourseShape.value(hit.author),
-                    "avatar_template": DiscourseShape.value(hit.authorAvatar),
+                    "avatar_template": DiscourseShape.avatar(nil, username: hit.author),
                     "like_count": DiscourseShape.value(hit.upvotes),
                     "created_at": DiscourseShape.time(hit.createdAt),
                     "post_number": DiscourseShape.value(hit.postNumber),
@@ -936,38 +958,98 @@ struct DiscourseClient {
         try NodelocJSON.decode(ChatChannelsResponse.self, from: data)
     }
 
-    /// Profile activity. The backend lists the reader's bookmarks; other
-    /// activity feeds aren't served.
+    /// Profile activity tabs, by Discourse's filter codes: 4 topics, 5
+    /// replies, 3 the reader's own saved posts. Likes aren't listed by the
+    /// backend. `offset` is how many rows the screen already has.
     func userActions(
         username: String,
         filter: Int,
         offset: Int = 0
     ) async throws -> UserActionsResponse {
-        guard filter == 3, username.lowercased() == auth.username?.lowercased() else {
-            return try Self.shaped(["user_actions": [Any]()])
-        }
+        let user = Self.pathEscape(username)
+        let listKey = "activity:\(username.lowercased()):\(filter)"
         var query = [URLQueryItem(name: "limit", value: "30")]
         if offset > 0 {
-            guard let before = state.cursor(list: "bookmarks", page: offset) else {
+            guard let cursor = state.cursor(list: listKey, page: offset) else {
                 return try Self.shaped(["user_actions": [Any]()])
             }
-            query.append(URLQueryItem(name: "before", value: before))
+            query.append(URLQueryItem(name: filter == 3 ? "offset" : "cursor", value: cursor))
         }
-        let list: NLBookmarks = try await get("api/v1/bookmarks", query: query)
-        state.setCursor(list.nextBefore.map(String.init), list: "bookmarks", page: offset + list.bookmarks.count)
-        return try Self.shaped(["user_actions": list.bookmarks.map { item -> [String: Any] in
-            [
-                "action_type": 3,
-                "title": item.topicTitle,
-                "excerpt": NodelocMarkup.excerpt(item.html ?? ""),
-                "created_at": DiscourseShape.time(item.createdAt),
-                "username": item.author,
-                "avatar_template": DiscourseShape.avatar(nil, username: item.author),
-                "topic_id": item.topicId,
-                "post_number": item.postNumber,
-                "post_id": item.postId,
-            ]
-        }])
+        var items: [[String: Any]] = []
+        switch filter {
+        case 4:
+            _ = try? await loadNodes()
+            let page: NLTopicPage = try await get("api/v1/users/\(user)/topics", query: query)
+            state.setCursor(page.nextCursor, list: listKey, page: offset + page.topics.count)
+            items = page.topics.map { topic in
+                [
+                    "action_type": 4,
+                    "title": topic.title,
+                    "excerpt": DiscourseShape.value(topic.excerpt),
+                    "created_at": DiscourseShape.time(topic.createdAt),
+                    "username": topic.author,
+                    "avatar_template": DiscourseShape.avatar(topic.authorAvatar, username: topic.author),
+                    "category_id": state.nodeID(forSlug: topic.nodeSlug),
+                    "topic_id": topic.id,
+                    "post_number": 1,
+                    "post_id": DiscourseShape.value(topic.firstPostId),
+                ]
+            }
+        case 5:
+            _ = try? await loadNodes()
+            let page: NLUserPosts = try await get("api/v1/users/\(user)/posts", query: query)
+            state.setCursor(page.nextCursor, list: listKey, page: offset + page.posts.count)
+            items = page.posts.map { post in
+                var item: [String: Any] = [
+                    "action_type": 5,
+                    "title": DiscourseShape.value(post.topicTitle),
+                    "excerpt": DiscourseShape.value(post.excerpt ?? post.html.map { NodelocMarkup.excerpt($0) }),
+                    "created_at": DiscourseShape.time(post.createdAt),
+                    "username": username,
+                    "avatar_template": DiscourseShape.avatar(nil, username: username),
+                    "topic_id": post.topicId,
+                    "post_number": post.postNumber,
+                    "post_id": post.id,
+                ]
+                if let slug = post.nodeSlug { item["category_id"] = state.nodeID(forSlug: slug) }
+                return item
+            }
+        case 3 where isMe(username):
+            let page = try await saved(offset: offset)
+            state.setCursor(page.nextOffset.map(String.init), list: listKey, page: offset + page.bookmarks.count)
+            items = page.bookmarks.map { item in
+                var row: [String: Any] = [
+                    "action_type": 3,
+                    "title": DiscourseShape.value(item.topicTitle),
+                    "excerpt": DiscourseShape.value(item.excerpt),
+                    "created_at": DiscourseShape.time(item.createdAt),
+                    "username": DiscourseShape.value(item.author),
+                    "avatar_template": DiscourseShape.avatar(nil, username: item.author),
+                    "topic_id": item.topicId,
+                    "post_number": item.postNumber,
+                    "post_id": item.postId,
+                ]
+                if let slug = item.nodeSlug { row["category_id"] = state.nodeID(forSlug: slug) }
+                return row
+            }
+        default:
+            break
+        }
+        return try Self.shaped(["user_actions": items])
+    }
+
+    // MARK: Saved posts
+
+    func bookmarkFolders() async throws -> NLBookmarkFolders {
+        try await get("api/v1/bookmark-folders")
+    }
+
+    /// Saved posts, newest first. `folder` is a folder id, "none" for
+    /// unfiled, or nil for all.
+    func saved(folder: String? = nil, offset: Int = 0, limit: Int = 30) async throws -> NLSaved {
+        var query = [URLQueryItem(name: "limit", value: String(limit)), URLQueryItem(name: "offset", value: String(offset))]
+        if let folder { query.append(URLQueryItem(name: "folder", value: folder)) }
+        return try await get("api/v1/saved", query: query)
     }
 
     // MARK: Points
@@ -1051,10 +1133,7 @@ struct DiscourseClient {
         state.me = me.user
         auth.userID = me.user.id
         auth.isStaff = me.user.isStaff
-        var avatar = me.user.avatarUrl
-        if avatar == nil, let status: NLMeStatus = try? await get("api/v1/me/status") {
-            avatar = status.me.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
-        }
+        let avatar = me.user.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
         state.myAvatar = avatar
         state.remember(username: me.user.username, id: me.user.id, avatar: avatar)
         let notifications = try? await get("api/v1/notifications", query: [URLQueryItem(name: "limit", value: "1")]) as NLNotifications

@@ -31,9 +31,16 @@ nonisolated struct NLUser: Codable, Sendable {
     let bioRaw: String?
     let website: String?
     let location: String?
-    // Newer servers include these; older ones leave them out.
     let avatarUrl: String?
     let coverUrl: String?
+    let bioHtml: String?
+    let followerCount: Int?
+    let followingCount: Int?
+    /// The viewer's relation to this user; all false on your own profile.
+    let viewerFollowing: Bool?
+    let viewerBlocked: Bool?
+    let canMessage: Bool?
+    let messageNote: String?
 
     var isStaff: Bool { role == "admin" || role == "moderator" }
 }
@@ -197,6 +204,7 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     let nodeSlug: String
     let nodeName: String?
     let author: String
+    let authorId: Int?
     let authorAvatar: String?
     let tags: [String]?
     let closed: Bool?
@@ -209,8 +217,12 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     let createdAt: String?
     let lastReadPostNumber: Int?
     let unreadCount: Int?
-    // Present on newer servers.
+    /// Lets a list row vote on the first post. Not on the personal feed.
+    let firstPostId: Int?
+    let viewerVote: Int?
+    /// The first post's first image as a card thumbnail (absolute URL).
     let imageUrl: String?
+    let adult: Bool?
     let bumpedAt: String?
 }
 
@@ -266,6 +278,9 @@ nonisolated struct NLPost: Codable, Sendable {
     let authorBlocked: Bool?
     let ackLabel: String?
     let viewerAcknowledged: Bool?
+    /// Only `GET /topics/{id}` sends these.
+    let canEdit: Bool?
+    let canDelete: Bool?
     let createdAt: String?
     // /thread only
     let depth: Int?
@@ -291,9 +306,12 @@ nonisolated struct NLTopicDetail: Codable, Sendable {
         let highestPostNumber: Int?
         let voteScore: Int?
         let createdAt: String?
-        // Newer servers: the reader's own state.
-        let followLevel: String?
+        /// watching / normal / muted; nil when signed out.
+        let notificationLevel: String?
         let lastReadPostNumber: Int?
+        let hasLottery: Bool?
+        let hasTrade: Bool?
+        let hasRedEnvelope: Bool?
     }
     struct Permissions: Codable, Sendable {
         let reply: Bool?
@@ -587,6 +605,7 @@ nonisolated struct NLNotification: Codable, Sendable {
     let postNumber: Int?
     let postId: Int?
     let actorAvatar: String?
+    let followingActor: Bool?
     let data: JSONValue?
     let read: Bool
     let createdAt: String?
@@ -835,18 +854,20 @@ nonisolated struct NLLinkPreviews: Codable, Sendable {
 
 nonisolated struct NLSearchResults: Codable, Sendable {
     struct Post: Codable, Sendable {
+        let id: Int
         let topicId: Int
-        let postId: Int?
         let postNumber: Int?
-        let title: String?
+        let topicTitle: String?
         let excerpt: String?
+        let blurb: String?
         let author: String?
-        let authorAvatar: String?
+        let authorId: Int?
         let nodeSlug: String?
         let nodeName: String?
         let createdAt: String?
         let upvotes: Int?
-        let replies: Int?
+        let replyCount: Int?
+        let folded: Bool?
     }
     struct Node: Codable, Sendable {
         let slug: String
@@ -860,6 +881,7 @@ nonisolated struct NLSearchResults: Codable, Sendable {
         let username: String
         let name: String?
         let avatar: String?
+        let following: Bool?
     }
     struct Tag: Codable, Sendable {
         let name: String
@@ -870,6 +892,75 @@ nonisolated struct NLSearchResults: Codable, Sendable {
     let nodes: [Node]?
     let users: [User]?
     let tags: [Tag]?
+    let hasMore: Bool?
+}
+
+/// `GET /api/v1/users/{u}/posts`.
+nonisolated struct NLUserPosts: Codable, Sendable {
+    struct Post: Codable, Sendable {
+        let id: Int
+        let topicId: Int
+        let postNumber: Int
+        let topicTitle: String?
+        let nodeSlug: String?
+        let nodeName: String?
+        let html: String?
+        let excerpt: String?
+        let createdAt: String?
+    }
+    let posts: [Post]
+    let nextCursor: String?
+}
+
+/// `GET /api/v1/me/nodes`: the reader's relation to nodes.
+nonisolated struct NLMyNodes: Codable, Sendable {
+    struct Joined: Codable, Sendable {
+        let slug: String
+        let name: String?
+        let color: String?
+        let memberCount: Int?
+        let role: String?
+        let notificationLevel: String?
+    }
+    struct Favorite: Codable, Sendable {
+        let slug: String
+        let name: String?
+    }
+    let joined: [Joined]
+    let favorites: [Favorite]?
+    let muted: [String]?
+}
+
+nonisolated struct NLBookmarkFolders: Codable, Sendable {
+    struct Folder: Codable, Sendable {
+        let id: Int
+        let name: String
+        let count: Int?
+        let `public`: Bool?
+    }
+    let folders: [Folder]
+    let total: Int?
+    let unfiled: Int?
+}
+
+/// `GET /api/v1/saved`.
+nonisolated struct NLSaved: Codable, Sendable {
+    struct Bookmark: Codable, Sendable {
+        let id: Int
+        let postId: Int
+        let postNumber: Int
+        let topicId: Int
+        let topicTitle: String?
+        let folderId: Int?
+        let note: String?
+        let excerpt: String?
+        let author: String?
+        let nodeSlug: String?
+        let createdAt: String?
+    }
+    let bookmarks: [Bookmark]
+    let total: Int?
+    let nextOffset: Int?
 }
 
 // MARK: - Untyped JSON

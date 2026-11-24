@@ -67,6 +67,12 @@ final class NodelocAdapterState {
 
     private var syntheticNodeSlugs: [Int: String] = [:]
 
+    /// The reader's joined nodes (with role and bell level) and muted ones,
+    /// from `/api/v1/me/nodes`.
+    var myNodes: [String: NLMyNodes.Joined] = [:]
+    var mutedNodes: Set<String> = []
+    var favoriteNodes: [String] = []
+
     // MARK: Paging
 
     /// Cursor for page N of a list, keyed by the list's identity.
@@ -137,6 +143,10 @@ final class NodelocAdapterState {
     func topicID(forPost id: Int) -> Int? { postTopic[id] }
     func firstPostID(topicID: Int) -> Int? { topicFirstPost[topicID] }
     func setNode(slug: String, topicID: Int) { topicNodes[topicID] = slug }
+
+    /// The reader's notification level per topic, as `NotificationLevels`
+    /// integers, learned from topic pages.
+    var topicLevels: [Int: Int] = [:]
     func nodeSlug(topicID: Int) -> String? { topicNodes[topicID] }
 
     func post(topicID: Int, number: Int) -> NLPost? {
@@ -244,6 +254,10 @@ final class NodelocAdapterState {
         newestMessageID = [:]
         uploads = [:]
         topicModerators = []
+        topicLevels = [:]
+        myNodes = [:]
+        mutedNodes = []
+        favoriteNodes = []
         me = nil
         myAvatar = nil
     }

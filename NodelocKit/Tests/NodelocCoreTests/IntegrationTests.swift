@@ -126,6 +126,8 @@ final class IntegrationTests: XCTestCase {
         _ = try await client.bookmark(postID: target.id)
         let bookmarks = try await client.userActions(username: "alice", filter: 3)
         XCTAssertTrue(bookmarks.userActions.contains { $0.postId == target.id })
+        let folders = try await client.bookmarkFolders()
+        XCTAssertEqual(folders.total, bookmarks.userActions.count)
         _ = try await client.removeBookmark(postID: target.id)
 
         // Notifications and unread marking.
@@ -133,10 +135,38 @@ final class IntegrationTests: XCTestCase {
         XCTAssertFalse(notifications.notifications.isEmpty)
         _ = try await client.markNotificationsRead()
 
-        // Profile and summary.
+        // Profile and summary, with follow state round-tripping.
         let bob = try await client.user("bob")
         XCTAssertEqual(bob.user.username, "bob")
         _ = try await client.userSummary("bob")
+        try await client.follow(username: "bob")
+        let followed = try await client.user("bob")
+        XCTAssertEqual(followed.user.isFollowed, true)
+        XCTAssertEqual(followed.user.totalFollowers, (bob.user.totalFollowers ?? 0) + 1)
+        try await client.unfollow(username: "bob")
+
+        // Profile activity: Bob's topics and replies, paged by the screen's
+        // row count.
+        let bobTopics = try await client.userActions(username: "bob", filter: 4)
+        XCTAssertFalse(bobTopics.userActions.isEmpty)
+        XCTAssertTrue(bobTopics.userActions.allSatisfy { $0.username == "bob" && $0.postNumber == 1 })
+        let bobReplies = try await client.userActions(username: "bob", filter: 5)
+        XCTAssertFalse(bobReplies.userActions.isEmpty)
+        let more = try await client.userActions(username: "bob", filter: 5, offset: bobReplies.userActions.count)
+        XCTAssertTrue(Set(more.userActions.map(\.id)).isDisjoint(with: bobReplies.userActions.map(\.id)))
+
+        // Voting from a list row, on the first post the summary names.
+        let row = try XCTUnwrap(latest.topicList.topics.first { $0.opPostId != nil && $0.opCanVoteDown == true })
+        _ = try await client.castVote(postID: row.opPostId!, direction: .up)
+        let again = try await client.topicList(feed: .latest)
+        XCTAssertEqual(again.topicList.topics.first { $0.id == row.id }?.opVoteDirection, .up)
+        _ = try await client.castVote(postID: row.opPostId!, direction: .none)
+
+        // The topic bell.
+        _ = try await client.setTopicNotification(topicID: busy.id, level: 3)
+        let watched = try await client.topicList(feed: .latest)
+        XCTAssertEqual(watched.topicList.topics.first { $0.id == busy.id }?.notificationLevel, 3)
+        _ = try await client.setTopicNotification(topicID: busy.id, level: 1)
 
         // Search: posts when the server has a search API, users and nodes
         // always.
@@ -153,6 +183,16 @@ final class IntegrationTests: XCTestCase {
         let upload = try await client.uploadChatMedia(data: png, fileName: "dot.png", mimeType: "image/png")
         XCTAssertTrue(upload.url?.contains("/uploads/") ?? false)
 
+        // That image as the avatar: /me reports it, no second call needed.
+        _ = try await client.pickAvatar(username: "alice", uploadID: upload.id)
+        let withAvatar = try await client.currentUser()
+        XCTAssertNotNil(withAvatar.currentUser.avatarTemplate)
+
+        // The search API: posts and their topics.
+        let found = try await client.search("Go")
+        XCTAssertFalse(found.posts?.isEmpty ?? true)
+        XCTAssertFalse(found.topics?.isEmpty ?? true)
+
         // Check-in answers either way without throwing.
         _ = try await client.checkIn()
 
@@ -161,6 +201,9 @@ final class IntegrationTests: XCTestCase {
         _ = try await client.joinNode(categoryID: joinable.id)
         let joined = try await client.sidebarNodes()
         XCTAssertTrue(joined.communities?.contains { $0.id == joinable.id } ?? false)
+        XCTAssertNotNil(NodelocAdapterState.shared.myNodes[joinable.slug])
+        _ = try await client.setCategoryNotification(categoryID: joinable.id, level: 3)
+        XCTAssertEqual(NodelocAdapterState.shared.myNodes[joinable.slug]?.notificationLevel, "watching")
         _ = try await client.leaveNode(categoryID: joinable.id)
 
         // A custom feed: create, add a node, list its topics, delete.

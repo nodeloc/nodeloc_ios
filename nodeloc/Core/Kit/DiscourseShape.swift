@@ -51,6 +51,7 @@ enum DiscourseShape {
     // MARK: Nodes
 
     static func category(_ node: NLNode, children: [NLNode]? = nil, isMine: Bool = false) -> Object {
+        let mine = state.myNodes[node.slug]
         var object: Object = [
             "id": node.id,
             "name": node.name,
@@ -62,14 +63,18 @@ enum DiscourseShape {
             "description": value(node.description),
             "description_excerpt": value(node.description),
             "parent_category_id": value(node.parentId),
-            "is_joined": node.joined ?? false,
-            "is_creator": isMine,
+            "is_joined": mine != nil || (node.joined ?? false),
+            "is_creator": isMine || mine?.role == "owner",
             "url": "/n/\(node.slug)",
             "style_type": node.logoUrl != nil ? "square" : (node.icon != nil ? "emoji" : "square"),
             "emoji": value(node.icon),
         ]
         if let logo = node.logoUrl { object["uploaded_logo"] = ["url": logo] }
-        if let level = node.notificationLevel { object["notification_level"] = notificationLevel(node: level) }
+        if let level = mine?.notificationLevel ?? node.notificationLevel {
+            object["notification_level"] = notificationLevel(node: level)
+        } else if state.mutedNodes.contains(node.slug) {
+            object["notification_level"] = 0
+        }
         if let children {
             object["subcategory_list"] = children.map { category($0) }
         }
@@ -100,8 +105,8 @@ enum DiscourseShape {
     static func topicListItem(_ topic: NLTopicSummary) -> Object {
         let nodeID = state.nodeID(forSlug: topic.nodeSlug)
         state.setNode(slug: topic.nodeSlug, topicID: topic.id)
+        state.remember(username: topic.author, id: topic.authorId, avatar: topic.authorAvatar)
         let authorID = state.userID(for: topic.author)
-        state.remember(username: topic.author, id: nil, avatar: topic.authorAvatar)
         let replies = topic.replyCount ?? 0
         let highest = topic.lastReadPostNumber.map { $0 + (topic.unreadCount ?? 0) }
         var object: Object = [
@@ -127,6 +132,16 @@ enum DiscourseShape {
             "posters": [["user_id": authorID, "description": "Original Poster"] as Object],
         ]
         if let image = topic.imageUrl { object["image_url"] = image }
+        // The first post's id and the reader's vote let the row vote in place.
+        if let firstPost = topic.firstPostId {
+            let viewerVote = state.overrides(for: firstPost)?.viewerVote ?? topic.viewerVote ?? 0
+            object["op_post_id"] = firstPost
+            object["op_vote_score"] = topic.voteScore ?? 0
+            object["op_vote_direction"] = vote(direction: viewerVote)
+            object["op_can_vote_down"] = state.me.map { $0.username.lowercased() != topic.author.lowercased() } ?? false
+            object["liked"] = viewerVote > 0
+        }
+        if let level = state.topicLevels[topic.id] { object["notification_level"] = level }
         return object
     }
 
@@ -176,8 +191,9 @@ enum DiscourseShape {
             "vote_direction": vote(direction: viewerVote),
             "can_vote_down": !yours,
             "user_title": value(post.authorTitle),
-            "can_edit": !deleted && (yours || canModerate),
-            "can_delete": !deleted && (yours || canModerate),
+            // The server's own answer when it sent one (topic pages do).
+            "can_edit": post.canEdit ?? (!deleted && (yours || canModerate)),
+            "can_delete": post.canDelete ?? (!deleted && (yours || canModerate)),
             "can_recover": deleted && (yours || canModerate),
             "can_view_edit_history": (post.version ?? 1) > 1,
             "yours": yours,
@@ -238,6 +254,9 @@ enum DiscourseShape {
         }
         let nodeID = state.nodeID(forSlug: topic.nodeSlug)
         state.setNode(slug: topic.nodeSlug, topicID: topic.id)
+        if let level = topic.notificationLevel {
+            state.topicLevels[topic.id] = level == "watching" ? 3 : (level == "muted" ? 0 : 1)
+        }
         var object: Object = [
             "id": topic.id,
             "title": topic.title,
@@ -255,8 +274,8 @@ enum DiscourseShape {
             "pinned_globally": false,
             "archetype": "regular",
             "details": [
-                "can_edit": isAuthor || canModerate,
-                "can_delete": isAuthor || canModerate,
+                "can_edit": first?.canEdit ?? (isAuthor || canModerate),
+                "can_delete": first?.canDelete ?? (isAuthor || canModerate),
                 "can_moderate": canModerate,
                 "can_close_topic": canModerate,
                 "can_pin_unpin_topic": canModerate,
@@ -426,19 +445,27 @@ enum DiscourseShape {
             "post_count": value(stats?.postCount),
             "topic_count": value(stats?.topicCount),
             "likes_received": value(stats?.votesReceived),
-            "can_follow": profile.viewer?.canFollow ?? !isMe,
-            "is_followed": value(profile.viewer?.following),
-            "ignored": value(profile.viewer?.blocked),
+            "total_followers": value(user.followerCount ?? stats?.followerCount),
+            "total_following": value(user.followingCount ?? stats?.followingCount),
+            "can_follow": !isMe,
+            "is_followed": user.viewerFollowing ?? profile.viewer?.following ?? false,
+            "ignored": user.viewerBlocked ?? profile.viewer?.blocked ?? false,
         ]
-        if let cover = user.coverUrl, !cover.isEmpty { object["profile_background_upload_url"] = cover }
-        if let bio = user.bioRaw { object["bio_raw"] = bio; object["bio_excerpt"] = bio }
+        if let cover = user.coverUrl, !cover.isEmpty {
+            object["profile_background_upload_url"] = cover
+            object["card_background_upload_url"] = cover
+        }
+        if let bio = user.bioRaw, !bio.isEmpty { object["bio_raw"] = bio }
+        if let html = user.bioHtml, !html.isEmpty {
+            object["bio_excerpt"] = DiscourseFormat.plainTextParagraphs(html)
+        } else if let bio = user.bioRaw, !bio.isEmpty {
+            object["bio_excerpt"] = bio
+        }
         if let website = user.website, !website.isEmpty {
             object["website"] = website
             object["website_name"] = URL(string: website)?.host ?? website
         }
         if let location = user.location, !location.isEmpty { object["location"] = location }
-        if let followers = stats?.followerCount { object["total_followers"] = followers }
-        if let following = stats?.followingCount { object["total_following"] = following }
         return ["user": object, "badges": [Object]()]
     }
 

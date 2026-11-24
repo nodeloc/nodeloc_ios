@@ -41,6 +41,10 @@ final class ShapeTests: XCTestCase {
         XCTAssertEqual(latest.users?.first { $0.id == posterID }?.username, source.author)
         // Times parse with the app's own parser.
         XCTAssertNotNil(DiscourseFormat.date(first.createdAt))
+        // The row votes on the first post in place.
+        XCTAssertEqual(first.opPostId, source.firstPostId)
+        XCTAssertEqual(first.opVoteScore, source.voteScore)
+        XCTAssertEqual(first.opVoteDirection, DiscourseShape.vote(direction: source.viewerVote ?? 0) == "up" ? .up : (source.viewerVote ?? 0) < 0 ? .down : VoteDirection.none)
     }
 
     @MainActor
@@ -55,6 +59,11 @@ final class ShapeTests: XCTestCase {
         XCTAssertEqual(op.username, detail.posts[0].author)
         XCTAssertEqual(op.voteScore, detail.posts[0].score)
         XCTAssertFalse((op.cooked ?? "").isEmpty)
+        // Edit/delete rights are the server's own answer.
+        XCTAssertEqual(op.canEdit, detail.posts[0].canEdit)
+        XCTAssertEqual(op.canDelete, detail.posts[0].canDelete)
+        XCTAssertNotNil(detail.topic.hasLottery)
+        XCTAssertNotNil(detail.topic.notificationLevel)
     }
 
     @MainActor
@@ -119,6 +128,9 @@ final class ShapeTests: XCTestCase {
         let shaped: UserResponse = try NodelocJSON.decode(object: DiscourseShape.userProfile(profile, avatar: nil))
         XCTAssertEqual(shaped.user.username, profile.user.username)
         XCTAssertEqual(shaped.user.postCount, profile.stats?.postCount)
+        XCTAssertEqual(shaped.user.totalFollowers, profile.user.followerCount)
+        XCTAssertEqual(shaped.user.isFollowed, profile.user.viewerFollowing)
+        XCTAssertNotNil(profile.user.canMessage)
     }
 
     @MainActor
@@ -141,5 +153,27 @@ final class ShapeTests: XCTestCase {
             "category_list": ["categories": [DiscourseShape.category(section, children: children)]],
         ])
         XCTAssertEqual(shaped.categoryList.categories.first?.subcategoryList?.count, children.count)
+    }
+
+    @MainActor
+    func testMyNodesMarkJoinedAndBell() async throws {
+        try primeNodes()
+        let mine = try NodelocJSON.decode(NLMyNodes.self, from: Self.fixture("my_nodes"))
+        let joined = try XCTUnwrap(mine.joined.first)
+        NodelocAdapterState.shared.myNodes = [joined.slug: joined]
+        let node = try XCTUnwrap(NodelocAdapterState.shared.nodesBySlug[joined.slug])
+        let category: DiscourseCategory = try NodelocJSON.decode(object: DiscourseShape.category(node))
+        XCTAssertEqual(category.isJoined, true)
+        XCTAssertEqual(category.notificationLevel, DiscourseShape.notificationLevel(node: joined.notificationLevel ?? "normal"))
+    }
+
+    @MainActor
+    func testSearchAndUserPostsDecode() async throws {
+        let search = try NodelocJSON.decode(NLSearchResults.self, from: Self.fixture("search"))
+        XCTAssertFalse(search.posts?.isEmpty ?? true)
+        let posts = try NodelocJSON.decode(NLUserPosts.self, from: Self.fixture("user_posts"))
+        XCTAssertFalse(posts.posts.isEmpty)
+        let notifications = try NodelocJSON.decode(NLNotifications.self, from: Self.fixture("notifications"))
+        XCTAssertTrue(notifications.notifications.allSatisfy { $0.followingActor != nil })
     }
 }

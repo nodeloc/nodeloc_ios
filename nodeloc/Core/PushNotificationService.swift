@@ -312,10 +312,34 @@ extension PushNotificationService: UNUserNotificationCenterDelegate {
         let userInfo = response.notification.request.content.userInfo
         if let string = userInfo["url"] as? String, let url = URL(string: string) {
             routedURL = url
-        } else if let path = userInfo["path"] as? String, !path.isEmpty,
-                  let url = URL(string: path, relativeTo: DiscourseConfig.baseURL)?.absoluteURL {
-            // A remote push names the page by its site path.
-            routedURL = url
+            return
         }
+        // A remote push from the server: mark it read, then open the post it
+        // names (or its site path).
+        if let id = Self.int(userInfo["notification_id"]) {
+            Task { _ = try? await client.markNotificationRead(id: id) }
+        }
+        routedURL = Self.remoteTarget(userInfo)
+    }
+
+    /// Where a server push points: the topic's floor when it names one,
+    /// otherwise its site path.
+    static func remoteTarget(_ userInfo: [AnyHashable: Any]) -> URL? {
+        if let topicID = int(userInfo["topic_id"]) {
+            var path = "t/topic/\(topicID)"
+            if let number = int(userInfo["post_number"]), number > 1 { path += "/\(number)" }
+            return DiscourseConfig.baseURL.appending(path: path)
+        }
+        if let path = userInfo["path"] as? String, !path.isEmpty {
+            return URL(string: path, relativeTo: DiscourseConfig.baseURL)?.absoluteURL
+        }
+        return nil
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? NSNumber { return number.intValue }
+        if let text = value as? String { return Int(text) }
+        return nil
     }
 }
