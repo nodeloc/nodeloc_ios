@@ -307,6 +307,8 @@ nonisolated struct ComposeVideoAttachment: Identifiable, Sendable {
     /// `playableMediaMarkdown` in the web composer's uploads.js.
     var markdown: String? {
         guard let url = upload.composerURLString else { return nil }
+        // The backend embeds an uploaded video by its marker, not by a link.
+        if url.hasPrefix("[video ") { return url }
         return "![\(escapedLabel)|video](\(url))"
     }
 

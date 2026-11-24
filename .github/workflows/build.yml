@@ -25,12 +25,16 @@ jobs:
           xcodebuild -version
           swift --version
 
-      # Foundation-only core (NodelocKit) is also a SwiftPM package; its tests run on macOS too.
+      # The Foundation-only core (nodeloc/Core/Kit) also builds as a SwiftPM
+      # package; its unit tests run here as they do on Linux. The integration
+      # tests skip themselves without NODELOC_IT_BASE_URL.
       - name: NodelocKit tests
-        if: hashFiles('Package.swift') != ''
-        run: swift test 2>&1 | tee swift-test.log
+        run: |
+          set -o pipefail
+          swift test --package-path NodelocKit 2>&1 | tee swift-test.log
 
       - name: Build app (iOS Simulator, unsigned)
+        if: success() || failure()
         run: |
           status=0
           xcodebuild -project nodeloc.xcodeproj -scheme nodeloc \

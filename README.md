@@ -1,7 +1,7 @@
 # NODELOC for iOS
 
-A native SwiftUI client for [nodeloc.com](https://www.nodeloc.com), a Discourse
-forum. Feed, threaded reading, composing, live chat, private messages, search,
+A native SwiftUI client for [nodeloc.com](https://www.nodeloc.com), talking to
+the NodeLoc backend's `/api/v1`. Feed, threaded reading, composing, live chat, private messages, search,
 notifications and profiles — all drawn natively rather than wrapped around a
 web view.
 
@@ -57,23 +57,42 @@ up on its own — you never edit `project.pbxproj` to add a source file.
 
 ---
 
-## Pointing it at another Discourse site
+## Backend
 
-Most of the app is ordinary Discourse. `DiscourseConfig` in
-`Core/DiscourseAPI.swift` holds the base URL, and changing it gets you a
-surprising distance.
+Since 2.0 the app talks to the NodeLoc backend (`/api/v1`, bearer-token or
+session-cookie auth, server-sent events for live updates) instead of
+Discourse. The screens were not rewritten for it:
 
-What will not follow, and why it is worth knowing before forking:
+- `nodeloc/Core/Kit/` is the data layer, Foundation-only. `NodelocHTTP` is the
+  transport, `NodelocDTO` the wire types, and `DiscourseClient`
+  (`DiscourseAPI.swift`) keeps the method names and model types the screens
+  already used, shaping each answer through `DiscourseShape` so it decodes
+  with the existing models in `DiscourseModels.swift`.
+- `NodelocMarkup` rewrites the backend's post HTML into the vocabulary
+  `PostHTMLParser` reads (polls, spoilers, login-gated blocks, videos, node
+  and tag references).
+- `ChatRealtime.swift` serves the old MessageBus subscriptions from the event
+  stream (`/api/v1/notifications/stream`).
+- `NodelocFeatures` lists what the backend doesn't have (chat reactions,
+  edits, pins, threads and search; topic-style private messages; the posting
+  device line); their entry points are hidden.
 
-- **Plugin features.** Energy/points, 抽奖, red envelopes, node subscriptions,
-  custom badges, nested replies, author-gated post sections and the app's own
-  `/mobile/*` endpoints all come from plugins nodeloc runs. Their absence is
-  handled (a 404 turns the feature off rather than breaking the screen), but
-  those parts of the UI will be empty.
-- **`invite_code`.** The site requires one; the app ships the value the admin
-  reserved for it. Yours will differ or be unnecessary.
-- **Brand assets.** The wordmark, app icon and NODELOC name are not covered by
-  the licence — see `NOTICE.md`.
+`DEBUG` builds read `NODELOC_BASE_URL` from the scheme's environment to point
+at a local backend.
+
+### Testing without Xcode
+
+`NodelocKit/` is a SwiftPM package that compiles `nodeloc/Core/Kit` (through a
+symlink) plus the post HTML parser, so the data layer builds and tests on
+macOS or Linux:
+
+```sh
+swift test --package-path NodelocKit
+# also run the end-to-end tests against a throwaway backend with seed data
+NODELOC_IT_BASE_URL=http://127.0.0.1:8180 swift test --package-path NodelocKit
+```
+
+`.github/workflows/build.yml` runs those tests and an unsigned simulator build.
 
 ---
 

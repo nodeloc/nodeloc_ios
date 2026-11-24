@@ -363,7 +363,7 @@ private struct ProviderWebView: UIViewRepresentable {
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self, !self.hasFinished else { return }
                 let siteCookies = cookies.filter { strip($0.domain) .hasSuffix(strip(siteHost)) }
-                guard siteCookies.contains(where: { $0.name == "_t" }) else { return }
+                guard siteCookies.contains(where: { $0.name == "nl_session" }) else { return }
                 self.hasFinished = true
                 self.onAuthenticated(siteCookies)
             }

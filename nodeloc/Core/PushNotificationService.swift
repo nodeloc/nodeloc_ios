@@ -16,6 +16,7 @@
 //
 
 import SwiftUI
+import UIKit
 import BackgroundTasks
 import UserNotifications
 
@@ -169,8 +170,29 @@ final class PushNotificationService: NSObject {
             .requestAuthorization(options: [.alert, .sound, .badge])) ?? false
         await refreshAuthorizationStatus()
         preferences.isEnabled = granted
-        if granted { scheduleBackgroundRefresh() }
+        if granted {
+            scheduleBackgroundRefresh()
+            registerForRemotePushIfAllowed()
+        }
         return granted
+    }
+
+    // MARK: Remote push (APNs)
+
+    /// Asks iOS for the device token once push is on and someone is signed
+    /// in; the token itself arrives through the app delegate.
+    func registerForRemotePushIfAllowed() {
+        guard preferences.isEnabled, DiscourseAuth.shared.isAuthenticated else { return }
+        UIApplication.shared.registerForRemoteNotifications()
+    }
+
+    /// The device token from APNs, registered with the server for the
+    /// signed-in account. The server pushes directly through APNs.
+    func didRegisterForRemoteNotifications(deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        PushTokenStore.token = token
+        guard DiscourseAuth.shared.isAuthenticated else { return }
+        Task { try? await client.registerPushDevice(token: token) }
     }
 
     /// The app is frontmost again: the in-app badge supersedes anything
@@ -287,8 +309,13 @@ extension PushNotificationService: UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        guard let string = response.notification.request.content.userInfo["url"] as? String,
-              let url = URL(string: string) else { return }
-        routedURL = url
+        let userInfo = response.notification.request.content.userInfo
+        if let string = userInfo["url"] as? String, let url = URL(string: string) {
+            routedURL = url
+        } else if let path = userInfo["path"] as? String, !path.isEmpty,
+                  let url = URL(string: path, relativeTo: DiscourseConfig.baseURL)?.absoluteURL {
+            // A remote push names the page by its site path.
+            routedURL = url
+        }
     }
 }

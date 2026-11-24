@@ -560,7 +560,7 @@ final class TopicStore {
     }
 
     private func failureText(_ error: Error) -> String {
-        if case DiscourseError.badResponse(let status, _) = error {
+        if case DiscourseError.badResponse(let status, _, _) = error {
             switch status {
             case 403: return AppString("没有权限执行该操作。")
             case 422: return AppString("操作被拒绝，可能条件不满足。")

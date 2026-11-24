@@ -1764,7 +1764,7 @@ final class ComposeStore {
     /// Human-readable text for an upload failure shown on an attachment tile.
     func uploadFailureText(_ error: Error) -> String {
         if let composeError = error as? ComposeUploadError { return composeError.message }
-        if case DiscourseError.badResponse(let status, _) = error {
+        if case DiscourseError.badResponse(let status, _, _) = error {
             switch status {
             case 429: return AppString("上传太频繁，请稍后重试。")
             case 413: return AppString("图片太大，站点拒绝了上传。")
@@ -4213,7 +4213,7 @@ final class ChatConversationStore {
             do {
                 let response = try await client.chatThreads(channelID: chat.id)
                 channelThreads = ChatThreadMapper.threads(from: response)
-            } catch DiscourseError.badResponse(let code, _) where code == 404 {
+            } catch DiscourseError.badResponse(let code, _, _) where code == 404 {
                 Self.chatThreadsAvailable = false
                 channelThreads = []
             } catch {

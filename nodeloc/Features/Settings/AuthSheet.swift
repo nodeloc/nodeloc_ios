@@ -275,7 +275,7 @@ struct AuthFlowOverlay: View {
             completeAuth()
             return true
         } catch let error as DiscourseError {
-            if case .badResponse(let code, let message) = error {
+            if case .badResponse(let code, let message, _) = error {
                 // Not deployed — let the caller use the web flow.
                 if code == 404 || code == 501 { return false }
                 // 403 means it can't finish natively; escalate to the web flow,
@@ -716,9 +716,9 @@ struct AuthFlowOverlay: View {
         Task {
             defer { isBusy = false }
             do {
-                try await DiscourseLogin.shared.loginWithUserAPIKey()
+                try await DiscourseLogin.shared.loginWithSystemBrowser()
                 completeAuth()
-            } catch UserAPIKeyAuthError.cancelled {
+            } catch SocialAuthError.cancelled {
                 // Backing out of the sheet is a choice, not a failure.
             } catch {
                 // Most likely the site hasn't whitelisted our callback. The

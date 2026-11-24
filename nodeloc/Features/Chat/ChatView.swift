@@ -308,7 +308,7 @@ struct ChatView: View {
 
     private var messageTabs: some View {
         HStack(spacing: 0) {
-            ForEach(MessagePane.allCases, id: \.self) { pane in
+            ForEach(MessagePane.allCases.filter { $0 != .privateMessages || NodelocFeatures.topicPrivateMessages }, id: \.self) { pane in
                 Button {
                     withAnimation(.quicker) {
                         selection = pane
@@ -392,7 +392,7 @@ struct ChatView: View {
                 .frame(width: 34, height: 34)
 
             HStack(spacing: 8) {
-                ForEach(ChatInboxFilter.allCases, id: \.self) { filter in
+                ForEach(ChatInboxFilter.allCases.filter { $0 == .messages || NodelocFeatures.chatThreadsAndSearch }, id: \.self) { filter in
                     Button {
                         withAnimation(.quicker) {
                             chatFilter = filter
@@ -2590,7 +2590,7 @@ private struct ChatMessageBubble: View {
         // them. `contextMenu` rather than a custom gesture: it doesn't fight the
         // scroll view, and it gives the press its own preview and haptic.
         .contextMenu {
-            if let onAddReaction {
+            if NodelocFeatures.chatReactions, let onAddReaction {
                 Button(action: onAddReaction) {
                     Label("表情回应", systemImage: "face.smiling")
                 }
@@ -2608,7 +2608,7 @@ private struct ChatMessageBubble: View {
                     Label("复制文本", systemImage: "doc.on.doc")
                 }
             }
-            if let onTogglePin {
+            if NodelocFeatures.chatPins, let onTogglePin {
                 Button(action: onTogglePin) {
                     Label(
                         isPinned ? AppString("取消置顶") : AppString("置顶消息"),
@@ -2616,12 +2616,12 @@ private struct ChatMessageBubble: View {
                     )
                 }
             }
-            if let onQuoteToPost {
+            if NodelocFeatures.chatTranscripts, let onQuoteToPost {
                 Button(action: onQuoteToPost) {
                     Label("引用到帖子", systemImage: "arrow.up.doc")
                 }
             }
-            if message.canModify, let onEdit {
+            if NodelocFeatures.chatEditing, message.canModify, let onEdit {
                 Button(action: onEdit) {
                     Label("编辑", systemImage: "pencil")
                 }

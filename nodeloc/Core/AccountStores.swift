@@ -247,7 +247,7 @@ final class SecurityStore {
             ToastCenter.shared.show(AppString("已绑定 Apple 账号"))
             return true
         } catch let error as DiscourseError {
-            if case .badResponse(let code, _) = error {
+            if case .badResponse(let code, _, _) = error {
                 // Not deployed — the caller falls back to the web page.
                 if code == 404 || code == 501 { return false }
                 // The generic copy for 403/409 talks about *logging in*, which

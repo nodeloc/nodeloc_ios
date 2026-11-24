@@ -96,8 +96,10 @@ struct SettingsOverlay: View {
                             SettingsNavRow(title: AppString("屏蔽的用户"), icon: "hand.raised") {
                                 withAnimation(.panelSlide) { openAccountPage = .blockedUsers }
                             }
-                            SettingsNavRow(title: AppString("发帖来源"), icon: "iphone.gen3") {
-                                withAnimation(.panelSlide) { openAccountPage = .postSource }
+                            if NodelocFeatures.postSource {
+                                SettingsNavRow(title: AppString("发帖来源"), icon: "iphone.gen3") {
+                                    withAnimation(.panelSlide) { openAccountPage = .postSource }
+                                }
                             }
                         }
                     }

@@ -1,0 +1,214 @@
+import Foundation
+import XCTest
+@testable import NodelocCore
+
+/// End-to-end against a running backend with the demo seed data
+/// (`nodeloc seed`). Skipped unless `NODELOC_IT_BASE_URL` is set, e.g.
+///
+///     NODELOC_IT_BASE_URL=http://127.0.0.1:8180 swift test
+///
+/// Writes to that instance (a reply, a vote, a bookmark, direct messages), so
+/// point it at a throwaway database only.
+final class IntegrationTests: XCTestCase {
+    static let password = ProcessInfo.processInfo.environment["NODELOC_IT_PASSWORD"] ?? "nodeloc-demo-2026"
+
+    final class MemoryStore: CredentialStore {
+        var values: [String: String] = [:]
+        func get(_ account: String) -> String? { values[account] }
+        func set(_ value: String, for account: String) { values[account] = value }
+        func delete(_ account: String) { values[account] = nil }
+    }
+
+    struct Session {
+        let auth: DiscourseAuth
+        let login: DiscourseLogin
+        let client: DiscourseClient
+    }
+
+    private func baseURL() throws -> URL {
+        guard let raw = ProcessInfo.processInfo.environment["NODELOC_IT_BASE_URL"], let url = URL(string: raw) else {
+            throw XCTSkip("NODELOC_IT_BASE_URL not set")
+        }
+        return url
+    }
+
+    @MainActor
+    private func signIn(_ username: String) async throws -> Session {
+        let base = try baseURL()
+        let auth = DiscourseAuth()
+        let login = DiscourseLogin(auth: auth, baseURL: base, store: MemoryStore())
+        try await login.login(identifier: username, password: Self.password)
+        XCTAssertTrue(auth.isAuthenticated)
+        XCTAssertEqual(auth.username, username)
+        return Session(auth: auth, login: login, client: DiscourseClient(baseURL: base, auth: auth))
+    }
+
+    @MainActor
+    func testReaderAndWriterJourney() async throws {
+        NodelocAdapterState.shared.reset()
+        let alice = try await signIn("alice")
+        let client = alice.client
+
+        // Who am I.
+        let me = try await client.currentUser()
+        XCTAssertEqual(me.currentUser.username, "alice")
+
+        // Wrong password and the second-factor signal surface as AuthError.
+        let other = DiscourseLogin(auth: DiscourseAuth(), baseURL: try baseURL(), store: MemoryStore())
+        do {
+            try await other.login(identifier: "alice", password: "wrong-password-123")
+            XCTFail("wrong password signed in")
+        } catch AuthError.loginFailed(let message) {
+            XCTAssertFalse(message.isEmpty)
+        }
+
+        // Site, nodes.
+        let site = try await client.site()
+        XCTAssertFalse(site.categories?.isEmpty ?? true)
+        let categories = try await client.categories(includeSubcategories: true)
+        XCTAssertFalse(categories.categoryList.categories.isEmpty)
+
+        // Feeds: latest pages by cursor, hot and the personal feed by offset.
+        let latest = try await client.topicList(feed: .latest)
+        XCTAssertFalse(latest.topicList.topics.isEmpty)
+        let hot = try await client.topicList(feed: .hot)
+        XCTAssertFalse(hot.topicList.topics.isEmpty)
+        let best = try await client.topicList(feed: .best)
+        XCTAssertFalse(best.topicList.topics.isEmpty)
+
+        // A node's own list.
+        let nodeTopic = try XCTUnwrap(latest.topicList.topics.first { ($0.categoryId ?? 0) > 0 })
+        let nodeList = try await client.nodeTopics(path: "", categoryID: nodeTopic.categoryId!)
+        XCTAssertTrue(nodeList.topicList?.topics.contains { $0.categoryId == nodeTopic.categoryId } ?? false)
+
+        // A topic with replies: OP, reply tree, children.
+        let busy = try XCTUnwrap(latest.topicList.topics.filter { ($0.postsCount ?? 0) > 2 && $0.categoryId != nil }.first)
+        let topic = try await client.topic(id: busy.id)
+        XCTAssertEqual(topic.postStream.posts.first?.postNumber, 1)
+        let tree = try await client.nestedTopic(id: busy.id, sort: "best")
+        XCTAssertFalse(tree.roots?.isEmpty ?? true)
+
+        // Reply, then find it by id the way the reader does after posting.
+        let created = try await client.reply(topicID: busy.id, raw: "来自 iOS 适配层的集成测试回复 \(UUID().uuidString.prefix(6))")
+        let replyID = try XCTUnwrap(created.id)
+        let fetched = try await client.topicPosts(topicID: busy.id, postIDs: [replyID])
+        XCTAssertEqual(fetched.postStream.posts.first?.id, replyID)
+        XCTAssertEqual(fetched.postStream.posts.first?.yours, true)
+
+        // Vote on someone else's reply; the cached copy follows.
+        let target = try XCTUnwrap(tree.roots?.first { $0.username != "alice" })
+        _ = try await client.castVote(postID: target.id, direction: .up)
+        let voted = try await client.topicPosts(topicID: busy.id, postIDs: [target.id])
+        XCTAssertEqual(voted.postStream.posts.first?.voteDirection, .up)
+        _ = try await client.castVote(postID: target.id, direction: .none)
+
+        // Bookmark shows up in the profile's bookmarks activity.
+        _ = try await client.bookmark(postID: target.id)
+        let bookmarks = try await client.userActions(username: "alice", filter: 3)
+        XCTAssertTrue(bookmarks.userActions.contains { $0.postId == target.id })
+        _ = try await client.removeBookmark(postID: target.id)
+
+        // Notifications and unread marking.
+        let notifications = try await client.notifications()
+        XCTAssertFalse(notifications.notifications.isEmpty)
+        _ = try await client.markNotificationsRead()
+
+        // Profile and summary.
+        let bob = try await client.user("bob")
+        XCTAssertEqual(bob.user.username, "bob")
+        _ = try await client.userSummary("bob")
+
+        // Search: posts when the server has a search API, users and nodes
+        // always.
+        let search = try await client.search("VPS")
+        XCTAssertNotNil(search.categories ?? search.topics)
+
+        // Tags and mention lookup.
+        _ = try await client.searchTags(term: "")
+        let users = try await client.searchUsers(term: "bo")
+        XCTAssertTrue(users.users?.contains { $0.username == "bob" } ?? false)
+
+        // Upload an image.
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")!
+        let upload = try await client.uploadChatMedia(data: png, fileName: "dot.png", mimeType: "image/png")
+        XCTAssertTrue(upload.url?.contains("/uploads/") ?? false)
+
+        // Check-in answers either way without throwing.
+        _ = try await client.checkIn()
+
+        // Joining and leaving a node by the id the screens hold.
+        let joinable = try XCTUnwrap(NodelocAdapterState.shared.allNodes.first { $0.parentId != nil && $0.joined != true })
+        _ = try await client.joinNode(categoryID: joinable.id)
+        let joined = try await client.sidebarNodes()
+        XCTAssertTrue(joined.communities?.contains { $0.id == joinable.id } ?? false)
+        _ = try await client.leaveNode(categoryID: joinable.id)
+
+        // A custom feed: create, add a node, list its topics, delete.
+        let feed = try await client.createCustomFeed(name: "测试订阅", description: "", isPrivate: true, showOnProfile: false)
+        let withNode = try await client.addCustomFeedNode(feedID: feed.customFeed.id, categoryID: nodeTopic.categoryId!)
+        XCTAssertEqual(withNode.customFeed.nodes?.first?.id, nodeTopic.categoryId)
+        let feedTopics = try await client.customFeedTopics(username: "alice", slug: feed.customFeed.slug)
+        XCTAssertNotNil(feedTopics.topicList)
+        try await client.deleteCustomFeed(id: feed.customFeed.id)
+
+        // Edit the reply, read it back raw, delete it.
+        let raw = try await client.postRaw(id: replyID)
+        XCTAssertTrue(raw.raw?.contains("集成测试") ?? false)
+        _ = try await client.updatePost(id: replyID, raw: (raw.raw ?? "") + "（已编辑）")
+        _ = try await client.deletePost(id: replyID)
+
+        // Bob was replied to? At least his notifications load and shape.
+        let bobSession = try await signIn("bob")
+        _ = try await bobSession.client.notifications()
+    }
+
+    @MainActor
+    func testDirectMessageWithLiveEvent() async throws {
+        NodelocAdapterState.shared.reset()
+        let alice = try await signIn("alice")
+        let carol = try await signIn("carol")
+
+        // Carol opens the stream before Alice writes.
+        let realtime = NodelocRealtime.shared
+        realtime.client = carol.client
+        let received = expectation(description: "chat event reaches carol")
+        received.assertForOverFulfill = false
+        let handler = realtime.addHandler { event in
+            if event.event == "chat", event.data.contains("\"new\"") { received.fulfill() }
+        }
+        defer { realtime.removeHandler(handler); realtime.client = DiscourseClient() }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+
+        // Alice starts (or continues) the conversation with Carol.
+        let channel = try await alice.client.createDirectMessageChannel(usernames: ["carol"])
+        let text = "集成测试私信 \(UUID().uuidString.prefix(6))"
+        _ = try await alice.client.createChatMessage(channelID: channel.channel.id, message: text)
+
+        await fulfillment(of: [received], timeout: 15)
+
+        // Carol sees the conversation and the message.
+        NodelocAdapterState.shared.reset()
+        let carolChannels = try await carol.client.chatChannels()
+        let direct = try XCTUnwrap(carolChannels.directMessageChannels?.first {
+            $0.chatable?.users?.contains { $0.username == "alice" } ?? false
+        })
+        let messages = try await carol.client.chatMessages(channelID: direct.id)
+        XCTAssertTrue(messages.messages.contains { DiscourseFormat.plainText($0.cooked).contains(text) })
+        if let newest = messages.messages.last?.id {
+            _ = try await carol.client.markChatChannelRead(channelID: direct.id, messageID: newest)
+        }
+
+        // A public channel: list, read, write.
+        let channels = try await alice.client.chatChannels()
+        if let lounge = channels.publicChannels?.first(where: { $0.currentUserMembership?.following == true }) {
+            let before = try await alice.client.chatMessages(channelID: lounge.id)
+            _ = try await alice.client.createChatMessage(channelID: lounge.id, message: "频道消息 \(UUID().uuidString.prefix(4))")
+            let after = try await alice.client.chatMessages(channelID: lounge.id)
+            XCTAssertGreaterThan(after.messages.last?.id ?? 0, before.messages.last?.id ?? 0)
+        }
+
+        // Signing out ends the session server-side as well.
+        carol.login.signOut()
+        XCTAssertFalse(carol.auth.isAuthenticated)
+    }
+}
