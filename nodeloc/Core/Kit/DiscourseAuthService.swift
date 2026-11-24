@@ -102,6 +102,10 @@ final class DiscourseLogin {
     /// Restores a stored session on launch. Returns true if signed in.
     @discardableResult
     func restore() -> Bool {
+        // Discourse-era sessions mean nothing to the new backend.
+        for legacy in ["nodeloc.user_api_key", "nodeloc.session_cookie", "nodeloc.csrf_token"] {
+            store.delete(legacy)
+        }
         restoreCookies()
         guard let encoded = store.get(keychainCredential),
               let credential = NodelocCredential(encoded: encoded)

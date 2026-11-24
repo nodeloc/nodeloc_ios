@@ -970,6 +970,7 @@ struct DiscourseClient {
 
     /// Only the reader's own ledger is visible.
     func pointsHistory(username: String, page: Int = 0) async throws -> PointsHistoryResponse {
+        guard isMe(username) else { throw DiscourseError.unsupported }
         var query = [URLQueryItem(name: "limit", value: "30")]
         if page > 0 {
             guard let before = state.cursor(list: "points", page: page) else {
@@ -995,6 +996,7 @@ struct DiscourseClient {
     }
 
     func pointsTotal(username: String) async throws -> PointsScoresResponse {
+        guard isMe(username) else { throw DiscourseError.unsupported }
         let balance: NLPointsBalance = try await get("api/v1/points")
         return try Self.shaped(["total_scores": balance.balance])
     }
@@ -1005,7 +1007,7 @@ struct DiscourseClient {
     func appsDirectory() async throws -> [DirectoryApp] {
         var apps: [DirectoryApp] = []
         for page in 0..<20 {
-            let data = try await http.send("GET", "apps.json", query: [URLQueryItem(name: "page", value: String(page))])
+            let data = try await http.send("GET", "apps/directory", query: [URLQueryItem(name: "page", value: String(page))])
             let response = try NodelocJSON.decode(AppsDirectoryResponse.self, from: data)
             apps.append(contentsOf: response.apps)
             if response.apps.isEmpty || apps.count >= (response.total ?? 0) { break }
@@ -1603,6 +1605,10 @@ struct DiscourseClient {
         let path = template.replacingOccurrences(of: "{size}", with: String(size))
         if path.hasPrefix("http") { return URL(string: path) }
         return URL(string: path, relativeTo: baseURL)?.absoluteURL
+    }
+
+    private func isMe(_ username: String) -> Bool {
+        username.lowercased() == auth.username?.lowercased()
     }
 
     nonisolated static func pathEscape(_ segment: String) -> String {

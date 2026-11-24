@@ -87,6 +87,17 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(topic.postStream.posts.first?.postNumber, 1)
         let tree = try await client.nestedTopic(id: busy.id, sort: "best")
         XCTAssertFalse(tree.roots?.isEmpty ?? true)
+        if let parent = tree.roots?.first(where: { ($0.directReplyCount ?? 0) > 0 }), let number = parent.postNumber {
+            let children = try await client.nestedChildren(topicID: busy.id, postNumber: number, sort: "best")
+            XCTAssertFalse(children.children?.isEmpty ?? true)
+        }
+        // Somebody else's points are private.
+        do {
+            _ = try await client.pointsTotal(username: "bob")
+            XCTFail("another user's balance was served")
+        } catch DiscourseError.unsupported {}
+        let mine = try await client.pointsTotal(username: "alice")
+        XCTAssertNotNil(mine.totalScores)
 
         // Reply, then find it by id the way the reader does after posting.
         let created = try await client.reply(topicID: busy.id, raw: "来自 iOS 适配层的集成测试回复 \(UUID().uuidString.prefix(6))")
@@ -221,5 +232,42 @@ final class IntegrationTests: XCTestCase {
         // Signing out ends the session server-side as well.
         carol.login.signOut()
         XCTAssertFalse(carol.auth.isAuthenticated)
+    }
+
+    /// Every read the screens make decodes into its model.
+    @MainActor
+    func testEveryReadDecodes() async throws {
+        NodelocAdapterState.shared.reset()
+        let client = try await signIn("alice").client
+        _ = try await client.currentUser()
+        let nodes = try await client.loadNodes()
+        let section = try XCTUnwrap(nodes.first { $0.parentId == nil })
+        _ = try await client.nodeBrowse(parentCategoryID: section.id)
+        _ = try await client.recentlyVisitedNodes()
+        _ = try await client.checkNodeSlug("zz-new")
+        _ = try await client.customFeeds()
+        _ = try await client.customFeedNodeSearch(term: "v")
+        _ = try await client.searchTags(term: "", limit: 5)
+        _ = try await client.featureFlags()
+        _ = try await client.accountDetail(username: "alice")
+        _ = try await client.listSecondFactors()
+        _ = try await client.userBadges(username: "bob")
+        _ = try await client.emojis()
+        _ = try await client.pointsHistory(username: "alice")
+        _ = try await client.privateMessages(username: "alice")
+        _ = try await client.topicFeatureStats(categoryID: nil)
+        _ = try await client.reactionUsers(postID: 1)
+        _ = try await client.trustedSession()
+        _ = try await client.checkUsername("alice")
+        _ = try await client.checkUsername("someone-new-\(Int.random(in: 100...999))")
+        _ = try await client.tagTopics(slug: "vps")
+        _ = try await client.topicList(feed: .top)
+        let chat = try await client.chatChannels()
+        if let channel = chat.allChannels.first {
+            _ = try await client.chatChannel(id: channel.id)
+            _ = try await client.chatChannelMemberships(channelID: channel.id)
+        }
+        // The apps directory lives outside /api/v1 and may be switched off.
+        _ = try? await client.appsDirectory()
     }
 }

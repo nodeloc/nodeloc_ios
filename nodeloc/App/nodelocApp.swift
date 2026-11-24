@@ -51,6 +51,7 @@ struct nodelocApp: App {
             switch phase {
             case .active:
                 PushNotificationService.shared.appDidBecomeActive()
+                ReleaseCheck.runOnce()
             case .background:
                 PushNotificationService.shared.scheduleBackgroundRefresh()
                 // A cookie session can rotate; keep the newest for next launch.
