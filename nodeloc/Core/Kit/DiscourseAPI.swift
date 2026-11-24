@@ -205,6 +205,11 @@ struct DiscourseClient {
     /// Sign-in providers the site has enabled, when the server lists them.
     func authProviders() async throws -> [NLAuthProviders.Provider] {
         let response: NLAuthProviders = try await get("api/v1/auth/providers")
+        NodelocAuthCapabilities.appleNative = response.appleNative ?? false
+        NodelocAuthCapabilities.providerURLs = Dictionary(
+            response.providers.compactMap { provider in provider.url.map { (provider.name, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         return response.providers
     }
 

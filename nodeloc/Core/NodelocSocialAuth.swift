@@ -39,33 +39,29 @@ enum NodelocSocialAuth {
     /// Signs in through the system browser. `provider` picks one directly;
     /// nil opens the site's own sign-in page with every option.
     static func signIn(provider: String? = nil) async throws {
-        let client = DiscourseClient()
+        let login = DiscourseLogin.shared
         // A server that lists providers for apps also runs the hand-off; one
         // that doesn't would strand the browser on the site after sign-in.
-        guard (try? await client.authProviders()) != nil else { throw SocialAuthError.unavailable }
+        guard (try? await DiscourseClient().authProviders()) != nil else { throw SocialAuthError.unavailable }
 
-        let path = provider.map(NodelocAuthPaths.socialStart(provider:)) ?? "login"
-        var components = URLComponents(url: DiscourseConfig.baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
-        components.queryItems = [
-            URLQueryItem(name: "app", value: "ios"),
-            URLQueryItem(name: "redirect_uri", value: "\(DiscourseConfig.callbackScheme)://auth"),
-        ]
-        let callback = try await WebAuthSession.run(url: components.url!, callbackScheme: DiscourseConfig.callbackScheme)
-        let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        if let message = items.first(where: { $0.name == "error" })?.value {
-            throw AuthError.loginFailed(message)
+        let pkce = NodelocPKCE.make()
+        let url = login.socialSignInURL(provider: provider, pkce: pkce)
+        let callback = try await WebAuthSession.run(url: url, callbackScheme: DiscourseConfig.callbackScheme)
+        let code: String
+        do {
+            code = try DiscourseLogin.socialCallback(callback)
+        } catch AuthError.cancelled {
+            // "取消" on the site's "sign in to the app as @…?" page.
+            throw SocialAuthError.cancelled
         }
-        guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
-            throw SocialAuthError.noCode
-        }
-        try await DiscourseLogin.shared.completeSocialCode(code)
+        try await login.completeSocialCode(code, codeVerifier: pkce.verifier)
     }
 }
 
 extension DiscourseLogin {
     /// The system-browser sign-in the welcome screen offers first.
-    func loginWithSystemBrowser() async throws {
-        try await NodelocSocialAuth.signIn()
+    func loginWithSystemBrowser(provider: String? = nil) async throws {
+        try await NodelocSocialAuth.signIn(provider: provider)
     }
 
     /// Passkey sign-in: challenge from the server, assertion from the

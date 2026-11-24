@@ -83,6 +83,7 @@ final class DiscourseLogin {
     private let keychainCredential = "nodeloc.credential"
     private let keychainUser = "nodeloc.username"
     private let keychainCookies = "nodeloc.cookies"
+    private let keychainTrust = "nodeloc.trust_token"
 
     init(auth: DiscourseAuth = .shared, baseURL: URL = DiscourseConfig.baseURL, store: CredentialStore = DefaultCredentialStore()) {
         self.auth = auth
@@ -217,8 +218,10 @@ final class DiscourseLogin {
             body["code"] = secondFactorToken.trimmingCharacters(in: .whitespacesAndNewlines)
             body["trust_device"] = true
         }
+        var headers: [String: String] = [:]
+        if let trust = store.get(keychainTrust) { headers["X-Nodeloc-Trust"] = trust }
         do {
-            let result = try await client.http.sendWithResponse("POST", NodelocAuthPaths.login, body: .json(body))
+            let result = try await client.http.sendWithResponse("POST", NodelocAuthPaths.login, body: .json(body), headers: headers)
             try await adopt(result.data, response: result.response)
         } catch let error as DiscourseError {
             if error.serverCode == "second_factor_required" { throw AuthError.secondFactorRequired }
@@ -302,14 +305,44 @@ final class DiscourseLogin {
         try await finishSignIn()
     }
 
+    /// Where the system browser starts a sign-in: a provider's own route, or
+    /// the site's sign-in page (every option) when `provider` is nil. Carries
+    /// the PKCE challenge whose verifier `completeSocialCode` sends back.
+    func socialSignInURL(provider: String?, pkce: NodelocPKCE) -> URL {
+        let start = provider.flatMap { NodelocAuthCapabilities.providerURLs[$0] }.flatMap(URL.init(string:))
+            ?? baseURL.appending(path: provider.map(NodelocAuthPaths.socialStart(provider:)) ?? "login")
+        var components = URLComponents(url: start, resolvingAgainstBaseURL: false)!
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "app", value: "ios"),
+            URLQueryItem(name: "redirect_uri", value: "\(DiscourseConfig.callbackScheme)://auth"),
+            URLQueryItem(name: "code_challenge", value: pkce.challenge),
+        ]
+        return components.url!
+    }
+
+    /// Reads the browser's return to `nodeloc://auth`: the one-time code, or
+    /// why there isn't one.
+    static func socialCallback(_ url: URL) throws -> String {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        if let error = items.first(where: { $0.name == "error" })?.value {
+            if error == "cancelled" { throw AuthError.cancelled }
+            throw AuthError.loginFailed(AppString("登录没有完成，请重试。"))
+        }
+        guard let code = items.first(where: { $0.name == "code" })?.value, !code.isEmpty else {
+            throw AuthError.loginFailed(AppString("登录没有完成，请重试。"))
+        }
+        return code
+    }
+
     /// Exchanges the one-time code a system-browser sign-in returned with
     /// (`nodeloc://auth?code=…`) for a session.
-    func completeSocialCode(_ code: String) async throws {
+    func completeSocialCode(_ code: String, codeVerifier: String?) async throws {
         if auth.isAuthenticated { signOut() }
+        var body: [String: Any] = ["code": code, "device": DeviceName.current]
+        if let codeVerifier { body["code_verifier"] = codeVerifier }
         do {
             let result = try await client.http.sendWithResponse(
-                "POST", NodelocAuthPaths.socialExchange,
-                body: .json(["code": code, "device": DeviceName.current])
+                "POST", NodelocAuthPaths.socialExchange, body: .json(body)
             )
             try await adopt(result.data, response: result.response)
         } catch let error as DiscourseError {
@@ -329,8 +362,14 @@ final class DiscourseLogin {
         ]
         if let code = credential.authorizationCode { body["authorization_code"] = code }
         if let name = credential.fullName, !name.isEmpty { body["name"] = name }
-        let result = try await client.http.sendWithResponse("POST", NodelocAuthPaths.appleExchange, body: .json(body))
-        try await adopt(result.data, response: result.response)
+        do {
+            let result = try await client.http.sendWithResponse("POST", NodelocAuthPaths.appleExchange, body: .json(body))
+            try await adopt(result.data, response: result.response)
+        } catch let error as DiscourseError where error.statusCode == 404 {
+            // Not configured on this server: stop offering the native button.
+            NodelocAuthCapabilities.appleNative = false
+            throw error
+        }
     }
 
     // MARK: Passkeys
@@ -365,6 +404,7 @@ final class DiscourseLogin {
         } else {
             throw AuthError.loginFailed(AppString("登录未完成，请重试。"))
         }
+        if let trust = answer.trustToken, !trust.isEmpty { store.set(trust, for: keychainTrust) }
         auth.username = answer.user.username
         auth.userID = answer.user.id
         auth.isStaff = answer.user.isStaff

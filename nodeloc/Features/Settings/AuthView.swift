@@ -42,14 +42,16 @@ struct AuthView: View {
     /// Apple is drawn by its own native control, so it is taken out of the
     /// provider list rather than rendered as one of them.
     private var appleProvider: SocialAuthProvider? {
-        socialProviders.first { $0.name == "apple" }
+        // Native only where the server can take Apple's identity token;
+        // otherwise Apple is one of the browser's options.
+        NodelocAuthCapabilities.appleNative ? socialProviders.first(where: { $0.name == "apple" }) : nil
     }
 
     /// Everything else the site advertises. Only used to decide whether to
     /// offer the browser route at all, and to pick a fallback for it — the
     /// flow itself isn't per-provider.
     private var webProviders: [SocialAuthProvider] {
-        socialProviders.filter { $0.name != "apple" }
+        socialProviders.filter { $0.name != "apple" || !NodelocAuthCapabilities.appleNative }
     }
 
     var body: some View {

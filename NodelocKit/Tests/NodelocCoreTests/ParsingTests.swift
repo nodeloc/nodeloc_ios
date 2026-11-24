@@ -123,4 +123,47 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(Base64URL.encode(data), "-_8AEA")
         XCTAssertEqual(Base64URL.decode("-_8AEA"), data)
     }
+
+    // MARK: PKCE
+
+    func testSHA256Vectors() {
+        let hex = { (bytes: [UInt8]) in bytes.map { String(format: "%02x", $0) }.joined() }
+        XCTAssertEqual(hex(SHA256.hash(Array("abc".utf8))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(hex(SHA256.hash([])), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        // Spans several 64-byte blocks.
+        XCTAssertEqual(hex(SHA256.hash(Array(repeating: UInt8(ascii: "a"), count: 1000))),
+                       "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3")
+    }
+
+    func testPKCEChallengeIsBase64URLOfSHA256() {
+        XCTAssertEqual(NodelocPKCE.challenge(for: "dBjftJeZ4CVP-mJ0kZ-BLv3uTQ_3pv4FdmUaB09dq9k"),
+                       "I2R7jBXcnLdP68dWOXzraygRE-sH5yO8hprhCFA3BRk")
+        let pair = NodelocPKCE.make()
+        XCTAssertEqual(pair.verifier.count, 43)
+        XCTAssertEqual(pair.challenge, NodelocPKCE.challenge(for: pair.verifier))
+        XCTAssertNotEqual(pair.verifier, NodelocPKCE.make().verifier)
+    }
+
+    @MainActor
+    func testSocialCallbackParsing() async throws {
+        XCTAssertEqual(try DiscourseLogin.socialCallback(URL(string: "nodeloc://auth?code=abc123")!), "abc123")
+        XCTAssertThrowsError(try DiscourseLogin.socialCallback(URL(string: "nodeloc://auth?error=cancelled")!)) { error in
+            guard case AuthError.cancelled = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try DiscourseLogin.socialCallback(URL(string: "nodeloc://auth")!))
+    }
+
+    @MainActor
+    func testSocialSignInURLCarriesAppAndChallenge() async throws {
+        let login = DiscourseLogin(auth: DiscourseAuth(), baseURL: URL(string: "https://www.nodeloc.com")!, store: DefaultCredentialStore())
+        let pkce = NodelocPKCE(verifier: "v", challenge: "c")
+        let url = login.socialSignInURL(provider: "github", pkce: pkce)
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.path, "/auth/github")
+        let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(query["app"], "ios")
+        XCTAssertEqual(query["redirect_uri"], "nodeloc://auth")
+        XCTAssertEqual(query["code_challenge"], "c")
+        XCTAssertEqual(login.socialSignInURL(provider: nil, pkce: pkce).path, "/login")
+    }
 }

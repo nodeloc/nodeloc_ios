@@ -79,13 +79,15 @@ struct AuthFlowOverlay: View {
     /// Apple is drawn by its own native control rather than as one of the
     /// provider rows.
     private var appleProvider: SocialAuthProvider? {
-        socialProviders.first { $0.name == "apple" }
+        // Native only where the server can take Apple's identity token;
+        // otherwise Apple is one of the browser's options.
+        NodelocAuthCapabilities.appleNative ? socialProviders.first(where: { $0.name == "apple" }) : nil
     }
 
     /// Everything else the site advertises — used only to decide whether the
     /// browser route is worth offering, and to pick its fallback.
     private var webProviders: [SocialAuthProvider] {
-        socialProviders.filter { $0.name != "apple" }
+        socialProviders.filter { $0.name != "apple" || !NodelocAuthCapabilities.appleNative }
     }
 
     private let client = DiscourseClient()

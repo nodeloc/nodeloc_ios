@@ -65,6 +65,19 @@ enum NodelocReports {
     }
 }
 
+/// What the server's sign-in list said it supports, read by the sign-in
+/// screens (the native Apple button only shows when the server has it).
+@MainActor
+enum NodelocAuthCapabilities {
+    /// Remembered across launches: the provider list is cached with the rest
+    /// of the site data and not re-asked every time.
+    static var appleNative: Bool {
+        get { UserDefaults.standard.bool(forKey: "nodeloc.auth.apple_native") }
+        set { UserDefaults.standard.set(newValue, forKey: "nodeloc.auth.apple_native") }
+    }
+    static var providerURLs: [String: String] = [:]
+}
+
 /// Endpoints of the native sign-in flows, in one place because they are the
 /// part of the contract most likely to be renamed.
 nonisolated enum NodelocAuthPaths {

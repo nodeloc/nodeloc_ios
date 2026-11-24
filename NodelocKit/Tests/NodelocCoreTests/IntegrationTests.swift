@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import XCTest
 @testable import NodelocCore
 
@@ -39,6 +42,12 @@ final class IntegrationTests: XCTestCase {
         let login = DiscourseLogin(auth: auth, baseURL: base, store: MemoryStore())
         try await login.login(identifier: username, password: Self.password)
         XCTAssertTrue(auth.isAuthenticated)
+        // URLSession sends no Sec-Fetch-Mode, so the server hands this client
+        // a bearer token rather than only the website cookie.
+        guard case .bearer = auth.credential else {
+            XCTFail("expected a bearer token, got \(String(describing: auth.credential))")
+            return Session(auth: auth, login: login, client: DiscourseClient(baseURL: base, auth: auth))
+        }
         XCTAssertEqual(auth.username, username)
         return Session(auth: auth, login: login, client: DiscourseClient(baseURL: base, auth: auth))
     }
@@ -269,5 +278,90 @@ final class IntegrationTests: XCTestCase {
         }
         // The apps directory lives outside /api/v1 and may be switched off.
         _ = try? await client.appsDirectory()
+    }
+
+    /// The system-browser hand-off without the browser: a fresh session asks
+    /// `/app-login` for a code (what the browser does after signing in), and
+    /// the app exchanges it with its PKCE verifier.
+    @MainActor
+    func testAppCodeExchangeWithPKCE() async throws {
+        NodelocAdapterState.shared.reset()
+        let base = try baseURL()
+        let alice = try await signIn("alice")
+
+        func issueCode(_ pkce: NodelocPKCE) async throws -> String {
+            var components = URLComponents(url: base.appending(path: "app-login"), resolvingAgainstBaseURL: false)!
+            components.queryItems = [URLQueryItem(name: "code_challenge", value: pkce.challenge)]
+            var request = URLRequest(url: components.url!)
+            if case .bearer(let token) = alice.auth.credential {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+            let (_, response) = try await NoRedirect.session.data(for: request)
+            let location = try XCTUnwrap((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Location"))
+            XCTAssertTrue(location.hasPrefix("nodeloc://auth"), location)
+            return try DiscourseLogin.socialCallback(XCTUnwrap(URL(string: location)))
+        }
+
+        // Right verifier: a new session for the same account.
+        let pkce = NodelocPKCE.make()
+        let code = try await issueCode(pkce)
+        let auth = DiscourseAuth()
+        let login = DiscourseLogin(auth: auth, baseURL: base, store: MemoryStore())
+        try await login.completeSocialCode(code, codeVerifier: pkce.verifier)
+        XCTAssertEqual(auth.username, "alice")
+        guard case .bearer(let token) = auth.credential else { return XCTFail("no bearer token") }
+        XCTAssertNotEqual(auth.credential, alice.auth.credential)
+        XCTAssertFalse(token.isEmpty)
+        let me = try await DiscourseClient(baseURL: base, auth: auth).currentUser()
+        XCTAssertEqual(me.currentUser.username, "alice")
+
+        // Wrong verifier: refused, and the code is spent.
+        let other = NodelocPKCE.make()
+        let stolen = try await issueCode(other)
+        let thief = DiscourseLogin(auth: DiscourseAuth(), baseURL: base, store: MemoryStore())
+        do {
+            try await thief.completeSocialCode(stolen, codeVerifier: NodelocPKCE.make().verifier)
+            XCTFail("a wrong verifier was accepted")
+        } catch AuthError.loginFailed {}
+        do {
+            try await thief.completeSocialCode(stolen, codeVerifier: other.verifier)
+            XCTFail("a spent code was accepted")
+        } catch AuthError.loginFailed {}
+    }
+
+    /// Native Apple sign-in on a server without Apple configured: the list
+    /// says so, the endpoint answers 404, and the app stops offering it.
+    @MainActor
+    func testAppleNativeUnavailableIsReported() async throws {
+        let base = try baseURL()
+        let client = DiscourseClient(baseURL: base, auth: DiscourseAuth())
+        _ = try await client.authProviders()
+        let login = DiscourseLogin(auth: DiscourseAuth(), baseURL: base, store: MemoryStore())
+        let credential = AppleSignInCredential(identityToken: "not.a.jwt", nonce: "n", authorizationCode: nil, email: nil, fullName: nil)
+        do {
+            try await login.completeNativeAppleLogin(credential)
+            XCTFail("a bogus Apple token signed in")
+        } catch let error as DiscourseError {
+            if NodelocAuthCapabilities.appleNative {
+                XCTAssertEqual(error.serverCode, "apple_token_invalid")
+            } else {
+                XCTAssertEqual(error.statusCode, 404)
+            }
+        }
+    }
+}
+
+/// A session that stops at the first redirect, to read `Location`.
+final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let session = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }

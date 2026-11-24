@@ -48,6 +48,9 @@ nonisolated struct NLUserEnvelope: Codable, Sendable {
 nonisolated struct NLAuthResponse: Codable, Sendable {
     let user: NLUser
     let token: String?
+    /// "Don't ask for the second factor on this device again", returned when
+    /// a login sent a code with `trust_device`; sent back as `X-Nodeloc-Trust`.
+    let trustToken: String?
     let pendingApproval: Bool?
     let emailVerified: Bool?
     let loggedIn: Bool?
@@ -152,9 +155,12 @@ nonisolated struct NLAuthProviders: Codable, Sendable {
     struct Provider: Codable, Sendable {
         let name: String
         let label: String?
+        let icon: String?
         let url: String?
     }
     let providers: [Provider]
+    /// Whether `POST /api/v1/auth/apple/native` is configured.
+    let appleNative: Bool?
 }
 
 nonisolated struct NLUsernameCheck: Codable, Sendable {
