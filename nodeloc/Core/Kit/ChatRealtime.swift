@@ -335,8 +335,13 @@ final class MessageBusClient {
         guard let conversation = event.conversation else { return [] }
         let listWide: Set<String> = ["updated", "archived", "dissolved", "member", "muted"]
         return subscribed.filter { channel in
-            channel == "/chat/\(conversation)"
-                || channel == "/chat/\(conversation)/new-messages"
+            // A direct message opened before it existed is subscribed under
+            // its stand-in id.
+            let parts = channel.split(separator: "/")
+            let subscribedID = parts.count >= 2 ? Int(parts[1]) : nil
+            let resolved = subscribedID.flatMap { NodelocAdapterState.shared.serverConversationID($0) }
+            let matches = resolved == conversation
+            return (matches && (channel.hasSuffix("/new-messages") || parts.count == 2))
                 || (listWide.contains(event.type) && channel.hasSuffix("/new-messages"))
         }
     }

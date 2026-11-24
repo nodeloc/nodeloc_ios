@@ -181,9 +181,14 @@ final class NodelocAdapterState {
 
     func store(conversation: Conversation) {
         conversations[conversation.id] = conversation
-        if conversation.kind == .direct, let username = conversation.username {
-            pendingDirects = pendingDirects.filter { $0.value.lowercased() != username.lowercased() }
-        }
+    }
+
+    /// The server's id for a conversation the screens may still hold by its
+    /// stand-in id (a direct message opened before its first message).
+    func serverConversationID(_ id: Int) -> Int? {
+        if id > 0 { return id }
+        guard let username = pendingDirects[id] else { return nil }
+        return directConversation(with: username)?.id
     }
 
     func directConversation(with username: String) -> Conversation? {

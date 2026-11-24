@@ -1300,7 +1300,9 @@ struct DiscourseClient {
 
     private func chatTarget(_ channelID: Int) async throws -> ChatTarget {
         if let username = state.pendingDirectUsername(channelID) {
-            return .direct(username: username, conversationID: nil)
+            // Kept for the life of the screen that opened it, so it keeps
+            // working after the first message created the real conversation.
+            return .direct(username: username, conversationID: state.directConversation(with: username)?.id)
         }
         if state.conversations[channelID] == nil {
             _ = try await chatChannelsWithRaw()
@@ -1373,8 +1375,8 @@ struct DiscourseClient {
     }
 
     func markChatChannelRead(channelID: Int, messageID: Int) async throws -> Data {
-        guard channelID > 0, messageID > 0 else { return Self.ok }
-        return try await send("PUT", "api/v1/chat/conversations/\(channelID)/read", json: ["message_id": messageID])
+        guard let conversation = state.serverConversationID(channelID), messageID > 0 else { return Self.ok }
+        return try await send("PUT", "api/v1/chat/conversations/\(conversation)/read", json: ["message_id": messageID])
     }
 
     func chatChannel(id: Int) async throws -> ChatChannelResponse {
@@ -1395,7 +1397,8 @@ struct DiscourseClient {
         notificationLevel: String? = nil
     ) async throws -> ChatMembershipResponse {
         let mute = muted ?? (notificationLevel == "never")
-        try await send(mute ? "PUT" : "DELETE", "api/v1/chat/conversations/\(id)/mute")
+        guard let conversation = state.serverConversationID(id) else { throw DiscourseError.unsupported }
+        try await send(mute ? "PUT" : "DELETE", "api/v1/chat/conversations/\(conversation)/mute")
         return try Self.shaped(["membership": [
             "muted": mute, "following": true, "notification_level": mute ? "never" : "always",
         ] as [String: Any]])

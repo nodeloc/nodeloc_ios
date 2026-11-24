@@ -207,6 +207,17 @@ final class IntegrationTests: XCTestCase {
             XCTAssertGreaterThan(after.messages.last?.id ?? 0, before.messages.last?.id ?? 0)
         }
 
+        // A conversation that doesn't exist yet keeps working under the id the
+        // screen opened it with, before and after its first message.
+        let fresh = try await alice.client.createDirectMessageChannel(usernames: ["grace"])
+        let standIn = fresh.channel.id
+        _ = try await alice.client.createChatMessage(channelID: standIn, message: "第一条消息")
+        let firstPage = try await alice.client.chatMessages(channelID: standIn)
+        XCTAssertFalse(firstPage.messages.isEmpty)
+        if let newest = firstPage.messages.last?.id {
+            _ = try await alice.client.markChatChannelRead(channelID: standIn, messageID: newest)
+        }
+
         // Signing out ends the session server-side as well.
         carol.login.signOut()
         XCTAssertFalse(carol.auth.isAuthenticated)
