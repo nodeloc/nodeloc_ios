@@ -851,10 +851,22 @@ struct DiscourseClient {
         let profile: NLUserProfile = try await get("api/v1/users/\(Self.pathEscape(username))")
         state.remember(username: profile.user.username, id: profile.user.id, avatar: profile.user.avatarUrl)
         var avatar = profile.user.avatarUrl
-        if avatar == nil, profile.user.username.lowercased() == auth.username?.lowercased() {
-            avatar = state.myAvatar
+        var object = DiscourseShape.userProfile(profile, avatar: nil)
+        if isMe(profile.user.username) {
+            if avatar == nil { avatar = state.myAvatar }
+            // Your own profile carries your block list, as Discourse's did.
+            if let blocks: NLFollowList = try? await get("api/v1/me/blocks"), var user = object["user"] as? [String: Any] {
+                user["ignored_usernames"] = blocks.users.map(\.username)
+                user["can_ignore_users"] = true
+                user["can_mute_users"] = true
+                object["user"] = user
+            }
         }
-        return try Self.shaped(DiscourseShape.userProfile(profile, avatar: avatar ?? state.avatar(for: username)))
+        if var user = object["user"] as? [String: Any] {
+            user["avatar_template"] = DiscourseShape.value(avatar ?? state.avatar(for: username))
+            object["user"] = user
+        }
+        return try Self.shaped(object)
     }
 
     func userSummary(_ username: String) async throws -> UserSummaryResponse {
