@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+    branches: [api-v1]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          ls -d /Applications/Xcode*.app || true
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then echo "no Xcode 26 on this runner"; exit 1; fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          swift --version
+
+      # Foundation-only core (NodelocKit) is also a SwiftPM package; its tests run on macOS too.
+      - name: NodelocKit tests
+        if: hashFiles('Package.swift') != ''
+        run: swift test 2>&1 | tee swift-test.log
+
+      - name: Build app (iOS Simulator, unsigned)
+        run: |
+          status=0
+          xcodebuild -project nodeloc.xcodeproj -scheme nodeloc \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build > xcodebuild.log 2>&1 || status=$?
+          grep -E 'error:' xcodebuild.log | sort -u | head -300 || true
+          tail -5 xcodebuild.log
+          exit $status
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            xcodebuild.log
+            swift-test.log
+          if-no-files-found: ignore
