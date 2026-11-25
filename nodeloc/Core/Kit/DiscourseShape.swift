@@ -532,6 +532,7 @@ enum DiscourseShape {
         var text = excerpt ?? ""
         switch kind {
         case "image": text = AppString("[图片]")
+        case "video": text = AppString("[视频]")
         case "sticker": text = AppString("[表情]")
         case "deleted": text = AppString("[消息已删除]")
         case "event": text = text.isEmpty ? AppString("[系统消息]") : text
