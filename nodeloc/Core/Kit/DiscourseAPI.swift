@@ -958,6 +958,9 @@ struct DiscourseClient {
         try NodelocJSON.decode(ChatChannelsResponse.self, from: data)
     }
 
+    /// One page of a profile tab; a shorter page is the end of the list.
+    static let userActionsPageSize = 30
+
     /// Profile activity tabs, by Discourse's filter codes: 4 topics, 5
     /// replies, 3 the reader's own saved posts. Likes aren't listed by the
     /// backend. `offset` is how many rows the screen already has.
@@ -968,7 +971,7 @@ struct DiscourseClient {
     ) async throws -> UserActionsResponse {
         let user = Self.pathEscape(username)
         let listKey = "activity:\(username.lowercased()):\(filter)"
-        var query = [URLQueryItem(name: "limit", value: "30")]
+        var query = [URLQueryItem(name: "limit", value: String(Self.userActionsPageSize))]
         if offset > 0 {
             guard let cursor = state.cursor(list: listKey, page: offset) else {
                 return try Self.shaped(["user_actions": [Any]()])
