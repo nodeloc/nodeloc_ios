@@ -128,10 +128,10 @@ final class ParsingTests: XCTestCase {
 
     func testSHA256Vectors() {
         let hex = { (bytes: [UInt8]) in bytes.map { String(format: "%02x", $0) }.joined() }
-        XCTAssertEqual(hex(SHA256.hash(Array("abc".utf8))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-        XCTAssertEqual(hex(SHA256.hash([])), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        XCTAssertEqual(hex(PortableSHA256.hash(Array("abc".utf8))), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        XCTAssertEqual(hex(PortableSHA256.hash([])), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         // Spans several 64-byte blocks.
-        XCTAssertEqual(hex(SHA256.hash(Array(repeating: UInt8(ascii: "a"), count: 1000))),
+        XCTAssertEqual(hex(PortableSHA256.hash(Array(repeating: UInt8(ascii: "a"), count: 1000))),
                        "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3")
     }
 
