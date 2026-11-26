@@ -37,6 +37,7 @@ struct PublicProfileOverlay: View {
                 LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
                     profileHero
                     statsRow
+                    ownedNodesRow
                     customFeedsRow
 
                     Section {
@@ -633,6 +634,40 @@ struct PublicProfileOverlay: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)
+    }
+
+    /// 管理的节点 — the public nodes this person owns, busiest first and at
+    /// most eight, the same set the web's profile lists. Takes no space when
+    /// they own none.
+    @ViewBuilder
+    private var ownedNodesRow: some View {
+        if !store.ownedNodes.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(AppString("管理的节点"))
+                    .font(Theme.body(12, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.5))
+
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(store.ownedNodes) { node in
+                            Button {
+                                app.openNode(slug: node.slug)
+                            } label: {
+                                Text(node.name)
+                                    .font(Theme.body(12))
+                                    .foregroundStyle(Theme.text)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 11)
+                                    .background(Theme.surface, in: Capsule())
+                            }
+                            .buttonStyle(.pressable)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+            .padding(.horizontal, 16)
+        }
     }
 
     /// Reddit-style stat row, matching the 我的 page.

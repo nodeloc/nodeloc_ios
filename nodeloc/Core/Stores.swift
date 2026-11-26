@@ -3584,6 +3584,10 @@ final class PublicProfileStore {
     /// Group flair (资质) and discourse-follow state.
     var flair: UserFlair?
     var followerCount: Int?
+    /// Achievements unlocked, and the public nodes this person owns — the two
+    /// the backend added for the profile header (#32).
+    var achievementCount: Int?
+    var ownedNodes: [UserProfile.OwnedNode] = []
     var canFollow = false
     var isFollowing = false
     var isTogglingFollow = false
@@ -3951,6 +3955,8 @@ final class PublicProfileStore {
             resolveImage: { resolvedURL($0) }
         )
         followerCount = user.totalFollowers
+        achievementCount = user.achievementCount
+        ownedNodes = user.ownedNodes ?? []
         canFollow = user.canFollow ?? false
         isFollowing = user.isFollowed ?? false
         // Absent flags mean 常规: the serializer only includes them for a

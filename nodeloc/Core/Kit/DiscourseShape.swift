@@ -529,6 +529,12 @@ enum DiscourseShape {
             object["website_name"] = URL(string: website)?.host ?? website
         }
         if let location = user.location, !location.isEmpty { object["location"] = location }
+        // How many achievements are unlocked, and the public nodes this user
+        // owns — the profile's "n / N 已解锁" and 管理的节点.
+        object["achievement_count"] = value(user.achievementCount)
+        object["owned_nodes"] = (user.ownedNodes ?? []).map {
+            ["slug": $0.slug, "name": $0.name] as Object
+        }
         return ["user": object, "badges": [Object]()]
     }
 

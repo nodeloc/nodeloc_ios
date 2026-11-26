@@ -18,7 +18,7 @@ struct ProfileView: View {
     @State private var activeSheet: ProfileSheet?
 
     private enum ProfileSheet: String, Identifiable {
-        case badges, nodes, upgrade
+        case badges, nodes, upgrade, leaderboard
         var id: String { rawValue }
     }
     @State private var selectedTab: ProfileStore.ProfileTab = .topics
@@ -101,6 +101,14 @@ struct ProfileView: View {
                 if let progress = store.upgradeProgress {
                     UpgradeProgressSheet(report: progress)
                 }
+            case .leaderboard:
+                LeaderboardPage(
+                    onClose: { activeSheet = nil },
+                    onOpenProfile: { target in
+                        activeSheet = nil
+                        app.openProfile(target)
+                    }
+                )
             }
         }
     }
@@ -935,9 +943,33 @@ struct ProfileView: View {
             .padding(.vertical, 52)
         } else {
             LazyVStack(spacing: 0) {
+                leaderboardRow
                 ForEach(store.pointsHistory) { pointsRow($0) }
             }
         }
+    }
+
+    /// Into 财富榜 — the same table as the web's /rank. A natural neighbour of
+    /// this reader's own energy history.
+    private var leaderboardRow: some View {
+        Button { activeSheet = .leaderboard } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "trophy")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.accent700)
+                Text(AppString("财富榜"))
+                    .font(Theme.body(14))
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.35))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
     }
 
     private func pointsRow(_ entry: PointsHistoryEntry) -> some View {

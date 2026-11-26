@@ -1469,6 +1469,19 @@ struct UserProfile: Decodable {
     /// viewer looking at somebody else, so absence means "常规".
     let ignored: Bool?
     let muted: Bool?
+    /// Achievements unlocked — a repeatable one counts once — matching the
+    /// "n / N 已解锁" the web's profile and hover card show.
+    let achievementCount: Int?
+    /// Public nodes this user owns, busiest first, at most eight; names are
+    /// already in the reader's language. Empty rather than absent when none.
+    let ownedNodes: [OwnedNode]?
+
+    struct OwnedNode: Decodable, Identifiable, Hashable {
+        let slug: String
+        let name: String
+
+        var id: String { slug }
+    }
 
     /// Everyone this account has blocked or muted, and whether it is allowed
     /// to. Owner-only (`private_attributes` on Discourse's user serializer), so

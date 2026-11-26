@@ -200,6 +200,53 @@ struct DiscourseClient {
         return try Self.shaped(DiscourseShape.pinnedCarousel(pins.topics, nodeSlug: slug))
     }
 
+    /// Which board the wealth leaderboard shows. Income over a period never
+    /// counts transfers between members; tips, red envelopes and lotteries do.
+    enum LeaderboardPeriod: String, CaseIterable, Sendable {
+        /// Current energy rather than income.
+        case all
+        /// From Monday, Beijing time.
+        case week
+        /// From the first of the month, Beijing time.
+        case month
+
+        var title: String {
+            switch self {
+            case .all: AppString("总榜")
+            case .week: AppString("本周")
+            case .month: AppString("本月")
+            }
+        }
+    }
+
+    /// The wealth leaderboard, the same table as the web's /rank. Read-only —
+    /// the server recomputes it hourly — and readable signed out, in which
+    /// case the response carries no `me`.
+    func leaderboard(
+        period: LeaderboardPeriod = .all,
+        page: Int = 1,
+        limit: Int = 50
+    ) async throws -> NLLeaderboard {
+        try await get("api/v1/points/leaderboard", query: [
+            URLQueryItem(name: "period", value: period.rawValue),
+            URLQueryItem(name: "page", value: String(max(1, page))),
+            URLQueryItem(name: "limit", value: String(min(max(1, limit), 100))),
+        ])
+    }
+
+    /// This reader's reputation page: the totals, the week split five ways,
+    /// the weekly task allowance and the rolling 30-day change.
+    func reputation() async throws -> NLReputation {
+        try await get("api/v1/me/reputation")
+    }
+
+    /// The tier catalogue, with what each tier widens over the one below.
+    /// Readable signed out.
+    func tierCatalog() async throws -> [NLTiers.Tier] {
+        let response: NLTiers = try await get("api/v1/tiers")
+        return response.tiers
+    }
+
     /// The home banner carousel. Readable signed out, so a guest gets rows too
     /// — only the dismissal below needs an account.
     func homeAnnouncements() async throws -> [NLHomeAnnouncements.Announcement] {

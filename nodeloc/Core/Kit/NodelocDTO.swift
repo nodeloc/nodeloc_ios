@@ -41,6 +41,19 @@ nonisolated struct NLUser: Codable, Sendable {
     let viewerBlocked: Bool?
     let canMessage: Bool?
     let messageNote: String?
+    /// How many achievements are unlocked — the "n / N" on the profile and the
+    /// hover card. A repeatable one counts once.
+    let achievementCount: Int?
+    /// Public nodes this user owns, busiest first, at most eight. `name` is
+    /// already in the reader's language. Empty rather than absent when none.
+    let ownedNodes: [OwnedNode]?
+
+    nonisolated struct OwnedNode: Codable, Sendable, Identifiable {
+        let slug: String
+        let name: String
+
+        var id: String { slug }
+    }
 
     var isStaff: Bool { role == "admin" || role == "moderator" }
 }
@@ -185,14 +198,106 @@ nonisolated struct NLAchievements: Codable, Sendable {
     }
     let showcase: [Achievement]
     let reputation: Int?
+    let unlockedCount: Int?
+    let total: Int?
+    /// Achievements only award reputation, so `energyEarned` is always 0 and
+    /// `reputationEarned` is the one worth showing.
+    let energyEarned: Int?
+    let reputationEarned: Int?
 }
 
 nonisolated struct NLTiers: Codable, Sendable {
-    struct Tier: Codable, Sendable {
+    nonisolated struct Unlock: Codable, Sendable {
+        /// The row of the web's tier table this came from, e.g. `topics`.
+        let key: String
+        /// Plain text, already in the reader's language.
+        let label: String?
+        let from: String?
+        let to: String?
+    }
+    nonisolated struct Tier: Codable, Sendable {
         let level: Int
         let name: String
+        let english: String?
+        let initial: String?
+        let bg: String?
+        let fg: String?
+        let darkBg: String?
+        let darkFg: String?
+        /// What this tier widens over the one below (bronze is compared with
+        /// signed out). Empty where a tier adds nothing.
+        let unlocks: [Unlock]?
     }
     let tiers: [Tier]
+}
+
+/// `GET /api/v1/me/reputation` — the numbers behind the web's reputation page.
+nonisolated struct NLReputation: Codable, Sendable {
+    nonisolated struct SourceTotal: Codable, Sendable {
+        /// `like`, `accept`, `featured`, `achievement` or `task`.
+        let source: String
+        /// May be negative: a clawback is recorded against its own source.
+        let total: Int
+    }
+    nonisolated struct Tasks: Codable, Sendable {
+        let done: Int?
+        let cap: Int?
+        /// False at bronze, where tasks pay energy but no reputation.
+        let eligible: Bool?
+    }
+    let reputation: Int?
+    let pending: Int?
+    let tier: Int?
+    let tierName: String?
+    let next: Int?
+    let needed: Int?
+    let progress: Double?
+    let week: Int?
+    /// All five sources, always, in a fixed order; they sum to `week`.
+    let weekBySource: [SourceTotal]?
+    let tasks: Tasks?
+    /// Settled change over the last 30 days, rolling.
+    let rate30d: Int?
+    /// Set and in the future while a penalty blocks promotion.
+    let upgradeLockedUntil: String?
+}
+
+/// `GET /api/v1/points/leaderboard` — the same table as the web's /rank,
+/// recomputed server-side every `refreshMinutes`. Readable signed out.
+nonisolated struct NLLeaderboard: Codable, Sendable {
+    nonisolated struct Entry: Codable, Sendable, Identifiable {
+        let rank: Int
+        let userId: Int
+        let username: String
+        let name: String?
+        let avatarUrl: String?
+        /// Null when that reader hides their tier and reputation.
+        let tier: Int?
+        let tierName: String?
+        /// Energy on the all-time board, income over the period on the others.
+        let value: Int
+        /// Against this reader's first standing today; null means new today.
+        let rankChange: Int?
+        let me: Bool?
+
+        var id: Int { userId }
+    }
+    nonisolated struct Me: Codable, Sendable {
+        /// 0 when this reader isn't on the board at all.
+        let rank: Int?
+        let value: Int?
+        /// How far behind the place above; 0 at the top.
+        let gap: Int?
+    }
+    let period: String?
+    let total: Int?
+    let page: Int?
+    let nextPage: Int?
+    let updatedAt: String?
+    let refreshMinutes: Int?
+    let users: [Entry]
+    /// Only present for a signed-in reader.
+    let me: Me?
 }
 
 // MARK: - Topics and posts
