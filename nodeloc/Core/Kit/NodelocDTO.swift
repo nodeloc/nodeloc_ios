@@ -675,6 +675,11 @@ nonisolated struct NLNodeDetail: Codable, Sendable {
     let logoDarkUrl: String?
     let bannerDarkUrl: String?
     let permissions: Permissions?
+    /// Signed-in readers who looked at this node in the last fifteen minutes,
+    /// counted once each; guests don't count. Asking for this endpoint while
+    /// signed in is itself what records the visit, which is how someone who
+    /// only ever uses the app gets counted at all.
+    let onlineCount: Int?
 }
 
 nonisolated struct NLNodeEnvelope: Codable, Sendable {

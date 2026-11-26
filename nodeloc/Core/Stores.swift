@@ -649,6 +649,12 @@ enum NodeSort: String, CaseIterable, Identifiable {
     case latest
     case new
     case hot
+    /// This node's 上升中, the same formula as the home list restricted to
+    /// one node — the web has no page for it, the API does.
+    case rising
+    /// This node's 新鲜: ordered by posting time, so a reply can't drag an
+    /// old topic back up.
+    case fresh
     case featured
     case top
 
@@ -659,6 +665,8 @@ enum NodeSort: String, CaseIterable, Identifiable {
         case .latest: return AppString("最新")
         case .new: return AppString("新")
         case .hot: return AppString("热门")
+        case .rising: return AppString("上升中")
+        case .fresh: return AppString("新鲜")
         case .featured: return AppString("推荐")
         case .top: return AppString("热门榜")
         }
@@ -670,6 +678,8 @@ enum NodeSort: String, CaseIterable, Identifiable {
         case .latest: return AppString("有新帖子的话题")
         case .new: return AppString("最近几天创建或回复的话题")
         case .hot: return AppString("最近热门话题")
+        case .rising: return AppString("最近势头最猛的话题")
+        case .fresh: return AppString("按发帖时间排列的话题")
         case .featured: return AppString("查看推荐话题")
         case .top: return AppString("按点赞数排列的热门话题")
         }
@@ -680,6 +690,8 @@ enum NodeSort: String, CaseIterable, Identifiable {
         case .latest: return "clock"
         case .new: return "sparkles"
         case .hot: return "flame"
+        case .rising: return "chart.line.uptrend.xyaxis"
+        case .fresh: return "leaf"
         case .featured: return "star"
         case .top: return "chart.line.uptrend.xyaxis"
         }
@@ -1015,10 +1027,20 @@ final class NodeDetailStore {
         // The carousel is small and unpaged, so it is always refetched — it is
         // also what changes most often on a busy node.
         await loadPins()
+        await loadDetail()
 
         // Fresh cache: keep what we painted, skip the request entirely.
         if let cached, !cached.isStale { return }
         await loadPage(reset: true)
+    }
+
+    /// The node's own endpoint, for the online count. For a signed-in reader
+    /// the request doubles as "I looked at this node", which is what puts an
+    /// app-only reader into that count in the first place.
+    private func loadDetail() async {
+        guard !slug.isEmpty else { return }
+        guard let detail = try? await client.nodeDetail(slug: slug) else { return }
+        onlineCount = detail.onlineCount
     }
 
     /// The pinned carousel. Readable signed out; a node that can't be seen
@@ -2977,6 +2999,12 @@ enum NotificationFormatter {
 
     static func text(for notification: DiscourseNotification, kind: NotificationKind) -> String {
         if kind == .system {
+            // The backend writes each system notification's own sentence into
+            // `data.title` / `data.body`, already translated. Prefer that; the
+            // group-inbox wording below only fits a payload that actually
+            // carries a group, and would otherwise mislabel every one of them.
+            if let title = notification.data?.topicTitle, !title.isEmpty { return title }
+            if let body = notification.data?.body, !body.isEmpty { return body }
             let group = notification.data?.groupName ?? AppString("群组")
             if let count = notification.data?.inboxCount {
                 return AppString("您的 \(group) 收件箱有 \(count) 条消息")

@@ -612,6 +612,11 @@ struct NodeDetailOverlay: View {
     private var statsText: String {
         var parts: [String] = []
         if let members = store.memberCount { parts.append(AppString("\(compact(members)) 位成员")) }
+        // Signed-in readers here in the last fifteen minutes. Omitted at zero:
+        // "0 在线" reads worse than saying nothing.
+        if let online = store.onlineCount, online > 0 {
+            parts.append(AppString("\(compact(online)) 在线"))
+        }
         if let topics = store.topicCount { parts.append(AppString("\(compact(topics)) 主题")) }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }

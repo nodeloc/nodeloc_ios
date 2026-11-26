@@ -285,6 +285,13 @@ struct AppDetailOverlay: View {
                             .font(Theme.body(12))
                             .foregroundStyle(Theme.muted(0.55))
                     }
+                    // Who actually plays it, not just who installed it.
+                    if let active = item.activeUsers, active > 0 {
+                        Text("·").foregroundStyle(Theme.muted(0.35))
+                        Text(AppString("\(active) 人在玩"))
+                            .font(Theme.body(12))
+                            .foregroundStyle(Theme.muted(0.55))
+                    }
                     if let version = item.versionNumber {
                         Text("·").foregroundStyle(Theme.muted(0.35))
                         Text("v\(version)")

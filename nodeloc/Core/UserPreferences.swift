@@ -283,6 +283,12 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
     case latest = 1
     case hot = 2
     case top = 3
+    /// Posted in the last three days with the most new replies and first-post
+    /// upvotes over the last twelve hours, decayed by age.
+    case rising = 4
+    /// The same topics as 最新 under the same filters, ordered by when they
+    /// were *posted* — a reply can't drag an old topic back to the top.
+    case fresh = 5
 
     var id: Int { rawValue }
 
@@ -292,6 +298,8 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
         case .latest: return "latest.json"
         case .hot: return "hot.json"
         case .top: return "top.json"
+        case .rising: return "rising.json"
+        case .fresh: return "fresh.json"
         }
     }
 
@@ -312,6 +320,8 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
         case .latest: return AppString("最新")
         case .hot: return AppString("热")
         case .top: return AppString("热门")
+        case .rising: return AppString("上升中")
+        case .fresh: return AppString("新鲜")
         }
     }
 

@@ -561,9 +561,11 @@ enum DiscourseShape {
             type = 800
             topicTitle = AppString("关注了你")
         default:
-            // system and anything newer: shown by its own title.
+            // system and anything newer: shown by its own title and body,
+            // which the backend already wrote in the reader's language.
             type = 14
             topicTitle = data?["title"]?.string ?? topicTitle
+            if let body = data?["body"]?.string { payload["body"] = body }
         }
         if let topicTitle { payload["topic_title"] = topicTitle }
         if let actor = item.actor, item.kind != "system" {

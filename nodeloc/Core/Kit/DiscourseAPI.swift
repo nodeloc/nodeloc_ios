@@ -147,6 +147,19 @@ struct DiscourseClient {
             result = try await topicPage(list: "hot", page: page, query: [URLQueryItem(name: "sort", value: "hot")], offsetPaged: true)
         case .top:
             result = try await topicPage(list: "featured", page: page, query: [URLQueryItem(name: "featured", value: "1")])
+        case .rising:
+            // Offset-paged like hot.
+            result = try await topicPage(
+                list: "rising", page: page,
+                query: [URLQueryItem(name: "sort", value: "rising")], offsetPaged: true
+            )
+        case .fresh:
+            // Cursor-paged like latest, but the cursor records posting time and
+            // only works while `sort=fresh` stays on the request.
+            result = try await topicPage(
+                list: "fresh", page: page,
+                query: [URLQueryItem(name: "sort", value: "fresh")]
+            )
         }
         var object = DiscourseShape.latest(result.topics, hasMore: Self.hasMore(result))
         if Self.hasMore(result), var list = object["topic_list"] as? [String: Any] {
@@ -192,6 +205,13 @@ struct DiscourseClient {
             DiscourseShape.latest(result.topics, hasMore: false)
         )
         return (shaped, result.nextOffset)
+    }
+
+    /// One node's detail. Worth asking for even when the catalogue already has
+    /// the node: for a signed-in reader this request is what records them as
+    /// having looked at it, so app-only readers show up in `onlineCount`.
+    func nodeDetail(slug: String) async throws -> NLNodeDetail {
+        try await get("api/v1/nodes/\(slug)")
     }
 
     /// A node's pinned carousel. No paging, and readable signed out.
@@ -269,18 +289,41 @@ struct DiscourseClient {
         page: Int = 0
     ) async throws -> CategoryTopicsResponse {
         let slug = try await nodeSlug(categoryID: categoryID)
-        let hot = sort == "hot" || sort == "top"
+        let scoped = Self.scopedSort(sort)
         let result = try await topicPage(
-            list: "node:\(slug):\(hot ? "hot" : "latest")",
+            list: "node:\(slug):\(scoped ?? "latest")",
             page: page,
-            query: [URLQueryItem(name: "node", value: slug)] + (hot ? [URLQueryItem(name: "sort", value: "hot")] : []),
-            offsetPaged: hot
+            query: [URLQueryItem(name: "node", value: slug)] + Self.sortQuery(scoped),
+            // `hot` and `rising` page by offset; `latest` and `fresh` by cursor.
+            offsetPaged: scoped == "hot" || scoped == "rising"
         )
         return try Self.shaped(DiscourseShape.latest(result.topics, hasMore: Self.hasMore(result)))
     }
 
-    func tagTopics(slug: String, page: Int = 0) async throws -> CategoryTopicsResponse {
-        let result = try await topicPage(list: "tag:\(slug)", page: page, query: [URLQueryItem(name: "tag", value: slug)])
+    /// Which `sort=` a node or tag list should ask for, or nil for the default
+    /// "latest". Inside a node or a tag the "doesn't reach the home page" rule
+    /// is off, so these are the node page's own orderings.
+    private static func scopedSort(_ sort: String) -> String? {
+        switch sort {
+        case "hot", "top": "hot"
+        case "rising": "rising"
+        case "fresh": "fresh"
+        default: nil
+        }
+    }
+
+    private static func sortQuery(_ scoped: String?) -> [URLQueryItem] {
+        scoped.map { [URLQueryItem(name: "sort", value: $0)] } ?? []
+    }
+
+    func tagTopics(slug: String, sort: String = "latest", page: Int = 0) async throws -> CategoryTopicsResponse {
+        let scoped = Self.scopedSort(sort)
+        let result = try await topicPage(
+            list: "tag:\(slug):\(scoped ?? "latest")",
+            page: page,
+            query: [URLQueryItem(name: "tag", value: slug)] + Self.sortQuery(scoped),
+            offsetPaged: scoped == "hot" || scoped == "rising"
+        )
         return try Self.shaped(DiscourseShape.latest(result.topics, hasMore: Self.hasMore(result)))
     }
 
@@ -1227,14 +1270,24 @@ struct DiscourseClient {
 
     /// The apps directory is served under `/apps` in Discourse's own shape.
     func appsDirectory() async throws -> [DirectoryApp] {
+        try await appsDirectoryPages().apps
+    }
+
+    /// The whole directory, plus the category's featured app. `featured` comes
+    /// from the first page only — it describes the category, not the page.
+    func appsDirectoryPages(kind: String? = nil) async throws -> (apps: [DirectoryApp], featured: DirectoryApp?) {
         var apps: [DirectoryApp] = []
+        var featured: DirectoryApp?
         for page in 0..<20 {
-            let data = try await http.send("GET", "apps/directory", query: [URLQueryItem(name: "page", value: String(page))])
+            var query = [URLQueryItem(name: "page", value: String(page))]
+            if let kind { query.append(URLQueryItem(name: "kind", value: kind)) }
+            let data = try await http.send("GET", "apps/directory", query: query)
             let response = try NodelocJSON.decode(AppsDirectoryResponse.self, from: data)
+            if page == 0 { featured = response.featured }
             apps.append(contentsOf: response.apps)
             if response.apps.isEmpty || apps.count >= (response.total ?? 0) { break }
         }
-        return apps
+        return (apps, featured)
     }
 
     func app(slug: String) async throws -> DirectoryAppResponse {

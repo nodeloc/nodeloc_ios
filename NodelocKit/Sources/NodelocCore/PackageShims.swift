@@ -43,6 +43,8 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
     case latest = 1
     case hot = 2
     case top = 3
+    case rising = 4
+    case fresh = 5
     var id: Int { rawValue }
 }
 

@@ -1637,6 +1637,10 @@ struct DirectoryApp: Decodable, Identifiable, Hashable {
     let homeUrl: String?
     let categoryUrl: String?
     let author: DiscourseUser?
+    /// People who used the app in the last seven days — installed use only,
+    /// trials and the app's own account excluded. Cached ten minutes server
+    /// side, so it moves in steps rather than continuously.
+    let activeUsers: Int?
 
     var isWebview: Bool { surface == "webview" }
 
@@ -1671,9 +1675,15 @@ struct DirectoryAppResponse: Decodable {
 /// until `total` is covered.
 struct AppsDirectoryResponse: Decodable {
     let apps: [DirectoryApp]
+    /// The most-used app in this category over the last seven days. Nobody
+    /// used any in that window → null, rather than an arbitrary stand-in.
+    let featured: DirectoryApp?
     let total: Int?
     let page: Int?
     let perPage: Int?
+    let kind: String?
+    /// How many apps there are of each kind.
+    let counts: [String: Int]?
 }
 
 // MARK: - Custom badge / title styles (discourse-custom-badge plugin)
@@ -1849,6 +1859,10 @@ struct NotificationData: Decodable {
     let inboxCount: Int?
     let chatChannelId: Int?
     let chatMessageId: Int?
+    /// A system notification's own sentence, already in the reader's language.
+    /// The backend writes `data.title` and `data.body` for these rather than
+    /// adding new fields; `title` arrives as `topicTitle` above.
+    let body: String?
 }
 
 struct DiscourseNotification: Decodable, Identifiable {
