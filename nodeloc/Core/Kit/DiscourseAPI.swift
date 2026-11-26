@@ -207,6 +207,103 @@ struct DiscourseClient {
         return (shaped, result.nextOffset)
     }
 
+    // MARK: Penalties and the watch list
+
+    /// Silences or suspends someone site-wide.
+    ///
+    /// - Parameter deleteRecentHours: 0 leaves their posts alone; 1–720 also
+    ///   removes what they posted in that window, up to 500 items. Those
+    ///   deletions aren't announced separately — the penalty's own
+    ///   notification covers them.
+    /// - Parameter notify: False also suppresses the email for a site-wide
+    ///   penalty.
+    @discardableResult
+    func penalizeUser(
+        id: Int,
+        type: String,
+        reason: String,
+        hours: Int? = nil,
+        deleteRecentHours: Int = 0,
+        notify: Bool = true
+    ) async throws -> Data {
+        var body: [String: Any] = ["type": type, "reason": reason, "notify": notify]
+        if let hours { body["hours"] = hours }
+        if deleteRecentHours > 0 { body["delete_recent_hours"] = min(deleteRecentHours, 720) }
+        return try await send("POST", "api/v1/admin/users/\(id)/penalties", json: body)
+    }
+
+    /// Restricts someone inside one node. A node moderator is held to 1–30
+    /// days; a node's owner isn't, being the node's highest rank.
+    @discardableResult
+    func restrictInNode(
+        slug: String,
+        username: String,
+        type: String,
+        reason: String,
+        days: Int? = nil,
+        deleteRecentHours: Int = 0
+    ) async throws -> Data {
+        var body: [String: Any] = ["username": username, "type": type, "reason": reason]
+        if let days { body["days"] = days }
+        if deleteRecentHours > 0 { body["delete_recent_hours"] = min(deleteRecentHours, 720) }
+        return try await send("POST", "api/v1/nodes/\(slug)/restrictions", json: body)
+    }
+
+    /// Puts someone on the watch list, so their posts are held for review.
+    /// Calling it again for someone already on the list edits their reason and
+    /// expiry rather than failing.
+    ///
+    /// - Parameter days: 0–365; 0 watches until they are taken off by hand.
+    /// - Parameter slug: Nil watches them site-wide; a slug watches only what
+    ///   they post in that node. Nobody may watch themselves or a manager
+    ///   (403 `protected`), though an administrator may watch a site-wide
+    ///   moderator.
+    @discardableResult
+    func watchUser(id: Int, reason: String, days: Int = 0, slug: String? = nil) async throws -> Data {
+        let body: [String: Any] = ["watch": true, "reason": reason, "days": min(max(days, 0), 365)]
+        return try await send("PUT", Self.watchPath(userID: id, slug: slug), json: body)
+    }
+
+    @discardableResult
+    func unwatchUser(id: Int, slug: String? = nil) async throws -> Data {
+        try await send("DELETE", Self.watchPath(userID: id, slug: slug))
+    }
+
+    /// Site-wide the id is the path's last segment; inside a node it trails
+    /// the node's own `watch`.
+    private static func watchPath(userID: Int, slug: String?) -> String {
+        slug.map { "api/v1/nodes/\($0)/watch/\(userID)" } ?? "api/v1/admin/users/\(userID)/watch"
+    }
+
+    // MARK: Moderation log and undo
+
+    /// The audit trail: site-wide for staff, a node's own for its managers.
+    func moderationLog(_ scope: ReviewScope, before: Int? = nil, limit: Int = 30) async throws -> NLModerationLog {
+        var query = [URLQueryItem(name: "limit", value: String(limit))]
+        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
+        return try await get(Self.logPath(scope), query: query)
+    }
+
+    /// Reverses one entry. The server performs the opposite action — and logs
+    /// *that* in the usual way — rather than erasing the original, which only
+    /// gets stamped as undone.
+    ///
+    /// Only some actions can be reversed at all (400 `not_undoable`), only
+    /// while they are still the one in force (409 `nothing_to_undo`), and only
+    /// once (409 `already_undone`). Follow each entry's own `undoable` rather
+    /// than guessing from its action.
+    @discardableResult
+    func undoModerationLog(_ scope: ReviewScope, id: Int) async throws -> Data {
+        try await send("POST", "\(Self.logPath(scope))/\(id)/undo")
+    }
+
+    private static func logPath(_ scope: ReviewScope) -> String {
+        switch scope {
+        case .site: "api/v1/admin/audit-logs"
+        case .node(let slug): "api/v1/nodes/\(slug)/mod-log"
+        }
+    }
+
     // MARK: Review queue
 
     /// Which queue to read. A node's managers can only reach their own; the
@@ -1704,8 +1801,14 @@ struct DiscourseClient {
 
     // MARK: Notifications
 
-    func notifications() async throws -> NotificationsResponse {
-        let list: NLNotifications = try await get("api/v1/notifications", query: [URLQueryItem(name: "limit", value: "50")])
+    /// - Parameter filter: `moderation` narrows to the queue's own alerts —
+    ///   new reports, held posts, appeals, backlog. Only someone with review
+    ///   permission or who manages a node receives any, so the tab is worth
+    ///   offering only to them.
+    func notifications(filter: String? = nil) async throws -> NotificationsResponse {
+        var query = [URLQueryItem(name: "limit", value: "50")]
+        if let filter { query.append(URLQueryItem(name: "filter", value: filter)) }
+        let list: NLNotifications = try await get("api/v1/notifications", query: query)
         return try Self.shaped(["notifications": list.notifications.map(DiscourseShape.notification)])
     }
 

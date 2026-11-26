@@ -558,6 +558,32 @@ nonisolated struct NLReviewQueue: Codable, Sendable {
     let reputationPenaltyMax: Int?
 }
 
+/// The moderation audit trail — `/api/v1/admin/audit-logs` site-wide, or a
+/// node's `/mod-log`. Each entry says whether *this* reader can reverse it,
+/// which depends on both the action and who performed it.
+nonisolated struct NLModerationLog: Codable, Sendable {
+    nonisolated struct Entry: Codable, Sendable, Identifiable {
+        let id: Int
+        /// e.g. `post.delete`, `user.silence`, `topic.pin`, `review.*`.
+        let action: String
+        let actor: String?
+        let createdAt: String?
+        /// What it was done to: `post`, `topic`, `review_item`, `user` or
+        /// `node`. Older post-level entries only recorded the topic.
+        let targetType: String?
+        let targetId: Int?
+        let details: JSONValue?
+        /// Whether this reader may reverse it now — not merely whether the
+        /// action is reversible in principle.
+        let undoable: Bool?
+        let undoneAt: String?
+        /// Node log only.
+        let undoneBy: String?
+    }
+    let items: [Entry]
+    let nextBefore: Int?
+}
+
 /// `GET /api/v1/moderation/reasons` — the picklist a manager chooses from,
 /// configured in site settings. "其他" is appended server-side and is always
 /// last, so this list arrives ready to show.

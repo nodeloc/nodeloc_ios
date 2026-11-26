@@ -22,6 +22,8 @@ struct SettingsOverlay: View {
         var id: String { rawValue }
     }
 
+    @State private var pendingReview = 0
+
     private var isSignedIn: Bool { app.authed && !app.isGuest }
 
     var body: some View {
@@ -45,6 +47,12 @@ struct SettingsOverlay: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        // The stream reports what's waiting; it only sends the event to
+        // someone who has a queue at all, so this stays 0 for everyone else.
+        .onReceive(NotificationCenter.default.publisher(for: NodelocRealtime.pendingReviewDidChange)) { note in
+            pendingReview = note.userInfo?["pending"] as? Int ?? 0
+        }
+        .task { pendingReview = NodelocRealtime.shared.pendingReview ?? 0 }
     }
 
     @ViewBuilder
@@ -107,7 +115,11 @@ struct SettingsOverlay: View {
                             // Staff only; a node's managers reach their own
                             // node's queue from the node itself.
                             if DiscourseAuth.shared.isStaff {
-                                SettingsNavRow(title: AppString("审核队列"), icon: "tray.full") {
+                                SettingsNavRow(
+                                    title: AppString("审核队列"),
+                                    icon: "tray.full",
+                                    detail: pendingReview > 0 ? "\(pendingReview)" : nil
+                                ) {
                                     withAnimation(.panelSlide) { openAccountPage = .reviewQueue }
                                 }
                             }

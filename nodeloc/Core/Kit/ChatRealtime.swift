@@ -162,8 +162,19 @@ final class NodelocRealtime {
 
     var client = DiscourseClient()
 
+    /// What is waiting in the review queue, and per node for someone who
+    /// manages one. Nil until the stream says — a reader with neither review
+    /// permission nor a node to manage never gets this event at all, which is
+    /// different from a queue that happens to be empty.
+    ///
+    /// Which nodes a reader manages is read once when the stream connects, so
+    /// being made a moderator mid-session shows up on the next reconnect.
+    private(set) var pendingReview: Int?
+    private(set) var pendingReviewByNode: [String: Int] = [:]
+
     /// Posted with the unread count whenever the stream reports one.
     static let unreadDidChange = Notification.Name("NodelocUnreadNotificationsDidChange")
+    static let pendingReviewDidChange = Notification.Name("NodelocPendingReviewDidChange")
 
     func addHandler(_ handler: @escaping Handler) -> UUID {
         let id = UUID()
@@ -235,6 +246,20 @@ final class NodelocRealtime {
            let unread = object["unread"] as? Int {
             unreadNotifications = unread
             NotificationCenter.default.post(name: Self.unreadDidChange, object: nil, userInfo: ["unread": unread])
+        }
+        // How much is waiting in the review queue. Only sent to someone with
+        // review permission or who manages a node, so absence is the normal
+        // case and leaves `pendingReview` nil rather than 0. For a reader who
+        // only manages nodes `pending` is already the sum of `nodes`.
+        if event.event == "review",
+           let data = event.data.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            pendingReview = object["pending"] as? Int
+            pendingReviewByNode = object["nodes"] as? [String: Int] ?? [:]
+            NotificationCenter.default.post(
+                name: Self.pendingReviewDidChange, object: nil,
+                userInfo: ["pending": pendingReview ?? 0]
+            )
         }
         for handler in handlers.values { handler(event) }
     }

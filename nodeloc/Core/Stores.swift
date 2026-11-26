@@ -961,6 +961,9 @@ final class NodeDetailStore {
     var visiblePinnedPosts: [Post] { BlockedUsersStore.shared.visible(pinnedPosts) }
     /// How many online readers the node reports, for the header.
     var onlineCount: Int?
+    /// Whether this reader can manage the node — the server's own answer, and
+    /// what gates the node's review queue.
+    var canModerate = false
     var isLoading = false
     var isLoadingMore = false
     var errorText: String?
@@ -1041,6 +1044,7 @@ final class NodeDetailStore {
         guard !slug.isEmpty else { return }
         guard let detail = try? await client.nodeDetail(slug: slug) else { return }
         onlineCount = detail.onlineCount
+        canModerate = detail.permissions?.moderate ?? false
     }
 
     /// The pinned carousel. Readable signed out; a node that can't be seen

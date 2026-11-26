@@ -22,6 +22,7 @@ struct NodeDetailOverlay: View {
     @State private var descriptionExpanded = false
     @State private var showSortPicker = false
     @State private var showAbout = false
+    @State private var showsReviewQueue = false
     /// Presented here, not through `app.overlay`: this page can itself be
     /// inside a full-screen cover (deep link, media viewer), and an app-level
     /// overlay would render underneath it — the button looked dead.
@@ -131,6 +132,11 @@ struct NodeDetailOverlay: View {
                 .appPresentationHost(app: app)
         }
         .sheet(isPresented: $showAbout) { aboutSheet }
+        // A node's own queue, for its owner and moderators. The site-wide one
+        // lives in settings and covers everything.
+        .sheet(isPresented: $showsReviewQueue) {
+            ReviewQueuePage(scope: .node(store.slug)) { showsReviewQueue = false }
+        }
         // Card media opens its viewer here, over the list, so closing returns
         // to the same scroll position rather than to a post.
         // Both viewers get the same chrome; the node is already known here.
@@ -438,6 +444,15 @@ struct NodeDetailOverlay: View {
 
         ShareLink(item: nodeShareURL) {
             Label("分享", systemImage: "square.and.arrow.up")
+        }
+
+        // Only the node's owner and moderators have a queue to open.
+        if store.canModerate {
+            Button {
+                showsReviewQueue = true
+            } label: {
+                Label(AppString("审核队列"), systemImage: "tray.full")
+            }
         }
 
         // The level the server reports is only this user's when signed in;
