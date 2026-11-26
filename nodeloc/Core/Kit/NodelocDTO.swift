@@ -334,6 +334,11 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     /// The first post is hidden. Only moderators and the node's managers see
     /// such a topic in a list at all; the author sees it in his own topics.
     let hidden: Bool?
+    /// Pending reports across every post in the topic, and the newest review
+    /// item. Only sent to a reader who can manage the node — absent, not
+    /// zero, for everyone else — and never on the personal feed.
+    let reportCount: Int?
+    let reviewItemId: Int?
 }
 
 nonisolated struct NLTopicPage: Codable, Sendable {
@@ -394,6 +399,10 @@ nonisolated struct NLPost: Codable, Sendable {
     /// deletion, and only when one was written.
     let deletedBy: String?
     let deleteReason: String?
+    /// Pending reports against this post and the review item they belong to.
+    /// Managers of the node only.
+    let reportCount: Int?
+    let reviewItemId: Int?
     /// Only `GET /topics/{id}` sends these.
     let canEdit: Bool?
     let canDelete: Bool?
@@ -468,6 +477,92 @@ nonisolated struct NLRestrictions: Codable, Sendable {
         }
     }
     let restrictions: [Restriction]
+}
+
+/// The review queue, site-wide (`/api/v1/admin/review`) or inside one node
+/// (`/api/v1/nodes/{slug}/review`). The two answer the same shape; a node's
+/// counts only cover that node.
+nonisolated struct NLReviewQueue: Codable, Sendable {
+    nonisolated struct Report: Codable, Sendable {
+        let reporter: String?
+        let reason: String?
+        /// The reason already written out in the reader's language.
+        let reasonLabel: String?
+        let note: String?
+        let createdAt: String?
+    }
+
+    /// Who the item is about. Inside a node's queue the three counts only
+    /// cover that node, which is how a node's managers see them without
+    /// needing site-wide user permissions.
+    nonisolated struct Author: Codable, Sendable {
+        let id: Int
+        let avatar: String?
+        let createdAt: String?
+        let trustLevel: Int?
+        let tierName: String?
+        let posts: Int?
+        /// Topics and replies somebody else removed; self-deletions don't
+        /// count.
+        let deletedPosts: Int?
+        /// Review items raised against them.
+        let timesReported: Int?
+    }
+
+    nonisolated struct Item: Codable, Sendable, Identifiable {
+        let id: Int
+        /// `pending_post`, `content_appeal`, `penalty_appeal`,
+        /// `node_restriction_appeal`, `risk_flag`, a report, …
+        let kind: String
+        let status: String?
+        let score: Double?
+        let targetType: String?
+        let targetId: Int?
+        let targetUsername: String?
+        let targetUserId: Int?
+        let nodeSlug: String?
+        let nodeName: String?
+        let reportCount: Int?
+        /// Somebody whose reports are handled first raised this one.
+        let priority: Bool?
+        /// Shape depends on `kind` — see the spec's per-kind tables — so it
+        /// stays loose and each kind reads what it needs.
+        let payload: JSONValue?
+        let topicId: Int?
+        let topicTitle: String?
+        let postNumber: Int?
+        let postHtml: String?
+        let reports: [Report]?
+        let resolution: String?
+        let resolvedBy: String?
+        let resolvedAt: String?
+        let createdAt: String?
+        /// Whether the post is already deleted or hidden — worth knowing
+        /// before reopening a settled item.
+        let postDeleted: Bool?
+        let postHidden: Bool?
+        /// True when this appeals the reader's *own* penalty: handling it is
+        /// 403 for everyone but a site administrator.
+        let ownAction: Bool?
+        let author: Author?
+    }
+
+    let items: [Item]
+    let nextBefore: Int?
+    /// Items per status, and — within the current status — per kind.
+    let counts: [String: Int]?
+    let kindCounts: [String: Int]?
+    /// The most reputation this reader may take in one go: 1000 with the
+    /// site-wide review permission, 20 for someone who is only a node's owner
+    /// or moderator. Anything above is 422.
+    let reputationPenaltyMax: Int?
+}
+
+/// `GET /api/v1/moderation/reasons` — the picklist a manager chooses from,
+/// configured in site settings. "其他" is appended server-side and is always
+/// last, so this list arrives ready to show.
+nonisolated struct NLModerationReasons: Codable, Sendable {
+    let reasons: [String]
 }
 
 nonisolated struct NLAppealEnvelope: Codable, Sendable {

@@ -1023,7 +1023,7 @@ struct NodeTopicRow: View {
                     .padding(.horizontal, 7)
                     .background(Theme.accent.opacity(0.1), in: Capsule())
             }
-            TopicStateBadges(isSolved: post.isSolved, isHidden: post.isHidden)
+            TopicStateBadges(isSolved: post.isSolved, isHidden: post.isHidden, reportCount: post.reportCount)
             Spacer(minLength: 0)
             moreButton
         }

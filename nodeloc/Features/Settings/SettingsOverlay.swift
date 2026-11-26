@@ -18,7 +18,7 @@ struct SettingsOverlay: View {
     @State private var openAccountPage: AccountPage?
 
     private enum AccountPage: String, Identifiable {
-        case profile, associatedAccounts, security, pushNotifications, postSource, blockedUsers, accountStatus, deleteAccount
+        case profile, associatedAccounts, security, pushNotifications, postSource, blockedUsers, accountStatus, reviewQueue, deleteAccount
         var id: String { rawValue }
     }
 
@@ -57,6 +57,7 @@ struct SettingsOverlay: View {
         case .postSource: PostSourcePage(onClose: onClose)
         case .blockedUsers: BlockedUsersPage(onClose: onClose)
         case .accountStatus: AccountStatusPage(onClose: onClose)
+        case .reviewQueue: ReviewQueuePage(scope: .site, onClose: onClose)
         case .deleteAccount: DeleteAccountPage(onClose: onClose)
         }
     }
@@ -102,6 +103,13 @@ struct SettingsOverlay: View {
                             // for an author yet, so this is the only one.
                             SettingsNavRow(title: AppString("账号状态"), icon: "exclamationmark.shield") {
                                 withAnimation(.panelSlide) { openAccountPage = .accountStatus }
+                            }
+                            // Staff only; a node's managers reach their own
+                            // node's queue from the node itself.
+                            if DiscourseAuth.shared.isStaff {
+                                SettingsNavRow(title: AppString("审核队列"), icon: "tray.full") {
+                                    withAnimation(.panelSlide) { openAccountPage = .reviewQueue }
+                                }
                             }
                             if NodelocFeatures.postSource {
                                 SettingsNavRow(title: AppString("发帖来源"), icon: "iphone.gen3") {

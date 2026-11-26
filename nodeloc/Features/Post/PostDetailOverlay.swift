@@ -1873,6 +1873,17 @@ private struct NestedReplyRow: View {
                 acceptedAnswerBadge
             }
 
+            // Only a manager of this node is sent a count at all.
+            if let reports = comment.reportCount, reports > 0 {
+                Label("\(reports)", systemImage: "flag.fill")
+                    .labelStyle(CompactLabelStyle())
+                    .font(Theme.body(10, weight: .semibold))
+                    .foregroundStyle(Theme.danger)
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 7)
+                    .background(Theme.danger.opacity(0.1), in: Capsule())
+            }
+
             Text("· \(comment.time)")
                 .font(Theme.body(12))
                 .foregroundStyle(Theme.muted(0.42))

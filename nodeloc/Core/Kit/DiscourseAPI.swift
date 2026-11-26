@@ -207,6 +207,86 @@ struct DiscourseClient {
         return (shaped, result.nextOffset)
     }
 
+    // MARK: Review queue
+
+    /// Which queue to read. A node's managers can only reach their own; the
+    /// site-wide one needs the review permission.
+    enum ReviewScope: Sendable, Hashable {
+        case site
+        case node(String)
+
+        var basePath: String {
+            switch self {
+            case .site: "api/v1/admin/review"
+            case .node(let slug): "api/v1/nodes/\(slug)/review"
+            }
+        }
+    }
+
+    func reviewQueue(
+        _ scope: ReviewScope,
+        status: String? = nil,
+        kind: String? = nil,
+        item: Int? = nil,
+        before: Int? = nil,
+        limit: Int = 30
+    ) async throws -> NLReviewQueue {
+        var query = [URLQueryItem(name: "limit", value: String(limit))]
+        if let status { query.append(URLQueryItem(name: "status", value: status)) }
+        if let kind { query.append(URLQueryItem(name: "kind", value: kind)) }
+        if let item { query.append(URLQueryItem(name: "item", value: String(item))) }
+        if let before { query.append(URLQueryItem(name: "before", value: String(before))) }
+        return try await get(scope.basePath, query: query)
+    }
+
+    /// Settles one item.
+    ///
+    /// - Parameter reputationPenalty: Only accepted alongside a decision that
+    ///   finds against the author (`delete_post`, `hide_post`, a risk item's
+    ///   `confirm`); anything else with a non-zero value is 422, as is a value
+    ///   above the reader's cap — read that from the queue's
+    ///   `reputationPenaltyMax` rather than assuming 1000 or 20.
+    @discardableResult
+    func resolveReviewItem(
+        _ scope: ReviewScope,
+        id: Int,
+        action: String,
+        note: String? = nil,
+        reputationPenalty: Int? = nil
+    ) async throws -> Data {
+        var body: [String: Any] = ["action": action]
+        if let note, !note.isEmpty { body["note"] = note }
+        if let reputationPenalty, reputationPenalty > 0 {
+            body["reputation_penalty"] = reputationPenalty
+        }
+        return try await send("POST", "\(scope.basePath)/\(id)/resolve", json: body)
+    }
+
+    /// Puts a settled item back to pending. Doesn't itself restore the post or
+    /// undo a node penalty, but it does return any reputation taken.
+    @discardableResult
+    func reopenReviewItem(_ scope: ReviewScope, id: Int, note: String? = nil) async throws -> Data {
+        try await send("POST", "\(scope.basePath)/\(id)/reopen", json: note.map { ["note": $0] })
+    }
+
+    /// Brings the post back and marks the item unfounded (a pending post is
+    /// approved instead). Returns any reputation taken.
+    @discardableResult
+    func restoreReviewItemPost(_ scope: ReviewScope, id: Int, note: String? = nil) async throws -> Data {
+        try await send("POST", "\(scope.basePath)/\(id)/restore-post", json: note.map { ["note": $0] })
+    }
+
+    /// Gives the reputation back without disturbing the decision or the post.
+    /// 409 `nothing_to_refund` when none was taken or it already went back.
+    @discardableResult
+    func refundReviewReputation(_ scope: ReviewScope, id: Int, note: String? = nil) async throws -> Int {
+        let data = try await send(
+            "POST", "\(scope.basePath)/\(id)/refund-reputation", json: note.map { ["note": $0] }
+        )
+        struct Refund: Decodable { let refunded: Int? }
+        return (try? NodelocJSON.decode(Refund.self, from: data))?.refunded ?? 0
+    }
+
     // MARK: Account status and appeals
 
     /// Every penalty currently on this account. Empty for an account in good
@@ -781,8 +861,58 @@ struct DiscourseClient {
         return data
     }
 
-    func deletePost(id: Int) async throws -> Data {
-        try await send("DELETE", "api/v1/posts/\(id)")
+    /// Deletes a post. The three options only mean anything when a manager
+    /// removes somebody else's work — the server ignores them for an author
+    /// deleting their own — so they are sent only when one is given.
+    ///
+    /// - Parameters:
+    ///   - reason: Up to 200 characters. Shows on the placeholder, in the
+    ///     logs and in the notification to the author.
+    ///   - notify: Whether the author hears about it. Defaults to true.
+    ///   - appealable: Whether the author may contest it. Defaults to true.
+    func deletePost(
+        id: Int,
+        reason: String? = nil,
+        notify: Bool? = nil,
+        appealable: Bool? = nil
+    ) async throws -> Data {
+        let body = Self.removalBody(reason: reason, notify: notify, appealable: appealable)
+        return try await send("DELETE", "api/v1/posts/\(id)", json: body)
+    }
+
+    /// An empty body is the normal case and has to stay empty: this endpoint
+    /// rejects unknown fields, and "no body at all" is what the web sends.
+    private static func removalBody(reason: String?, notify: Bool?, appealable: Bool?) -> [String: Any]? {
+        var body: [String: Any] = [:]
+        if let reason, !reason.isEmpty { body["reason"] = reason }
+        if let notify { body["notify"] = notify }
+        if let appealable { body["appealable"] = appealable }
+        return body.isEmpty ? nil : body
+    }
+
+    /// Hides a post, or brings it back. Hiding a first post hides the whole
+    /// topic; the author is told and may appeal. Unhiding a post still in the
+    /// queue releases it as approved.
+    func setPostHidden(id: Int, hidden: Bool, reason: String? = nil) async throws {
+        var body: [String: Any] = ["hidden": hidden]
+        if hidden, let reason, !reason.isEmpty { body["reason"] = reason }
+        try await send("PUT", "api/v1/posts/\(id)/hidden", json: body)
+    }
+
+    /// Rolls a post back to revision `n` from its edit history (1 is as first
+    /// published), writing a new revision rather than erasing the ones since.
+    /// 409 `same_content` when that revision is what's already there.
+    @discardableResult
+    func restoreRevision(postID: Int, number: Int) async throws -> Data {
+        try await send("POST", "api/v1/posts/\(postID)/revisions/\(number)/restore")
+    }
+
+    /// The reasons a manager may pick from when removing something. Site
+    /// settings, so they change without an app release; "其他" is appended by
+    /// the server and always last.
+    func moderationReasons() async throws -> [String] {
+        let response: NLModerationReasons = try await get("api/v1/moderation/reasons")
+        return response.reasons
     }
 
     func recoverPost(id: Int) async throws -> Data {
@@ -805,8 +935,14 @@ struct DiscourseClient {
         return try await send("PATCH", "api/v1/posts/\(firstPostID)", json: body)
     }
 
-    func deleteTopic(id: Int) async throws -> Data {
-        try await send("DELETE", "api/v1/topics/\(id)")
+    func deleteTopic(
+        id: Int,
+        reason: String? = nil,
+        notify: Bool? = nil,
+        appealable: Bool? = nil
+    ) async throws -> Data {
+        let body = Self.removalBody(reason: reason, notify: notify, appealable: appealable)
+        return try await send("DELETE", "api/v1/topics/\(id)", json: body)
     }
 
     func setTopicStatus(

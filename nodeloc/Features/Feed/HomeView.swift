@@ -610,7 +610,7 @@ struct PostCard: View {
                     .background(Theme.accent.opacity(0.1), in: Capsule())
             }
 
-            TopicStateBadges(isSolved: post.isSolved, isHidden: post.isHidden)
+            TopicStateBadges(isSolved: post.isSolved, isHidden: post.isHidden, reportCount: post.reportCount)
 
             Spacer(minLength: 0)
 

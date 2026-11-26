@@ -144,6 +144,10 @@ enum DiscourseShape {
         if let level = state.topicLevels[topic.id] { object["notification_level"] = level }
         if topic.solved == true { object["solved"] = true }
         if topic.hidden == true { object["topic_hidden"] = true }
+        // Only a manager's response carries these; absence is "not a manager
+        // here", which is different from "no reports".
+        if let reports = topic.reportCount { object["report_count"] = reports }
+        if let item = topic.reviewItemId { object["review_item_id"] = item }
         return object
     }
 
@@ -254,6 +258,8 @@ enum DiscourseShape {
         if post.authorBlocked == true {
             object["ignored_post_placeholder"] = true
         }
+        if let reports = post.reportCount { object["report_count"] = reports }
+        if let item = post.reviewItemId { object["review_item_id"] = item }
         if let group = post.authorGroup {
             object["flair_name"] = group.label ?? group.name
         }

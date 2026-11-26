@@ -179,6 +179,7 @@ enum FeedMapper {
             pinned: topic.pinned ?? false,
             pinnedGlobally: topic.pinnedGlobally ?? false,
             isUnread: isUnread,
+            reportCount: topic.reportCount,
             isSolved: topic.solved ?? false,
             isHidden: topic.topicHidden ?? false,
             imageURL: media.first?.url,

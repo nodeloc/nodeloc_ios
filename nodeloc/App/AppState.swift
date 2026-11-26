@@ -41,6 +41,9 @@ struct Post: Identifiable {
     var pinnedGlobally: Bool = false
     /// New or has-unread-posts for the signed-in user — shows the read dot.
     var isUnread: Bool = false
+    /// Pending reports on this topic, for a reader who can manage its node.
+    /// Nil means they can't — not that there are none.
+    var reportCount: Int? = nil
     /// The topic accepted a best answer, so the row carries a "solved" badge.
     var isSolved: Bool = false
     /// The first post is hidden. Only a moderator, one of the node's managers,
@@ -181,6 +184,8 @@ struct PostComment: Identifiable {
     let isMine: Bool
     /// This reply is the topic's accepted best answer.
     let isAcceptedAnswer: Bool
+    /// Pending reports against this reply, for a manager of the node.
+    let reportCount: Int?
 
     init(
         id: Int,
@@ -221,7 +226,8 @@ struct PostComment: Identifiable {
         canEdit: Bool = false,
         canDelete: Bool = false,
         isMine: Bool = false,
-        isAcceptedAnswer: Bool = false
+        isAcceptedAnswer: Bool = false,
+        reportCount: Int? = nil
     ) {
         self.id = id
         self.author = author
@@ -262,6 +268,7 @@ struct PostComment: Identifiable {
         self.canDelete = canDelete
         self.isMine = isMine
         self.isAcceptedAnswer = isAcceptedAnswer
+        self.reportCount = reportCount
     }
 
     /// Convenience for sample data and previews, where the body is a literal

@@ -1711,6 +1711,9 @@ extension ButtonStyle where Self == PressableButtonStyle {
 struct TopicStateBadges: View {
     let isSolved: Bool
     let isHidden: Bool
+    /// Pending reports, shown only to a reader who can manage the node — the
+    /// server decides that by sending the count at all.
+    var reportCount: Int? = nil
 
     var body: some View {
         if isSolved {
@@ -1718,6 +1721,9 @@ struct TopicStateBadges: View {
         }
         if isHidden {
             badge(AppString("已隐藏"), icon: "eye.slash.fill", tint: Theme.muted(0.7), background: Theme.muted(0.5))
+        }
+        if let reportCount, reportCount > 0 {
+            badge("\(reportCount)", icon: "flag.fill", tint: Theme.danger, background: Theme.danger)
         }
     }
 

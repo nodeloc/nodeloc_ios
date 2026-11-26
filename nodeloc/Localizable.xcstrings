@@ -1116,12 +1116,42 @@
     "your-node": {},
     "·": {},
     "· %@": {},
+    "· %lld 帖": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "· %lld posts"
+          }
+        }
+      }
+    },
     "· 90 天内第 %lld 次": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "· %lld times in 90 days"
+          }
+        }
+      }
+    },
+    "· 被举报 %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "· %lld reported"
+          }
+        }
+      }
+    },
+    "· 被删 %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "· %lld removed"
           }
         }
       }
@@ -1225,6 +1255,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Prefer not to say"
+          }
+        }
+      }
+    },
+    "不成立": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rejected"
+          }
+        }
+      }
+    },
+    "不扣": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "None"
           }
         }
       }
@@ -1725,6 +1775,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Post as a GIF"
+          }
+        }
+      }
+    },
+    "优先": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Priority"
           }
         }
       }
@@ -2336,6 +2396,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "That content doesn't exist or has been deleted"
+          }
+        }
+      }
+    },
+    "内容申诉": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Content appeal"
           }
         }
       }
@@ -3232,6 +3302,26 @@
         }
       }
     },
+    "只返还声望": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refund reputation only"
+          }
+        }
+      }
+    },
+    "可选": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Optional"
+          }
+        }
+      }
+    },
     "可选 %lld–%lld 项": {
       "localizations": {
         "en": {
@@ -3718,6 +3808,26 @@
         }
       }
     },
+    "处理理由": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reason"
+          }
+        }
+      }
+    },
+    "处罚申诉": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Penalty appeal"
+          }
+        }
+      }
+    },
     "备用码": {
       "localizations": {
         "en": {
@@ -4018,6 +4128,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Done"
+          }
+        }
+      }
+    },
+    "审核队列": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review queue"
           }
         }
       }
@@ -4448,6 +4568,16 @@
         }
       }
     },
+    "已处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        }
+      }
+    },
     "已复制": {
       "localizations": {
         "en": {
@@ -4558,6 +4688,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Notifications resumed"
+          }
+        }
+      }
+    },
+    "已成立": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upheld"
           }
         }
       }
@@ -5283,7 +5423,17 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pending review"
+            "value": "Pending"
+          }
+        }
+      }
+    },
+    "待审帖子": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Held post"
           }
         }
       }
@@ -5334,6 +5484,16 @@
         }
       }
     },
+    "忽略": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ignore"
+          }
+        }
+      }
+    },
     "性别": {
       "extractionState": "stale",
       "localizations": {
@@ -5371,6 +5531,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "The total energy can't be less than the number of envelopes."
+          }
+        }
+      }
+    },
+    "恢复内容": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore"
           }
         }
       }
@@ -5687,6 +5857,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "−%lld reputation"
+          }
+        }
+      }
+    },
+    "扣除声望（最多 %lld）": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deduct reputation (up to %lld)"
           }
         }
       }
@@ -7989,6 +8169,16 @@
         }
       }
     },
+    "没有待处理的项": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing waiting"
+          }
+        }
+      }
+    },
     "没有找到 GIF": {
       "localizations": {
         "en": {
@@ -9040,6 +9230,16 @@
         }
       }
     },
+    "确定": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm"
+          }
+        }
+      }
+    },
     "确定注销账号？": {
       "localizations": {
         "en": {
@@ -9605,6 +9805,26 @@
         }
       }
     },
+    "维持原处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uphold"
+          }
+        }
+      }
+    },
+    "维持原处罚": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uphold penalty"
+          }
+        }
+      }
+    },
     "维持要求 %1$lld/%2$lld 项达标": {
       "extractionState": "stale",
       "localizations": {
@@ -10052,6 +10272,16 @@
         }
       }
     },
+    "节点处罚申诉": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Node penalty appeal"
+          }
+        }
+      }
+    },
     "节点颜色": {
       "localizations": {
         "en": {
@@ -10202,6 +10432,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unblock"
+          }
+        }
+      }
+    },
+    "解除处罚": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lift penalty"
           }
         }
       }
@@ -11244,6 +11484,16 @@
         }
       }
     },
+    "这是对你自己做出的处罚的申诉，需要其他管理人员处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This appeals a penalty you applied; another moderator has to handle it"
+          }
+        }
+      }
+    },
     "这条回复已被作者删除": {
       "localizations": {
         "en": {
@@ -11628,6 +11878,16 @@
         }
       }
     },
+    "通过": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve"
+          }
+        }
+      }
+    },
     "通过 %@ 继续": {
       "localizations": {
         "en": {
@@ -11916,6 +12176,16 @@
         }
       }
     },
+    "隐藏": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide"
+          }
+        }
+      }
+    },
     "隐藏原文": {
       "localizations": {
         "en": {
@@ -12044,6 +12314,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Colour mode"
+          }
+        }
+      }
+    },
+    "风控": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Risk control"
           }
         }
       }

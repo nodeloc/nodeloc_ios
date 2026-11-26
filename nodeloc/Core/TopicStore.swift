@@ -727,7 +727,8 @@ final class TopicStore {
                     canEdit: post.canEdit ?? false,
                     canDelete: post.canDelete ?? false,
                     isMine: post.yours ?? false,
-                    isAcceptedAnswer: acceptedAnswerPostID == post.id
+                    isAcceptedAnswer: acceptedAnswerPostID == post.id,
+                    reportCount: post.reportCount
                 )
             )
             let nextTrails = trails + [!isLast]
@@ -1554,7 +1555,8 @@ final class TopicStore {
                     deletedByModerator: post.deletedByKind == "moderator",
                     deleteReason: post.deleteReason,
                     isIgnoredPlaceholder: post.ignoredPostPlaceholder ?? false,
-                    isAcceptedAnswer: acceptedAnswerPostID == post.id
+                    isAcceptedAnswer: acceptedAnswerPostID == post.id,
+                    reportCount: post.reportCount
                 )
             )
 

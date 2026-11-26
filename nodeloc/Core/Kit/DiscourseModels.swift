@@ -70,6 +70,11 @@ struct TopicListItem: Decodable, Identifiable {
     /// request, so absence means "not watching" / "not bookmarked".
     let notificationLevel: Int?
     let bookmarked: Bool?
+    /// Pending reports across the topic's posts, and the newest review item.
+    /// Only a reader who can manage the node is sent these, so nil means
+    /// "can't manage here" rather than "no reports".
+    let reportCount: Int?
+    let reviewItemId: Int?
     /// The topic accepted a best answer. Drives the row's "solved" badge.
     let solved: Bool?
     /// The first post is hidden. Only a moderator, one of the node's managers,
@@ -761,6 +766,9 @@ struct TopicPost: Decodable, Identifiable {
     /// gave if they wrote one. The placeholder reads from these.
     let deletedByKind: String?
     let deleteReason: String?
+    /// Pending reports against this post and its review item. Managers only.
+    let reportCount: Int?
+    let reviewItemId: Int?
     /// Nested view: written by someone this viewer ignores. Keys are intact but
     /// `cooked` is blanked.
     let ignoredPostPlaceholder: Bool?
