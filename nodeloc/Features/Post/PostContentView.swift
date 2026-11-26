@@ -1537,7 +1537,9 @@ nonisolated struct PostVideoContext: Equatable {
     /// apply to that node, and the bar falls back to a plain like — the same
     /// rule the reader's OP bar follows.
     var voteScore: Int?
+    var voteCount: Int? = nil
     var voteDirection: VoteDirection = .none
+    var canVoteUp: Bool = false
     var canVoteDown: Bool = false
 
     var nodeLetter: String {
@@ -3116,4 +3118,3 @@ struct PostOneboxView: View {
     .environment(VideoMuteState.shared)
     .environment(AppState())
 }
-

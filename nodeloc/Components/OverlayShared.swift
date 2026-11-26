@@ -66,23 +66,35 @@ func presentAuth(_ app: AppState, mode: AuthMode = .login) {
 /// the hamburger `HeaderIconButton`, stretched to a capsule for the text.
 struct GuestLoginButton: View {
     @Environment(AppState.self) private var app
+    @Environment(\.isInTabBarRow) private var isInTabBarRow
 
     var body: some View {
+        // See `HeaderIconButton`: inside the tab bar row the system draws the
+        // container, and ours would show through it as a grey pill.
+        if isInTabBarRow {
+            button
+                .buttonBorderShape(.capsule)
+        } else {
+            button
+                .glassButton(tint: FloatingHeader.glassTint, shape: .capsule)
+                .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        }
+    }
+
+    private var button: some View {
         Button {
             presentAuth(app)
         } label: {
             Text("登录")
                 .font(Theme.body(13, weight: .semibold))
-                .foregroundStyle(Theme.headerText)
+                .foregroundStyle(isInTabBarRow ? Theme.text : Theme.headerText)
                 // Never let a tight header squeeze the label to nothing —
                 // an empty pill is worse than a crowded row.
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, 14)
-                .frame(height: FloatingHeader.controlHeight)
+                .padding(.horizontal, isInTabBarRow ? 0 : 14)
+                .frame(height: isInTabBarRow ? nil : FloatingHeader.controlHeight)
         }
-        .glassButton(tint: FloatingHeader.glassTint, shape: .capsule)
-        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
     }
 }
 
@@ -166,6 +178,22 @@ extension UIApplication {
         shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
             .max() ?? 0
+    }
+
+    /// Whether a sheet or full-screen cover is on screen.
+    ///
+    /// Asked of UIKit rather than tracked in `AppState`: every `.sheet` and
+    /// `.fullScreenCover` is a presented view controller, wherever in the view
+    /// tree it was declared, so one question covers all of them — including the
+    /// ones a screen presents locally, which no app-level flag knows about.
+    ///
+    /// `AppState` uses it to decide whether a routed page may be drawn in the
+    /// content column: content drawn there lands *underneath* any cover, so a
+    /// page opened from inside one has to be a cover itself.
+    static var isPresentingContext: Bool {
+        shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.rootViewController }
+            .contains { $0.presentedViewController != nil }
     }
 }
 
@@ -355,6 +383,17 @@ extension View {
     func standardSheet(_ detents: Set<PresentationDetent> = [.medium, .large]) -> some View {
         presentationDetents(detents)
             .presentationDragIndicator(.visible)
+    }
+
+    /// A sheet holding a *form*, which wants more room than the default.
+    ///
+    /// Full height on the phone rather than opening at `.medium`, where a
+    /// couple of fields and a footer already reach the bottom. `.page` on iPad,
+    /// because the system's form sheet there is narrow enough that the same
+    /// content feels cramped — which is what a reader reads as "too small".
+    func formSheet() -> some View {
+        standardSheet([.large])
+            .presentationSizing(.page)
     }
 }
 

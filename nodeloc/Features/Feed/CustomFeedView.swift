@@ -38,6 +38,13 @@ struct CustomFeedView: View {
     var onOpenNode: ((SidebarNodeSummary) -> Void)?
     /// The feed no longer exists; whoever presented this should close it.
     var onDeleted: (() -> Void)?
+    /// How to leave this page, when it isn't presented.
+    ///
+    /// `dismiss()` only does something for a view a *presentation* owns. Drawn
+    /// in `MainView`'s content column beside the pinned sidebar, this page has
+    /// no presentation, so the close button did nothing at all — whoever draws
+    /// it there has to say how to close it.
+    var onClose: (() -> Void)?
 
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -57,12 +64,14 @@ struct CustomFeedView: View {
         target: CustomFeedTarget,
         onOpenPost: @escaping (Post) -> Void,
         onOpenNode: ((SidebarNodeSummary) -> Void)? = nil,
-        onDeleted: (() -> Void)? = nil
+        onDeleted: (() -> Void)? = nil,
+        onClose: (() -> Void)? = nil
     ) {
         self.target = target
         self.onOpenPost = onOpenPost
         self.onOpenNode = onOpenNode
         self.onDeleted = onDeleted
+        self.onClose = onClose
         _current = State(initialValue: target)
     }
 
@@ -74,7 +83,7 @@ struct CustomFeedView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button { dismiss() } label: { Image(systemName: "xmark") }
+                        Button { close() } label: { Image(systemName: "xmark") }
                     }
                     ToolbarItem(placement: .topBarTrailing) { manageMenu }
                 }
@@ -104,7 +113,7 @@ struct CustomFeedView: View {
                     await store.load(username: current.username, slug: current.slug)
                 }
             }
-            .standardSheet()
+            .formSheet()
         }
         .sheet(isPresented: $showsNodePicker) {
             CustomFeedNodePickerSheet(store: store)
@@ -119,6 +128,15 @@ struct CustomFeedView: View {
             Button(AppString("取消"), role: .cancel) {}
         } message: {
             Text("删除后无法恢复，但其中的节点不会受影响。")
+        }
+    }
+
+    /// The caller's way out, or the presentation's.
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
         }
     }
 
@@ -151,18 +169,37 @@ struct CustomFeedView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 12)
 
+                    // The transition goes on each branch rather than on a
+                    // wrapper around the switch: a wrapper would be one child
+                    // of the `LazyVStack`, and the feed would stop being lazy.
                     switch tab {
-                    case .feed: feedTab
-                    case .about: aboutTab
+                    case .feed: feedTab.transition(pageTransition)
+                    case .about: aboutTab.transition(pageTransition)
                     }
                 }
                 .padding(.bottom, 24)
             }
             .scrollIndicators(.hidden)
+            // On the scroll view, so the swipe works anywhere on the page and
+            // not just over the pills. None of `NodeTopicRow`'s content scrolls
+            // horizontally, so there is nothing here for it to fight.
+            .swipeSelects($tab, in: [Tab.feed, .about])
             .refreshable {
                 await store.load(username: current.username, slug: current.slug)
             }
         }
+    }
+
+    /// A nudge in the direction the reader moved, plus a crossfade.
+    ///
+    /// Not a full `.move(edge:)` slide: this is inside a vertical scroll view,
+    /// which clips, so a page-width slide spends most of its travel invisible.
+    private var pageTransition: AnyTransition {
+        let offset: CGFloat = tab == .about ? 28 : -28
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(x: offset)),
+            removal: .opacity.combined(with: .offset(x: -offset))
+        )
     }
 
     private var header: some View {
@@ -242,7 +279,12 @@ struct CustomFeedView: View {
                 NodeTopicRow(
                     post: post,
                     mode: readingMode.mode,
-                    onTap: { onOpenPost(post) }
+                    // The queue goes in here rather than at the callback,
+                    // which lives in the presenter and cannot see this list.
+                    onTap: {
+                        app.readingQueue = store.visiblePosts
+                        onOpenPost(post)
+                    }
                 )
             }
 
@@ -373,7 +415,7 @@ struct CustomFeedView: View {
                 try await DiscourseClient().deleteCustomFeed(id: id)
                 ToastCenter.shared.show(AppString("已删除"))
                 onDeleted?()
-                dismiss()
+                close()
             } catch {
                 ToastCenter.shared.showError(error)
             }

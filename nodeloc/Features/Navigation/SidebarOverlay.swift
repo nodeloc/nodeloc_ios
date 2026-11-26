@@ -26,6 +26,14 @@ extension EnvironmentValues {
     /// the tab bar is still at the top, so the floating header ended up as a
     /// second row underneath it.
     @Entry var usesTopTabBar: Bool = false
+    /// Set on the controls `tabBarHeader` hands to the toolbar.
+    ///
+    /// The system already draws a glass container around a toolbar item, so a
+    /// control that adds its own ends up with two: the outer one wins the
+    /// silhouette and the inner one shows through as a grey shape inside it.
+    /// Anything that can appear both in a floating header and in that row reads
+    /// this and drops its own glass.
+    @Entry var isInTabBarRow: Bool = false
 }
 
 /// The width of the sidebar when it's pinned open beside the content.
@@ -70,9 +78,16 @@ struct SidebarOverlay: View {
                 await store.load(isSignedIn: isSignedIn)
                 guard let username = created.username else { return }
                 app.overlay = nil
-                app.openCustomFeed(username: username, slug: created.slug, name: created.name)
+                // This runs while the form sheet is still presented; `isPinned`
+                // is what the layout will be once it goes.
+                app.openCustomFeed(
+                    username: username,
+                    slug: created.slug,
+                    name: created.name,
+                    inColumn: isPinned
+                )
             }
-            .standardSheet()
+            .formSheet()
         }
     }
 

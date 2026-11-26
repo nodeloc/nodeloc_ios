@@ -236,6 +236,9 @@ enum DiscourseShape {
             "actions_summary": [["id": 2, "count": upvotes, "acted": viewerVote > 0] as Object],
             "version": value(post.version),
             "vote_score": upvotes - downvotes,
+            // Up and down together: a score of zero reads differently when
+            // nobody has voted than when the two sides cancelled.
+            "vote_count": upvotes + downvotes,
             "vote_direction": vote(direction: viewerVote),
             "can_vote_down": !yours,
             "user_title": value(post.authorTitle),

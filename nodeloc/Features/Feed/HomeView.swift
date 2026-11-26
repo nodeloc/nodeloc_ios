@@ -32,11 +32,11 @@ struct HomeView: View {
     var body: some View {
         feedBody
             .tabBarHeader(isPinned: usesTopTabBar) {
-                // The mark, not the wordmark. In the tab bar's own row the
-                // wordmark reads as a title for the row rather than as the
-                // app, and on iPad portrait it was doing that directly above
-                // a tab bar that already says where you are.
-                toolbarLeadingMark
+                // Nothing of its own: `tabBarHeader` already puts the shared
+                // mark button first, and the wordmark that used to be here
+                // read as a title for the tab bar's row rather than as the
+                // app.
+                EmptyView()
             } trailing: {
                 // No glass of our own here: the toolbar already puts each item
                 // in a glass container on iOS 26, and ours nested a circle
@@ -48,9 +48,12 @@ struct HomeView: View {
     private var feedBody: some View {
         ZStack(alignment: .top) {
             // Feed
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    Color.clear.frame(height: usesTopTabBar ? 0 : headerHeight)
+                    Color.clear
+                        .frame(height: usesTopTabBar ? 0 : headerHeight)
+                        .id(Self.topAnchor)
 
                     // Above the first row, the way the web's front page has it.
                     if !showsLoader {
@@ -81,7 +84,8 @@ struct HomeView: View {
                                         withAnimation(.panelSlide) {
                                             selectedProfile = target
                                         }
-                                    }
+                                    },
+                                    readingQueue: feed.visiblePosts
                                 )
                             case .compact, .expand:
                                 // The node pages' rows, so the two lists match.
@@ -139,8 +143,22 @@ struct HomeView: View {
             .onScrollPhaseChange { oldPhase, newPhase, context in
                 handleScrollPhase(from: oldPhase, to: newPhase, context: context)
             }
+            // The toolbar's mark asks for this; only it knows whether the
+            // layout has a drawer to open instead.
+            .onChange(of: app.scrollToTopRequests) { _, _ in
+                withAnimation(.easeOut(duration: 0.3)) {
+                    proxy.scrollTo(Self.topAnchor, anchor: .top)
+                }
+            }
+            }
 
-            if app.overlay != .post, !usesTopTabBar {
+            // Kept mounted while the reader is open, not removed. The reader
+            // is drawn above this whole view and is opaque, so hiding the
+            // header bought nothing — and putting it *back* was a separate
+            // beat after the closing page had gone, which is what read as the
+            // list refreshing behind it. Now the header is simply there, and
+            // shows through the page as it shrinks away.
+            if !usesTopTabBar {
                 persistentHeaderButtons
             }
 
@@ -164,6 +182,10 @@ struct HomeView: View {
         // read as "only dark mode is wrong".
         .background(Theme.bg.ignoresSafeArea())
     }
+
+    /// Target for the toolbar's "back to top" control, which lives outside
+    /// this view's `ScrollViewReader`.
+    private static let topAnchor = "feed-top"
 
     private let headerHeight: CGFloat = 56
     private let logoHeight: CGFloat = 30
@@ -294,24 +316,6 @@ struct HomeView: View {
         .padding(.top, 8)
     }
 
-    /// The app mark, for the tab bar's leading slot.
-    ///
-    /// Tappable only where there is a drawer to open: pinned, the sidebar is
-    /// already a column and a button that does nothing is worse than a logo.
-    @ViewBuilder
-    private var toolbarLeadingMark: some View {
-        if sidebarIsPinned {
-            Image("NodelocMark")
-                .renderingMode(.original)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 26)
-                .accessibilityLabel("NodeLoc")
-        } else {
-            SidebarMenuButton()
-        }
-    }
-
     /// 发帖 for members, 登录 for guests — posting needs an account either way.
     /// Shared so the floating header and the iPad toolbar show the same control.
     ///
@@ -357,8 +361,7 @@ struct HomeView: View {
     }
 
     private func openPost(_ post: Post) {
-        app.markTopicOpened(id: post.id)
-        app.selectedPost = post
+        app.openReader(post, in: feed.visiblePosts)
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }
@@ -487,6 +490,9 @@ struct PostCard: View {
     let postTransitionNamespace: Namespace.ID
     /// Opens the author's public profile; nil disables the avatar tap.
     var onOpenAuthor: ((UserProfileTarget) -> Void)? = nil
+    /// The list this card is one of, so the reader can swipe to its
+    /// neighbours. Empty is fine — the swipe then has nowhere to go.
+    var readingQueue: [Post] = []
     @State private var selectedMediaIndex = 0
     @State private var voteFaces = VoteFaces.shared
     /// Which arrow's face picker is open on this card, if any.
@@ -542,8 +548,7 @@ struct PostCard: View {
     }
 
     private func openPost() {
-        app.markTopicOpened(id: post.id)
-        app.selectedPost = post
+        app.openReader(post, in: readingQueue)
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }
@@ -675,6 +680,7 @@ struct PostCard: View {
     /// single button before, so the down arrow was decoration.
     private var votePill: some View {
         let score = app.voteScore(for: post)
+        let voteCount = app.voteCount(for: post)
         let direction = app.voteDirection(for: post)
         return HStack(spacing: 7) {
             // Arrow and score share one hit region, as in the reader's control:
@@ -683,7 +689,7 @@ struct PostCard: View {
                 HStack(spacing: 7) {
                     voteGlyph(target: .up, direction: direction, score: score)
 
-                    Text("\(score ?? app.voteCount(post))")
+                    Text(voteLabel(score: score, voteCount: voteCount))
                         .font(Theme.body(12, weight: .semibold))
                         .foregroundStyle(Theme.text.opacity(0.74))
                         .monospacedDigit()
@@ -699,8 +705,6 @@ struct PostCard: View {
             voteArrow(target: .down, direction: direction, score: score) {
                 voteGlyph(target: .down, direction: direction, score: score)
             }
-            .opacity(post.canVoteDown || score == nil ? 1 : 0.4)
-            .disabled(score != nil && !post.canVoteDown)
         }
         .padding(.vertical, 7)
         .padding(.horizontal, 10)
@@ -723,15 +727,18 @@ struct PostCard: View {
         score: Int?,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        content()
+        let isAvailable = canUseVoteArrow(target: target, score: score)
+        return content()
             .padding(7)
             .contentShape(Rectangle())
             .padding(-7)
             .scaleEffect(pressingFaces == target ? 0.88 : 1)
-            .opacity(pressingFaces == target ? 0.6 : 1)
+            .opacity(isAvailable ? (pressingFaces == target ? 0.6 : 1) : 0.4)
             .animation(.easeOut(duration: 0.12), value: pressingFaces)
             .accessibilityAddTraits(.isButton)
+            .disabled(!isAvailable)
             .onTapGesture {
+                guard canUseVoteArrow(target: target, score: score) else { return }
                 if score == nil {
                     // No vote data: the up arrow is still the like it used to
                     // be, and the down arrow has nothing sensible to do.
@@ -747,14 +754,32 @@ struct PostCard: View {
             .onLongPressGesture(
                 minimumDuration: 0.32,
                 perform: {
-                    guard score != nil, !voteFaces.faces(for: target).isEmpty else { return }
+                    guard canUseVoteArrow(target: target, score: score),
+                          score != nil,
+                          !voteFaces.faces(for: target).isEmpty
+                    else { return }
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     pickingFaces = target
                 },
                 onPressingChanged: { isPressing in
+                    guard canUseVoteArrow(target: target, score: score) else {
+                        if pressingFaces == target { pressingFaces = nil }
+                        return
+                    }
                     pressingFaces = isPressing ? target : nil
                 }
             )
+    }
+
+    private func voteLabel(score: Int?, voteCount: Int?) -> String {
+        guard let score else { return "\(app.voteCount(post))" }
+        return voteCount == 0 ? AppString("投票") : "\(score)"
+    }
+
+    private func canUseVoteArrow(target: VoteDirection, score: Int?) -> Bool {
+        guard score != nil else { return target == .up }
+        guard post.canVoteUp else { return false }
+        return target != .down || post.canVoteDown
     }
 
     private func voteGlyph(target: VoteDirection, direction: VoteDirection, score: Int?) -> some View {

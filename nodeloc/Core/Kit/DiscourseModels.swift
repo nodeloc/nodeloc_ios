@@ -725,6 +725,14 @@ struct TopicPost: Decodable, Identifiable {
     /// displays it and never recomputes it. Absent unless voting applies to the
     /// category, which is what says whether to draw the control.
     let voteScore: Int?
+    /// Total votes cast, up and down. The score alone can't tell "nobody has
+    /// voted" from "the ups and downs cancelled out", and the control shows
+    /// those differently.
+    let voteCount: Int?
+    /// Whether this reader may upvote at all. The backend gates downvoting
+    /// but not upvoting, so it never sends this — nil means yes, which is why
+    /// every reader defaults it to true rather than false.
+    let canVoteUp: Bool?
     let voteDirection: VoteDirection?
     let canVoteDown: Bool?
     /// discourse-reactions: which face this member used, if any, and the tally

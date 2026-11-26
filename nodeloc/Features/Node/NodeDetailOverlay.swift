@@ -52,6 +52,7 @@ struct NodeDetailOverlay: View {
     /// that cover. Setting it opened a search screen nobody could see.
     @State private var isSearching = false
     @Namespace private var readerNamespace
+    @State private var sidebarSwipeSuppressionToken = UUID()
 
     private let headerControlHeight: CGFloat = 34
     /// Extends below the floating buttons; the safe-area inset is added on top.
@@ -91,7 +92,47 @@ struct NodeDetailOverlay: View {
                     .padding(.top, UIApplication.topSafeAreaInset)
                     .frame(maxWidth: .infinity, alignment: .top)
                     .zIndex(10)
+
+                // The reader, drawn *in* this page rather than presented over
+                // it. A `fullScreenCover` is its own presentation: nothing
+                // behind it is rendered, so the reader's swipe-to-dismiss
+                // shrank away over a blank rectangle instead of over this
+                // list. In the tree, the list is simply still there.
+                if readingPost != nil {
+                    ZStack {
+                        // Fades with the shrink, like the feed's backdrop —
+                        // see `AppState.readerDismissProgress`.
+                        Theme.bg.ignoresSafeArea()
+                            .opacity(1 - app.readerDismissProgress)
+                        PostDetailOverlay(
+                            postTransitionNamespace: readerNamespace,
+                            onClose: { self.readingPost = nil },
+                            topContentInset: UIApplication.topSafeAreaInset
+                        )
+                    }
+                    .environment(\.mediaAutoplayEnabled, true)
+                    // No `appPresentationHost`: that exists to rebuild the
+                    // environment a *cover* discards. In the tree this view
+                    // inherits the nearest host already — adding another would
+                    // give the reader a second browser of its own.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
+                    .zIndex(50)
+                    // Only matters where this page is inside the tab bar's
+                    // reach — the nodes tab. A cover used to hide the tab bar
+                    // for free; in the tree it has to be asked.
+                    .toolbar(.hidden, for: .tabBar)
+                    .onAppear {
+                        app.setSidebarSwipeSuppressed(true, for: sidebarSwipeSuppressionToken)
+                    }
+                    .onDisappear {
+                        app.setSidebarSwipeSuppressed(false, for: sidebarSwipeSuppressionToken)
+                    }
+                }
             }
+        }
+        .onDisappear {
+            app.setSidebarSwipeSuppressed(false, for: sidebarSwipeSuppressionToken)
         }
         .background(Theme.bg)
         .ignoresSafeArea(edges: .top)
@@ -99,22 +140,6 @@ struct NodeDetailOverlay: View {
         .sheet(isPresented: $showSortPicker) { sortSheet }
         .fullScreenCover(isPresented: $showAuth) {
             AuthFlowOverlay(onDismiss: { showAuth = false })
-        }
-        // The reader, presented from here rather than through `app.overlay` —
-        // see `readingPost`. The environment is re-injected because a cover
-        // starts its own presentation context.
-        .fullScreenCover(item: $readingPost) { _ in
-            ZStack {
-                Theme.bg.ignoresSafeArea()
-                PostDetailOverlay(
-                    postTransitionNamespace: readerNamespace,
-                    onClose: { readingPost = nil }
-                )
-            }
-            .environment(\.mediaAutoplayEnabled, true)
-            // Without this the reader's links would open in Safari and its
-            // badges would present behind this cover.
-            .appPresentationHost(app: app)
         }
         // The composer, presented from here rather than through `app.overlay`
         // — see `isComposing`.
@@ -746,8 +771,7 @@ struct NodeDetailOverlay: View {
     private func open(_ post: Post) {
         // `selectedPost` is what the reader reads; the local cover is only how
         // it gets on screen. `app.overlay` is deliberately left alone.
-        app.markTopicOpened(id: post.id)
-        app.selectedPost = post
+        app.openReader(post, in: store.visiblePosts)
         readingPost = post
     }
 

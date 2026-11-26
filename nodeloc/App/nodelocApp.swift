@@ -8,22 +8,9 @@
 import SwiftUI
 import UIKit
 
-/// Receives the APNs device token, which only an app delegate is given.
-final class NodelocAppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        PushNotificationService.shared.didRegisterForRemoteNotifications(deviceToken: deviceToken)
-    }
-
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        #if DEBUG
-        print("[Push] APNs registration failed: \(error)")
-        #endif
-    }
-}
-
 @main
 struct nodelocApp: App {
-    @UIApplicationDelegateAdaptor(NodelocAppDelegate.self) private var appDelegate
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -33,13 +20,15 @@ struct nodelocApp: App {
         // Account-bound caches go with the account; the interface language
         // follows the device again.
         DiscourseLogin.onSignOut = {
+            Task { await PushNotificationService.shared.unregisterFromServer() }
             ProfileSnapshot.clearAll()
             AppLanguage.accountChoice = nil
             Task { try? await ChatStorage.shared.clearAll() }
         }
         DiscourseLogin.onSignIn = {
             AppLanguage.accountChoice = nil
-            PushNotificationService.shared.registerForRemotePushIfAllowed()
+            // The token may already be in hand from before the sign-in.
+            Task { await PushNotificationService.shared.syncRegistration() }
         }
     }
 

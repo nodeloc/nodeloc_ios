@@ -74,14 +74,25 @@ struct ProfileView: View {
                         .padding(.top, UIApplication.topSafeAreaInset)
                 }
             }
-            // Applied inside the ScrollViewReader because the identity capsule
-            // scrolls back to the top, which needs this proxy.
+            // No leading item of its own. The identity capsule that the phone
+            // reveals on scroll (`floatingHeaderButtons`) belongs here in
+            // principle, but a toolbar groups its leading items into one glass
+            // container — so even at opacity 0 it widened the corner into a
+            // capsule beside the mark, and revealing it made that corner change
+            // as you scrolled. Its only action, scroll to top, is what the mark
+            // itself does on iPad.
             .tabBarHeader(isPinned: usesTopTabBar) {
-                identityCapsule(scrollProxy: proxy)
-                    .opacity(identityRevealProgress)
-                    .allowsHitTesting(identityRevealProgress > 0.9)
+                EmptyView()
             } trailing: {
                 headerTools
+            }
+            // Inside the closure, for the same reason the line above says:
+            // this is where `proxy` exists. The request itself comes from the
+            // toolbar's mark, which sits outside every screen's reader.
+            .onChange(of: app.scrollToTopRequests) { _, _ in
+                withAnimation(.easeOut(duration: 0.3)) {
+                    proxy.scrollTo(topAnchor, anchor: .top)
+                }
             }
         }
         .task(id: app.authed) { await store.load(isAppAuthed: app.authed) }
@@ -297,11 +308,7 @@ struct ProfileView: View {
             .accessibilityLabel("设置")
         }
         .padding(.horizontal, 8)
-        // 7pt above/below a 34pt row reproduces what `.buttonStyle(.glass)`
-        // does, so this capsule matches the hamburger's height exactly.
-        .padding(.vertical, 7)
-        .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
-        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        .headerGroupGlass(tint: FloatingHeader.glassTint)
     }
 
     private let progressTrackLength: CGFloat = 46
@@ -1075,7 +1082,10 @@ struct ProfileView: View {
     private func openAction(_ item: UserActionItem) {
         guard let topicId = item.topicId else { return }
         let author = item.name?.isEmpty == false ? item.name! : (item.username ?? "?")
-        app.selectedPost = Post(
+        // Through `openReader` with no queue: one activity row is not a list
+        // to page through, and inheriting the last screen's would send a swipe
+        // to an unrelated post.
+        app.openReader(Post(
             id: topicId,
             node: "",
             avatarLetter: String(author.prefix(1)).uppercased(),
@@ -1088,7 +1098,7 @@ struct ProfileView: View {
             hasImage: false,
             authorUsername: item.username,
             authorName: item.name
-        )
+        ))
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }

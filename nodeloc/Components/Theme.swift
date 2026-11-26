@@ -41,20 +41,31 @@ extension Color {
 }
 
 /// Design tokens: colors, spacing, radii, typography.
+///
+/// Light-mode colors follow the new community palette: ink #0F1A1C,
+/// slate #2A3C42 / #576F76 for secondary text, #F6F8F9 surfaces,
+/// #DCE3E6 hairlines and green #007A52.
 enum Theme {
 
     // MARK: Core roles
     static let bg = Color(light: 0xFFFFFF, dark: 0x0B0F0E)
-    static let surface = Color(light: 0xF7F7F7, dark: 0x171C1A)
-    static let text = Color(light: 0x222222, dark: 0xF1F4F2)
-    static let divider = Color(light: 0x222222, dark: 0xFFFFFF, lightAlpha: 0.12, darkAlpha: 0.14)
-    static let accent = Color(light: 0x009966, dark: 0x26D99B)
+    static let surface = Color(light: 0xF6F8F9, dark: 0x171C1A)
+    static let text = Color(light: 0x0F1A1C, dark: 0xF1F4F2)
+    static let divider = Color(light: 0x0F1A1C, dark: 0xFFFFFF, lightAlpha: 0.12, darkAlpha: 0.14)
+    /// The selected pill in a `SegmentedControl`, on a `surface` track.
+    ///
+    /// Its own token rather than a neutral from the ramp because the direction
+    /// reverses: selected has to read as *raised*, which means lighter than the
+    /// track in light mode and also lighter in dark mode — `bg` is right for the
+    /// first and inverts for the second, where it left the pill looking sunken.
+    static let segmentPill = Color(light: 0xFFFFFF, dark: 0x2E3633)
+    static let accent = Color(light: 0x007A52, dark: 0x26D99B)
     static let accent2 = Color(light: 0xFF9933, dark: 0xFFB15C)
 
     static let headerBg = Color(light: 0xFFFFFF, dark: 0x0B0F0E)
-    static let headerText = Color(light: 0x333333, dark: 0xF1F4F2)
+    static let headerText = Color(light: 0x2A3C42, dark: 0xF1F4F2)
     static let selected = Color(light: 0xCDFEEE, dark: 0x133D31)
-    static let hover = Color(light: 0xF2F2F2, dark: 0x202624)
+    static let hover = Color(light: 0xEEF2F3, dark: 0x202624)
     static let highlight = Color(light: 0xFFFF4D, dark: 0xD9C93F)
     static let danger = Color(light: 0xC80001, dark: 0xFF6B6B)
     static let success = Color(light: 0x009900, dark: 0x4ADB84)
@@ -62,23 +73,23 @@ enum Theme {
 
     // MARK: Neutral ramp
     static let neutral100 = Color(light: 0xFFFFFF, dark: 0xF7FAF8)
-    static let neutral200 = Color(light: 0xF7F7F7, dark: 0xEEF2EF)
-    static let neutral300 = Color(light: 0xF2F2F2, dark: 0x232927)
-    static let neutral400 = Color(light: 0xE3E3E3, dark: 0x343B38)
+    static let neutral200 = Color(light: 0xF6F8F9, dark: 0xEEF2EF)
+    static let neutral300 = Color(light: 0xEEF2F3, dark: 0x232927)
+    static let neutral400 = Color(light: 0xDCE3E6, dark: 0x343B38)
     static let neutral500 = Color(light: 0xBDBDBD, dark: 0x8B938F)
-    static let neutral600 = Color(light: 0x8F8F8F, dark: 0xA6ADA9)
-    static let neutral700 = Color(light: 0x666666, dark: 0xC4CBC7)
-    static let neutral800 = Color(light: 0x333333, dark: 0x1D2320)
-    static let neutral900 = Color(light: 0x222222, dark: 0x050807)
+    static let neutral600 = Color(light: 0x7F949B, dark: 0xA6ADA9)
+    static let neutral700 = Color(light: 0x576F76, dark: 0xC4CBC7)
+    static let neutral800 = Color(light: 0x2A3C42, dark: 0x1D2320)
+    static let neutral900 = Color(light: 0x0F1A1C, dark: 0x050807)
 
     // MARK: Accent ramp
     static let accent100 = Color(light: 0xCDFEEE, dark: 0xD7FFF2)
     static let accent200 = Color(light: 0xA3F6DC, dark: 0x9FF5D9)
     static let accent300 = Color(light: 0x6FE9C5, dark: 0x6FE9C5)
     static let accent400 = Color(light: 0x3AD4A8, dark: 0x42DDB1)
-    static let accent500 = Color(light: 0x009966, dark: 0x26D99B)
-    static let accent600 = Color(light: 0x00875A, dark: 0x55E2B0)
-    static let accent700 = Color(light: 0x00714C, dark: 0x7BEBC5)
+    static let accent500 = Color(light: 0x007A52, dark: 0x26D99B)
+    static let accent600 = Color(light: 0x006A47, dark: 0x55E2B0)
+    static let accent700 = Color(light: 0x005C3D, dark: 0x7BEBC5)
     static let accent800 = Color(light: 0x005A3E, dark: 0x064B38)
     static let accent900 = Color(light: 0x00402C, dark: 0x033326)
 

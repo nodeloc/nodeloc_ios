@@ -740,44 +740,228 @@ private struct OptionalElevation: ViewModifier {
 
 // MARK: - Segmented control
 
+/// Pills in a capsule track, with the selection sliding between them.
+///
+/// The selected pill is one view moved by `matchedGeometryEffect` rather than
+/// one background per option appearing and disappearing — which is what makes
+/// the change read as movement, and what lets a swipe drag the control along
+/// with the content (see `SegmentedControl.switching`).
 struct SegmentedControl<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(value: Value, label: String)]
+    @Namespace private var pill
+
+    /// The animation both a tap here and a swipe on the content use, so the
+    /// control and the page it drives always move together.
+    static var switching: Animation { .spring(response: 0.3, dampingFraction: 0.86) }
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+        HStack(spacing: 4) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
                 let isSelected = selection == option.value
                 Button {
-                    selection = option.value
+                    withAnimation(Self.switching) { selection = option.value }
                 } label: {
                     Text(option.label)
-                        .font(Theme.body(13))
-                        .foregroundStyle(isSelected ? Theme.accent : Theme.text)
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(isSelected ? Theme.text : Theme.muted(0.55))
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .padding(.horizontal, 12)
-                        .overlay {
-                            if isSelected {
-                                RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
-                                    .strokeBorder(Theme.accent, lineWidth: 1)
-                            }
-                        }
+                        .frame(height: 34)
+                        .background { pillBackground(isSelected: isSelected) }
+                        // The label alone would leave the gaps between pills
+                        // dead, which on a two-option control is most of it.
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.pressable)
-                if index < options.count - 1 {
-                    Rectangle().fill(Theme.divider).frame(width: 1)
-                }
             }
         }
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+        .padding(3)
+        .background(Theme.surface, in: Capsule())
         .overlay {
-            RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
-                .strokeBorder(Theme.divider, lineWidth: 1)
+            Capsule().strokeBorder(Theme.divider.opacity(0.6), lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+    }
+
+    /// Factored out of `body` only because the type checker timed out on it
+    /// inline — the `matchedGeometryEffect` inside a conditional background is
+    /// what tipped it over.
+    @ViewBuilder
+    private func pillBackground(isSelected: Bool) -> some View {
+        if isSelected {
+            Capsule()
+                .fill(Theme.segmentPill)
+                .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
+                .matchedGeometryEffect(id: "segment-pill", in: pill)
+        }
     }
 }
+
+extension View {
+    /// A horizontal swipe that steps `selection` through `options`.
+    ///
+    /// Backed by a `UIPanGestureRecognizer` rather than a `DragGesture`. A
+    /// `DragGesture` here — even as a `simultaneousGesture` with a minimum
+    /// distance — claims the touch sequence, and the `onTapGesture` on each row
+    /// underneath never fires, so tapping a post did nothing.
+    ///
+    /// What keeps taps working is the delegate: the recogniser only begins for
+    /// a mostly-horizontal pan, and a tap has no movement to trigger that. It
+    /// also recognises simultaneously, so the vertical scroll view keeps its
+    /// axis.
+    func swipeSelects<Value: Hashable>(
+        _ selection: Binding<Value>,
+        in options: [Value],
+        onChange: ((Value) -> Void)? = nil
+    ) -> some View {
+        onHorizontalSwipe { direction in
+            guard let index = options.firstIndex(of: selection.wrappedValue) else { return }
+            let next = direction == .leftwards ? index + 1 : index - 1
+            guard options.indices.contains(next) else { return }
+            withAnimation(SegmentedControl<Value>.switching) {
+                selection.wrappedValue = options[next]
+            }
+            onChange?(options[next])
+        }
+    }
+
+    /// A completed horizontal swipe, reported once on release.
+    ///
+    /// Same recogniser as `swipeSelects`, and for the same reason: the reader
+    /// this is used on is full of tappable rows, buttons and links.
+    ///
+    /// - Parameter isEnabled: False suspends the gesture — for a viewer or
+    ///   overlay on top that wants sideways drags for itself.
+    func onHorizontalSwipe(
+        isEnabled: Bool = true,
+        perform: @escaping (HorizontalSwipeDirection) -> Void
+    ) -> some View {
+        onHorizontalPan(isEnabled: isEnabled) { phase in
+            guard case .ended(let translation, _) = phase, abs(translation) > 48 else { return }
+            perform(translation < 0 ? .leftwards : .rightwards)
+        }
+    }
+
+    /// The same pan, reported *while* it happens, for a gesture the content
+    /// follows rather than one it answers on release.
+    func onHorizontalPan(
+        isEnabled: Bool = true,
+        perform: @escaping (HorizontalPanPhase) -> Void
+    ) -> some View {
+        gesture(HorizontalSwipeRecognizer(isEnabled: isEnabled, onPhase: perform))
+    }
+}
+
+/// Where a horizontal pan has got to.
+///
+/// `velocity` comes along with the end because the decision to commit is not
+/// only about distance: a short, fast flick means the same thing as a long,
+/// slow drag, and the reader treats them alike.
+enum HorizontalPanPhase {
+    /// `vertical` comes along so the consumer can give up on a drag that turns
+    /// out to be a scroll: the direction test at the start only sees the first
+    /// few points of travel, and a finger is free to change its mind after.
+    case changed(translation: CGFloat, vertical: CGFloat)
+    case ended(translation: CGFloat, velocity: CGFloat)
+    /// The system took the gesture away — put whatever was following the finger
+    /// back where it started.
+    case cancelled
+}
+
+/// Which way the finger travelled, rather than what it means: "leftwards" is
+/// unambiguous where "next"/"back" depend on the screen.
+enum HorizontalSwipeDirection {
+    case leftwards
+    case rightwards
+}
+
+/// The pan behind `swipeSelects`, reporting its horizontal travel on release.
+private struct HorizontalSwipeRecognizer: UIGestureRecognizerRepresentable {
+    let isEnabled: Bool
+    let onPhase: (HorizontalPanPhase) -> Void
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        /// Horizontal drags only, judged on travel *and* speed at the moment
+        /// the pan would start.
+        ///
+        /// Both, because either alone lets the wrong drag through: a vertical
+        /// scroll that drifts sideways has the travel but not the speed, and a
+        /// slow diagonal has neither convincingly. Anything that fails here
+        /// goes to `.failed`, which is what releases the scroll view below.
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            let travel = pan.translation(in: pan.view)
+            let speed = pan.velocity(in: pan.view)
+            return abs(travel.x) > abs(travel.y) * 1.4
+                && abs(speed.x) > abs(speed.y) * 1.4
+        }
+
+        /// Never both at once. Simultaneous recognition is what let a sideways
+        /// swipe scroll the page at the same time — near the top that showed up
+        /// as the refresh control being dragged down while the post slid
+        /// away.
+        func gestureRecognizer(
+            _ recognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool {
+            false
+        }
+
+        /// The scroll view waits for this one to decide.
+        ///
+        /// Without it the scroll view's own pan — which begins for movement in
+        /// *any* direction — would usually claim the drag first, and a
+        /// horizontal swipe would only ever scroll. Ours answers within the
+        /// recogniser's slop (~10pt) either way, so a vertical drag scrolls as
+        /// before.
+        func gestureRecognizer(
+            _ recognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy other: UIGestureRecognizer
+        ) -> Bool {
+            other is UIPanGestureRecognizer && other.view is UIScrollView
+        }
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        // Touches *are* cancelled once this recognises, which is the whole
+        // difference between a drag and a tap: dragging sideways from the ⚡
+        // button used to page the reader and open the tip sheet, because with
+        // `cancelsTouchesInView = false` the button still got its touch. Taps
+        // are safe without that flag — see the delegate: no movement, no pan.
+        pan.delegate = context.coordinator
+        pan.isEnabled = isEnabled
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        recognizer.isEnabled = isEnabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        let translation = recognizer.translation(in: recognizer.view).x
+        switch recognizer.state {
+        case .changed:
+            onPhase(.changed(
+                translation: translation,
+                vertical: recognizer.translation(in: recognizer.view).y
+            ))
+        case .ended:
+            onPhase(.ended(
+                translation: translation,
+                velocity: recognizer.velocity(in: recognizer.view).x
+            ))
+        case .cancelled, .failed:
+            onPhase(.cancelled)
+        default:
+            break
+        }
+    }
+}
+
 
 // MARK: - Text field
 

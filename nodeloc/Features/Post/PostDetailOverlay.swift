@@ -22,6 +22,10 @@ struct PostDetailOverlay: View {
     /// `MainView`, behind the cover, so the reader would open where nobody can
     /// see it and the tap would look dead.
     var onClose: (() -> Void)?
+    /// Extra top space for hosts that draw edge-to-edge themselves, such as the
+    /// node page. The normal app-level reader is already laid out below the safe
+    /// area, so it leaves this at zero.
+    var topContentInset: CGFloat = 0
     @State private var topic = TopicStore()
     @State private var draft = ""
     @State private var collapsedCommentIDs: Set<Int> = []
@@ -56,9 +60,14 @@ struct PostDetailOverlay: View {
     /// Reports read progress (posts seen + time) so the server records it and
     /// the topic's unread dot clears.
     @State private var reader = TopicReadTracker()
-    /// Latches the pull-to-close, so the gesture can't fire `close()` on every
-    /// frame it stays past the threshold.
+    /// Latches the closing gesture, so it can't fire `close()` twice.
     @State private var isClosing = false
+    /// High-frequency drag state lives outside the reader view so every finger
+    /// move can update transforms without rebuilding the long post body.
+    @State private var pan = ReaderPanState()
+    /// The adjacent topic currently previewed by a side-swipe. This only changes
+    /// when the drag crosses direction/dead-zone boundaries, not every frame.
+    @State private var panTarget: Post?
     @State private var showSortDialog = false
     /// The user being replied to (drives the composer's "回复xxx" header). Its
     /// post number becomes `reply_to_post_number` on submit.
@@ -70,6 +79,8 @@ struct PostDetailOverlay: View {
     /// Which post the editor is open on, and whether it's the OP (whose body
     /// is the topic's first post rather than a reply).
     @State private var editTarget: EditTarget?
+    /// 编辑历史 for the topic's first post or a reply.
+    @State private var historyTarget: EditHistoryTarget?
     @State private var deleteTargetPostID: Int?
     /// Post whose reaction breakdown is open.
     @State private var reactionDetail: ReactionTarget?
@@ -103,25 +114,24 @@ struct PostDetailOverlay: View {
 
     var body: some View {
         let post = app.selectedPost
-        GeometryReader { _ in
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
             ZStack(alignment: .top) {
-                Theme.bg
-                    .matchedGeometryEffect(
-                        id: postTransitionID(post.id),
-                        in: postTransitionNamespace,
-                        properties: .frame,
-                        anchor: .center,
-                        isSource: true
-                    )
-                    .allowsHitTesting(false)
-                    .zIndex(0)
-
-                detailSurface(for: post)
-                    .zIndex(1)
-
-                floatingReaderHeader(for: post)
-                    .frame(maxWidth: .infinity, alignment: .top)
-                    .zIndex(10)
+                ReaderPanStack(
+                    pan: pan,
+                    post: post,
+                    postTransitionNamespace: postTransitionNamespace,
+                    width: width,
+                    height: proxy.size.height,
+                    incomingPost: panTarget,
+                    hasPreviousPost: app.postAdjacent(to: post, offset: -1) != nil
+                ) {
+                    detailSurface(for: post)
+                } header: {
+                    floatingReaderHeader(for: post)
+                } preview: { incoming in
+                    postPreview(incoming)
+                }
 
                 if let selectedProfile {
                     PublicProfileOverlay(target: selectedProfile) {
@@ -135,9 +145,23 @@ struct PostDetailOverlay: View {
 
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(Theme.bg)
         }
-        .background(Theme.bg.ignoresSafeArea())
+        // Leftwards for the next post, rightwards for the previous one — and
+        // when there is no previous one, rightwards leaves. Tracked while the
+        // finger moves rather than judged on release, so the page it is heading
+        // for is already visible by the time the reader decides to go there.
+        //
+        // Suspended while a profile is layered over the reader, which is drawn
+        // in this same view and wants sideways drags for its own dismissal.
+        // The image and video viewers need no such guard: they are presented,
+        // so their touches never reach this recogniser.
+        .onHorizontalPan(isEnabled: selectedProfile == nil && !isClosing) { phase in
+            handlePan(phase, post: post, width: pan.readerWidth)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+            pan.readerWidth = max($0, 1)
+        }
+        .onDisappear { app.readerDismissProgress = 0 }
         .task(id: post.id) {
             // Consume the scroll target before loading so it can't leak into a
             // later, unrelated topic opened in the same overlay.
@@ -146,11 +170,27 @@ struct PostDetailOverlay: View {
             // Reset per topic: the overlay is reused, and a latched close from
             // the last one would fire on this one's first rubber-band.
             isClosing = false
+            pan.reset()
+            panTarget = nil
+            app.readerDismissProgress = 0
             await topic.load(topicID: post.id)
             // Subscribed after loading, so a reply that arrives during the
             // fetch is either already in the response or counted — never both,
             // since the handler checks what is on screen.
             topic.startLiveUpdates(topicID: post.id)
+            // Warm the next post in the list, so swiping to it draws from disk
+            // instead of waiting. Only forwards: swiping back goes to posts
+            // this reader has already been on, which are cached by definition.
+            //
+            // After the visible load, never beside it — a speculative request
+            // that competes with the one the reader is waiting for has made
+            // things worse, not better.
+            if let next = app.postAdjacent(to: post, offset: 1) {
+                await TopicPrefetcher.shared.prefetch(
+                    id: next.id,
+                    sort: topic.replySort.apiValue
+                )
+            }
         }
         .onDisappear {
             // A long poll for a topic nobody is reading is a connection and a
@@ -270,6 +310,13 @@ struct PostDetailOverlay: View {
         }
         .sheet(item: $reactionDetail) { target in
             ReactionUsersSheet(postID: target.postID)
+        }
+        .sheet(item: $historyTarget) { target in
+            EditHistorySheet(
+                target: target,
+                load: { try await topic.revisions(postID: target.postID) },
+                restore: { number in await topic.restoreRevision(postID: target.postID, number: number) }
+            )
         }
         .sheet(item: $editTarget) { target in
             PostEditSheet(
@@ -393,6 +440,19 @@ struct PostDetailOverlay: View {
                     .buttonStyle(.pressable)
                 }
 
+                if comment.editCount > 0 {
+                    Button {
+                        moreSheetComment = nil
+                        historyTarget = EditHistoryTarget(postID: comment.id, canRestore: comment.canEdit)
+                    } label: {
+                        moreSheetRow(
+                            AppString("编辑历史 · 已编辑 \(comment.editCount) 次"),
+                            systemImage: "clock.arrow.circlepath"
+                        )
+                    }
+                    .buttonStyle(.pressable)
+                }
+
                 if comment.canEdit || comment.canDelete {
                     Divider().padding(.vertical, 4)
                 }
@@ -485,6 +545,22 @@ struct PostDetailOverlay: View {
                 // `can_*` the server put on this topic for this viewer, so a
                 // node moderator sees them on their own node and nowhere else,
                 // and the app never guesses at who may do what.
+                if topic.firstPostEditCount > 0, let firstPostID = topic.firstPostID {
+                    Button {
+                        showTopicMoreSheet = false
+                        historyTarget = EditHistoryTarget(
+                            postID: firstPostID,
+                            canRestore: topic.canEditFirstPost
+                        )
+                    } label: {
+                        moreSheetRow(
+                            AppString("编辑历史 · 已编辑 \(topic.firstPostEditCount) 次"),
+                            systemImage: "clock.arrow.circlepath"
+                        )
+                    }
+                    .buttonStyle(.pressable)
+                }
+
                 if topic.canEditTopic || topic.canEditFirstPost {
                     Divider().padding(.vertical, 4)
                 }
@@ -588,6 +664,192 @@ struct PostDetailOverlay: View {
         }
     }
 
+    // MARK: Sideways paging
+
+    /// The post a drag is heading for: the next one going left, the previous
+    /// one going right. Nil at either end of the list, and nil when there is no
+    /// list at all — `AppState.readingQueue` is empty for a post reached from a
+    /// link, a notification or a reference.
+    ///
+    /// The dead zone keeps a vertical scroll that wobbles a pixel sideways from
+    /// flashing the neighbouring page.
+    private func panTarget(for translation: CGFloat, post: Post) -> Post? {
+        if translation < -8 { return app.postAdjacent(to: post, offset: 1) }
+        if translation > 8 { return app.postAdjacent(to: post, offset: -1) }
+        return nil
+    }
+
+    private func setPanTarget(_ target: Post?) {
+        guard panTarget?.id != target?.id else { return }
+        panTarget = target
+    }
+
+    private func readerDismissProgress(for translation: CGFloat, post: Post, width: CGFloat) -> CGFloat {
+        guard translation > 0, app.postAdjacent(to: post, offset: -1) == nil else { return 0 }
+        return min(translation / max(width, 1), 1)
+    }
+
+    private func setReaderDismissProgress(_ fraction: CGFloat) {
+        guard app.readerDismissProgress != fraction else { return }
+        app.readerDismissProgress = fraction
+    }
+
+    private func resetPan() {
+        setPanTarget(nil)
+        setReaderDismissProgress(0)
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+            pan.dragX = 0
+        }
+    }
+
+    private func handlePan(_ phase: HorizontalPanPhase, post: Post, width: CGFloat) {
+        guard !isClosing else { return }
+        switch phase {
+        case .changed(let translation, let vertical):
+            guard !pan.abandoned else { return }
+            // A finger that has wandered this far down the page is reading, not
+            // paging. Put the page back and stay out of the way until it lifts:
+            // the scroll view has already lost this drag to us, so there is
+            // nothing to hand it back to, and *nothing* is the right answer.
+            if abs(vertical) > 44 {
+                pan.abandoned = true
+                resetPan()
+                return
+            }
+            pan.dragX = translation
+            setPanTarget(panTarget(for: translation, post: post))
+            setReaderDismissProgress(readerDismissProgress(for: translation, post: post, width: width))
+        case .cancelled:
+            pan.abandoned = false
+            resetPan()
+        case .ended(let translation, let velocity):
+            let abandoned = pan.abandoned
+            pan.abandoned = false
+            guard !abandoned else {
+                resetPan()
+                return
+            }
+            endPan(translation: translation, velocity: velocity, post: post, width: width)
+        }
+    }
+
+    private func endPan(translation: CGFloat, velocity: CGFloat, post: Post, width: CGFloat) {
+        // A short flick means the same as a long drag, so either commits.
+        let committed = abs(translation) > width * 0.28 || abs(velocity) > 700
+        let target = panTarget(for: translation, post: post)
+
+        guard committed else {
+            resetPan()
+            return
+        }
+
+        if let target {
+            setPanTarget(target)
+            setReaderDismissProgress(0)
+            // Carry the page the rest of the way off screen, *then* swap: at
+            // that moment the incoming preview is exactly where the real page
+            // will appear, so the substitution is invisible.
+            withAnimation(.easeOut(duration: 0.2)) {
+                pan.dragX = translation < 0 ? -width : width
+            } completion: {
+                // `pageReader`, not `openReader`: this is movement within the
+                // session, and re-opening would move the point a back-swipe
+                // stops at along with it.
+                app.pageReader(to: target)
+                pan.reset()
+                setPanTarget(nil)
+                setReaderDismissProgress(0)
+            }
+        } else if translation > 0 {
+            shrinkAway()
+        } else {
+            resetPan()
+        }
+    }
+
+    /// Closes by shrinking towards the trailing edge, continuing the shrink the
+    /// drag had already started, so a back-swipe with nothing behind it reads as
+    /// putting the post down rather than as the gesture having been ignored.
+    private func shrinkAway() {
+        guard !isClosing else { return }
+        isClosing = true
+        withAnimation(.easeOut(duration: 0.26)) {
+            pan.isShrinkingAway = true
+            app.readerDismissProgress = 1
+        } completion: {
+            // Removed without a second transition: the shrink is the dismissal
+            // gesture's animation. The X button still uses `close()`'s normal
+            // transition because it starts from a full-size page.
+            if let onClose {
+                onClose()
+            } else {
+                app.overlay = nil
+            }
+            // Reset for the next post opened in this same overlay, which is
+            // reused rather than rebuilt.
+            pan.isShrinkingAway = false
+            isClosing = false
+            pan.dragX = 0
+            setPanTarget(nil)
+            app.readerDismissProgress = 0
+        }
+    }
+
+    /// The incoming page during a drag: the list's own author, time, title and
+    /// short excerpt. Keeping this light matters because it is redrawn with the
+    /// finger; the full native body appears after the page settles.
+    ///
+    /// Built from the `Post` alone. `authorLine` mixes in the loaded topic's
+    /// author, which here is still the *previous* post's — the wrong person on
+    /// the wrong page.
+    private func postPreview(_ post: Post) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Color.clear.frame(height: readerContentTopInset)
+
+            HStack(spacing: 9) {
+                RemoteAvatar(
+                    url: post.avatarURL,
+                    letter: post.avatarLetter,
+                    variant: post.variant,
+                    size: 30,
+                    cornerRadius: 9
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(post.authorUsername ?? post.node)
+                        .font(Theme.body(13, weight: .semibold))
+                    Text(post.time)
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.muted(0.48))
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, 12)
+
+            Text(post.title)
+                .font(Theme.heading(24, weight: .semibold))
+                .lineSpacing(3)
+                .foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 14)
+
+            if !post.excerpt.isEmpty {
+                Text(post.excerpt)
+                    .font(Theme.body(16))
+                    .lineSpacing(6)
+                    .foregroundStyle(Theme.text.opacity(0.78))
+                    .lineLimit(8)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                postBodySkeleton
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.bg)
+    }
+
     /// 屏蔽作者 from a reply's … sheet. The store reloads the topic, so the
     /// toast is confirmation of something the reader can also see happen.
     private func blockAuthor(_ username: String, postID: Int?) async {
@@ -670,6 +932,7 @@ struct PostDetailOverlay: View {
     }
 
     private let readerTopInset: CGFloat = 62
+    private var readerContentTopInset: CGFloat { readerTopInset + topContentInset }
     // Shared with the full-screen video header so the two stay identical.
     private let readerHeaderControlHeight = FloatingHeader.controlHeight
     private let readerNodePillWidth = FloatingHeader.nodePillWidth
@@ -741,12 +1004,12 @@ struct PostDetailOverlay: View {
             // blowup deep in SwiftUI). A lazy stack only measures what's
             // materialized, which caps that pass regardless of content.
             LazyVStack(alignment: .leading, spacing: 0) {
-                Color.clear.frame(height: readerTopInset)
+                Color.clear.frame(height: readerContentTopInset)
 
                 authorLine(for: post)
                     .padding(.bottom, 12)
 
-                Text(post.title)
+                Text(displayTitle(for: post))
                     .font(Theme.heading(24, weight: .semibold))
                     .lineSpacing(3)
                     .foregroundStyle(Theme.text)
@@ -770,6 +1033,20 @@ struct PostDetailOverlay: View {
                 if topic.content.isEmpty {
                     if topic.isLoading {
                         postBodySkeleton
+                    } else if topic.loadError != nil {
+                        // The excerpt first when there is one — a row opened
+                        // from a list still has something to show — then the
+                        // notice, because half a post with no explanation is
+                        // what this state used to be.
+                        if !post.excerpt.isEmpty {
+                            Text(post.excerpt)
+                                .font(Theme.body(16))
+                                .lineSpacing(6)
+                                .foregroundStyle(Theme.text.opacity(0.88))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.bottom, 16)
+                        }
+                        loadFailureNotice(for: post)
                     } else {
                         // Falls back to the list excerpt if the body never loads.
                         Text(post.excerpt)
@@ -860,25 +1137,11 @@ struct PostDetailOverlay: View {
         } action: { _, newValue in
             reveal.progress = newValue
         }
-        // Pull down from the top to close, the way a sheet does.
-        //
-        // Keyed on the *release*, not on the offset: an offset threshold alone
-        // closed the reader when you flung upward and momentum carried past
-        // the top, which is not a request to leave. At the moment a fling is
-        // released the offset is still positive — the overshoot happens
-        // afterwards, while decelerating — so requiring the finger to have
-        // just lifted separates "I pulled down" from "it bounced".
-        //
-        // Which is also how a sheet behaves, so the gesture should feel
-        // familiar rather than merely correct.
-        .onScrollPhaseChange { oldPhase, _, context in
-            guard !isClosing,
-                  oldPhase == .interacting || oldPhase == .tracking,
-                  context.geometry.contentOffset.y < -90
-            else { return }
-            isClosing = true
-            close()
-        }
+        // Pull down to refresh. Leaving is a sideways swipe now: a pull is
+        // what every other list in the app does to reload, and asking one
+        // gesture to mean both "reload" and "leave" made every fling near the
+        // top a coin toss.
+        .refreshable { await topic.refresh() }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg)
     }
@@ -914,7 +1177,7 @@ struct PostDetailOverlay: View {
             readerTools(for: post)
         }
         .padding(.horizontal, readerHeaderHorizontalInset)
-        .padding(.top, 8)
+        .padding(.top, 8 + topContentInset)
         .zIndex(2)
     }
 
@@ -1545,6 +1808,89 @@ struct PostDetailOverlay: View {
         }
     }
 
+    private var failureIcon: String {
+        switch topic.loadFailure {
+        case .denied: "lock"
+        case .missing: "questionmark.circle"
+        default: "exclamationmark.triangle"
+        }
+    }
+
+    private var failureTitle: String {
+        switch topic.loadFailure {
+        case .denied: AppString("你没有权限查看这个帖子")
+        case .missing: AppString("这个帖子不存在或已被删除")
+        default: AppString("帖子加载失败")
+        }
+    }
+
+    /// The row's title, or the loaded topic's when there isn't one.
+    ///
+    /// A topic opened by *id* — a notification, a link, a push — carries a
+    /// placeholder `Post` with an empty title, so the page had no heading at
+    /// all until now: the title was sitting in the store, unread.
+    private func displayTitle(for post: Post) -> String {
+        post.title.isEmpty ? topic.topicTitle : post.title
+    }
+
+    /// Shown when the topic could not be loaded.
+    ///
+    /// Says which of the two it is, because the useful action differs: a
+    /// refused topic (a private message, a staff-only category) will refuse
+    /// again however many times it is retried, and the web page is the only
+    /// place the reader can still get in — signed in as themselves, where the
+    /// site can explain. Anything else is worth a retry.
+    private func loadFailureNotice(for post: Post) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: failureIcon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.muted(0.5))
+                Text(failureTitle)
+                    .font(Theme.body(15, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+            }
+
+            if let detail = topic.loadError, topic.loadFailure == .temporary {
+                Text(detail)
+                    .font(Theme.body(13))
+                    .foregroundStyle(Theme.muted(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 10) {
+                if topic.loadFailure == .temporary {
+                    Button {
+                        Task { await topic.refresh() }
+                    } label: {
+                        Text("重试")
+                            .font(Theme.body(14, weight: .semibold))
+                            .padding(.horizontal, 16)
+                            .frame(height: 36)
+                    }
+                    .buttonStyle(.pressable)
+                    .background(Theme.surface, in: Capsule())
+                }
+
+                Button {
+                    // Straight to the browser rather than through `openURL`:
+                    // the app's own router would recognise this as a topic and
+                    // send it back here, to fail again.
+                    BrowserState.shared.open(post.topicURL)
+                } label: {
+                    Text("在浏览器中打开")
+                        .font(Theme.body(14, weight: .semibold))
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                }
+                .buttonStyle(.pressable)
+                .background(Theme.surface, in: Capsule())
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 8)
+    }
+
     // MARK: Skeleton
 
     /// Placeholder lines for the post body while it loads.
@@ -2024,6 +2370,116 @@ private struct NestedReplyRow: View {
     fileprivate static let indentStep: CGFloat = 13
     fileprivate static let railContentGap: CGFloat = 8
     fileprivate static let maxIndentLevels: Int = 8
+}
+
+/// Holds side-swipe progress separately from the reader so pan frames only
+/// invalidate the transform wrapper.
+@MainActor
+@Observable
+final class ReaderPanState {
+    var dragX: CGFloat = 0
+    var abandoned = false
+    var readerWidth: CGFloat = 390
+    var isShrinkingAway = false
+
+    func reset() {
+        dragX = 0
+        abandoned = false
+        isShrinkingAway = false
+    }
+}
+
+/// Applies the reader's horizontal drag transforms without making the whole
+/// `PostDetailOverlay` re-run on every pan update.
+private struct ReaderPanStack<Detail: View, Header: View, Preview: View>: View {
+    let pan: ReaderPanState
+    let post: Post
+    let postTransitionNamespace: Namespace.ID
+    let width: CGFloat
+    let height: CGFloat
+    let incomingPost: Post?
+    let hasPreviousPost: Bool
+    private let detail: Detail
+    private let header: Header
+    private let preview: (Post) -> Preview
+
+    init(
+        pan: ReaderPanState,
+        post: Post,
+        postTransitionNamespace: Namespace.ID,
+        width: CGFloat,
+        height: CGFloat,
+        incomingPost: Post?,
+        hasPreviousPost: Bool,
+        @ViewBuilder detail: () -> Detail,
+        @ViewBuilder header: () -> Header,
+        @ViewBuilder preview: @escaping (Post) -> Preview
+    ) {
+        self.pan = pan
+        self.post = post
+        self.postTransitionNamespace = postTransitionNamespace
+        self.width = width
+        self.height = height
+        self.incomingPost = incomingPost
+        self.hasPreviousPost = hasPreviousPost
+        self.detail = detail()
+        self.header = header()
+        self.preview = preview
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            ZStack(alignment: .top) {
+                Theme.bg
+                    .matchedGeometryEffect(
+                        id: postTransitionID(post.id),
+                        in: postTransitionNamespace,
+                        properties: .frame,
+                        anchor: .center,
+                        isSource: true
+                    )
+                    .allowsHitTesting(false)
+                    .zIndex(0)
+
+                // The post the drag is heading for, coming in from its own edge
+                // as the current one leaves.
+                if let incomingPost {
+                    preview(incomingPost)
+                        .frame(width: width, height: height)
+                        .offset(x: pan.dragX < 0 ? width + pan.dragX : -width + pan.dragX)
+                        .zIndex(2)
+                }
+
+                detail
+                    // Identity per topic: the new post starts at the top rather
+                    // than inheriting the last one's scroll offset.
+                    .id(post.id)
+                    .offset(x: pageOffset)
+                    .zIndex(1)
+            }
+            .background(Theme.bg.ignoresSafeArea())
+            .scaleEffect(1 - 0.28 * shrinkFraction, anchor: .trailing)
+            .zIndex(0)
+
+            header
+                .frame(maxWidth: .infinity, alignment: .top)
+                .zIndex(10)
+        }
+    }
+
+    /// One-to-one when there is somewhere to go; damped when that direction is
+    /// empty, matching scroll-view edge resistance.
+    private var pageOffset: CGFloat {
+        if incomingPost != nil { return pan.dragX }
+        return pan.dragX > 0 ? pan.dragX * 0.4 : pan.dragX * 0.2
+    }
+
+    /// 0...1 for the shrink that answers a back-swipe with nothing behind it.
+    private var shrinkFraction: CGFloat {
+        if pan.isShrinkingAway { return 1 }
+        guard pan.dragX > 0, !hasPreviousPost else { return 0 }
+        return min(pan.dragX / max(width, 1), 1)
+    }
 }
 
 /// Holds the header reveal progress separately from the view so scroll updates

@@ -167,6 +167,8 @@ final class TopicStore {
     private(set) var canCloseTopic = false
     private(set) var canPinTopic = false
     private(set) var canEditFirstPost = false
+    /// Times the first post was edited since publishing (`version - 1`).
+    private(set) var firstPostEditCount = 0
     private(set) var canDeleteFirstPost = false
     private(set) var isTopicClosed = false
     /// Discourse features a topic three different ways, and they are not
@@ -192,7 +194,9 @@ final class TopicStore {
     private(set) var firstPostReactions: [PostReaction] = []
     /// discourse-vote on the OP. Nil score means voting doesn't apply here.
     private(set) var firstPostVoteScore: Int?
+    private(set) var firstPostVoteCount: Int?
     private(set) var firstPostVoteDirection: VoteDirection = .none
+    private(set) var firstPostCanVoteUp = false
     private(set) var firstPostCanVoteDown = false
     /// The OP's like count (kept here so the toggle can update it live).
     var firstPostLikeCount = 0
@@ -248,8 +252,26 @@ final class TopicStore {
 
     var hasMoreComments: Bool { nestedHasMore }
 
+    /// Why the last load failed, or nil. Drives the reader's failure state.
+    private(set) var loadError: String?
+    /// Which kind of failure, because the reader is told a different thing and
+    /// offered a different action for each.
+    private(set) var loadFailure: LoadFailure?
+
+    enum LoadFailure {
+        /// 403 — the account may not read this topic (a private message, a
+        /// staff category). Retrying will be refused just the same.
+        case denied
+        /// 404 — deleted, or never existed. Also not worth a retry.
+        case missing
+        /// Network, decoding, a 5xx: worth trying again.
+        case temporary
+    }
+
     func load(topicID: Int) async {
         guard loadedID != topicID else { return }
+        loadError = nil
+        loadFailure = nil
         // Only a *different* topic gets cleared. Reloading the one already on
         // screen — what posting a reply does — used to empty `content` and
         // `comments` first, which pulled the whole scroll content out from
@@ -281,12 +303,15 @@ final class TopicStore {
             canPinTopic = false
             canBannerTopic = false
             canEditFirstPost = false
+            firstPostEditCount = 0
             canDeleteFirstPost = false
             firstAuthorFlairURL = nil
             firstPostLikedByMe = false
             firstPostReactions = []
             firstPostVoteScore = nil
+            firstPostVoteCount = nil
             firstPostVoteDirection = .none
+            firstPostCanVoteUp = false
             firstPostCanVoteDown = false
             firstPostLikeCount = 0
             firstPostRewards = []
@@ -296,82 +321,42 @@ final class TopicStore {
             redEnvelope = nil
             nestedRoots = []
         }
+        // Disk first, so a topic that has been read before draws immediately
+        // and the network merely updates it. `isLoading` stays true underneath:
+        // the skeleton is keyed on there being no content, so it does not show.
+        if !isRefresh,
+           let snapshot = TopicSnapshot.load(id: topicID),
+           let cached = try? DiscourseClient.decodeTopic(snapshot.data) {
+            await apply(topic: cached)
+        }
         do {
-            let topic = try await client.topic(id: topicID)
-            let posts = topic.postStream.posts
-            // Kept for the private-message branch below, which builds its
-            // reply list from these rather than from the nested endpoint.
-            privateMessagePosts = posts
-            firstPostID = posts.first?.id
-            if let firstPost = posts.first {
-                firstAuthor = UserProfileTarget(
-                    // The OP always has one; only the nested view's deleted-reply
-                    // stub omits it.
-                    username: firstPost.username ?? "",
-                    displayName: firstPost.name,
-                    avatarURL: firstPost.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 120) }
-                )
-                firstPostPolls = firstPost.polls ?? []
-                myPollVotes = firstPost.pollsVotes ?? [:]
-                lottery = firstPost.lottery
-                firstAuthorTitle = firstPost.userTitle
-                firstPostSource = firstPost.mobileSource
-                firstPostTime = DiscourseFormat.relative(firstPost.createdAt)
-                canEditFirstPost = firstPost.canEdit ?? false
-                canDeleteFirstPost = firstPost.canDelete ?? false
-                firstAuthorFlairURL = Self.flairImageURL(firstPost.flairUrl)
-                firstPostLikedByMe = firstPost.likedByMe
-                firstPostReactions = firstPost.reactions ?? []
-                firstPostVoteScore = firstPost.voteScore
-                firstPostVoteDirection = Self.direction(for: firstPost)
-                firstPostCanVoteDown = firstPost.canVoteDown ?? false
-                firstPostLikeCount = firstPost.likeCount
-                firstPostRewards = firstPost.rewards ?? []
-            }
-            redEnvelope = topic.redEnvelope
-            totalReplyCount = max(0, (topic.postsCount ?? 1) - 1)
-            // Localized when a translation exists; `title` is never rewritten.
-            topicTitle = DiscourseFormat.displayTitle(
-                title: topic.title,
-                fancyTitle: topic.fancyTitle,
-                isLocalized: topic.fancyTitleLocalized
-            )
-            topicSlug = topic.slug
-            // `firstAuthorTitle` is already set above, and unlike `firstPost`
-            // it's in scope here.
-            await resolveTitleStyles(for: [firstAuthorTitle].compactMap { $0 })
-            isTopicClosed = topic.closed ?? false
-            // `pinned_at`, not `pinned`: the latter is already filtered by this
-            // reader's own dismissal, so a moderator who cleared the pin for
-            // themselves would be offered 置顶 on a topic that is pinned.
-            isTopicPinned = topic.pinnedAt != nil
-            isTopicPinnedGlobally = topic.pinnedGlobally ?? false
-            topicPinnedUntil = DiscourseFormat.date(topic.pinnedUntil)
-            isPinClearedForMe = topic.unpinned ?? false
-            isTopicBanner = topic.archetype == "banner"
-            isPrivateMessage = topic.archetype == "private_message"
-            topicCategoryID = topic.categoryId
-            let details = topic.details
-            canEditTopic = details?.canEdit ?? false
-            canDeleteTopic = details?.canDelete ?? false
-            canCloseTopic = details?.canCloseTopic ?? details?.canModerate ?? false
-            canPinTopic = details?.canPinUnpinTopic ?? false
-            canBannerTopic = details?.canBannerTopic ?? false
-            removal = topic.removal
-            acceptedAnswerPostID = topic.acceptedAnswer?.postId
-            acceptedAnswerBy = topic.acceptedAnswer?.acceptedBy
-            canAcceptAnswer = topic.canAcceptAnswer ?? false
-
-            // Parse the OP off the main actor before touching @Observable state.
-            await parseContents(for: posts)
-            // Only when there is one: a response without posts shouldn't blank
-            // a body that's already rendered.
-            if let firstPost = posts.first {
-                content = parsedContent(for: firstPost)
-            }
+            let (topic, raw) = try await client.topicWithRaw(id: topicID)
+            await apply(topic: topic)
+            // Saved after applying, so a payload that somehow breaks `apply`
+            // isn't the one kept for next time.
+            TopicSnapshot.save(raw, id: topicID)
+            Task.detached(priority: .utility) { TopicSnapshot.prune() }
             loadedID = topicID
         } catch {
-            // Leave content empty; the overlay falls back to the excerpt.
+            // Recorded rather than swallowed. The old comment here said the
+            // overlay falls back to the excerpt — true for a row tapped in a
+            // list, which carries a title and an excerpt, and false for every
+            // topic opened by *id*: a notification, a link, a push. That
+            // placeholder has neither, so a failed load drew a blank page with
+            // no title, no body and no explanation.
+            loadError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            // 403 is the answer for a topic this account may not read — a
+            // private message, a staff category — and it is not worth a retry
+            // button, so the overlay offers the web page instead.
+            if case DiscourseError.badResponse(let status, _, _) = error {
+                loadFailure = switch status {
+                case 403: .denied
+                case 404: .missing
+                default: .temporary
+                }
+            } else {
+                loadFailure = .temporary
+            }
         }
         if isPrivateMessage {
             // A private message's replies come from the topic's own
@@ -395,6 +380,101 @@ final class TopicStore {
         isLoading = false
     }
 
+    /// Spreads a decoded topic across the store's state.
+    ///
+    /// Split out so the same code serves both callers: the network response,
+    /// and a snapshot read off disk. Two copies of a hundred assignments would
+    /// drift, and the one that drifted would be the cached path — the one
+    /// nobody looks at while it works.
+    private func apply(topic: TopicResponse) async {
+        let posts = topic.postStream.posts
+        // Kept for the private-message branch below, which builds its
+        // reply list from these rather than from the nested endpoint.
+        privateMessagePosts = posts
+        firstPostID = posts.first?.id
+        if let firstPost = posts.first {
+            firstAuthor = UserProfileTarget(
+                // The OP always has one; only the nested view's deleted-reply
+                // stub omits it.
+                username: firstPost.username ?? "",
+                displayName: firstPost.name,
+                avatarURL: firstPost.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 120) }
+            )
+            firstPostPolls = firstPost.polls ?? []
+            myPollVotes = firstPost.pollsVotes ?? [:]
+            lottery = firstPost.lottery
+            firstAuthorTitle = firstPost.userTitle
+            firstPostSource = firstPost.mobileSource
+            firstPostTime = DiscourseFormat.relative(firstPost.createdAt)
+            canEditFirstPost = firstPost.canEdit ?? false
+            firstPostEditCount = max(0, (firstPost.version ?? 1) - 1)
+            canDeleteFirstPost = firstPost.canDelete ?? false
+            firstAuthorFlairURL = Self.flairImageURL(firstPost.flairUrl)
+            firstPostLikedByMe = firstPost.likedByMe
+            firstPostReactions = firstPost.reactions ?? []
+            firstPostVoteScore = firstPost.voteScore
+            firstPostVoteCount = firstPost.voteCount
+            firstPostVoteDirection = Self.direction(for: firstPost)
+            firstPostCanVoteUp = firstPost.canVoteUp ?? true
+            firstPostCanVoteDown = firstPost.canVoteDown ?? false
+            firstPostLikeCount = firstPost.likeCount
+            firstPostRewards = firstPost.rewards ?? []
+        }
+        redEnvelope = topic.redEnvelope
+        totalReplyCount = max(0, (topic.postsCount ?? 1) - 1)
+        // Localized when a translation exists; `title` is never rewritten.
+        topicTitle = DiscourseFormat.displayTitle(
+            title: topic.title,
+            fancyTitle: topic.fancyTitle,
+            isLocalized: topic.fancyTitleLocalized
+        )
+        topicSlug = topic.slug
+        // `firstAuthorTitle` is already set above, and unlike `firstPost`
+        // it's in scope here.
+        await resolveTitleStyles(for: [firstAuthorTitle].compactMap { $0 })
+        isTopicClosed = topic.closed ?? false
+        // `pinned_at`, not `pinned`: the latter is already filtered by this
+        // reader's own dismissal, so a moderator who cleared the pin for
+        // themselves would be offered 置顶 on a topic that is pinned.
+        isTopicPinned = topic.pinnedAt != nil
+        isTopicPinnedGlobally = topic.pinnedGlobally ?? false
+        topicPinnedUntil = DiscourseFormat.date(topic.pinnedUntil)
+        isPinClearedForMe = topic.unpinned ?? false
+        isTopicBanner = topic.archetype == "banner"
+        isPrivateMessage = topic.archetype == "private_message"
+        topicCategoryID = topic.categoryId
+        let details = topic.details
+        canEditTopic = details?.canEdit ?? false
+        canDeleteTopic = details?.canDelete ?? false
+        canCloseTopic = details?.canCloseTopic ?? details?.canModerate ?? false
+        canPinTopic = details?.canPinUnpinTopic ?? false
+        canBannerTopic = details?.canBannerTopic ?? false
+        removal = topic.removal
+        acceptedAnswerPostID = topic.acceptedAnswer?.postId
+        acceptedAnswerBy = topic.acceptedAnswer?.acceptedBy
+        canAcceptAnswer = topic.canAcceptAnswer ?? false
+
+        // Parse the OP off the main actor before touching @Observable state.
+        await parseContents(for: posts)
+        // Only when there is one: a response without posts shouldn't blank
+        // a body that's already rendered.
+        if let firstPost = posts.first {
+            content = parsedContent(for: firstPost)
+        }
+    }
+
+    /// Spreads a decoded reply page across the store — from the network or
+    /// from a snapshot, which is why it is not inline in `loadNested`.
+    private func applyNested(_ response: NestedTopicResponse, reset: Bool) async {
+        let roots = response.roots ?? []
+        if let pinned = response.pinnedPostIds { pinnedPostIDs = Set(pinned) }
+        if reset { nestedRoots = roots } else { nestedRoots.append(contentsOf: roots) }
+        nestedHasMore = response.hasMoreRoots?.value ?? false
+        await parseContents(for: flatten(nestedRoots))
+        comments = buildNestedComments(from: nestedRoots)
+        await resolveTitleStyles(for: flatten(nestedRoots).compactMap(\.userTitle))
+    }
+
     /// Loads (or appends) the nested reply tree for the current `replySort`.
     private func loadNested(reset: Bool) async {
         guard let topicID else { return }
@@ -407,19 +487,22 @@ final class TopicStore {
             isLoadingMore = true
         }
         defer { if !reset { isLoadingMore = false } }
+        // The first page from disk before the request, so a revisited topic
+        // shows its thread rather than three placeholder rows. Only page 0:
+        // deeper pages are reached by scrolling, where a spinner is expected.
+        if reset,
+           let cached = TopicSnapshot.loadReplies(id: topicID, sort: replySort.apiValue),
+           let response = try? DiscourseClient.decodeNestedTopic(cached) {
+            await applyNested(response, reset: true)
+        }
         do {
-            let response = try await client.nestedTopic(
+            let (response, raw) = try await client.nestedTopicWithRaw(
                 id: topicID,
                 sort: replySort.apiValue,
                 page: nestedPage
             )
-            let roots = response.roots ?? []
-            if let pinned = response.pinnedPostIds { pinnedPostIDs = Set(pinned) }
-            if reset { nestedRoots = roots } else { nestedRoots.append(contentsOf: roots) }
-            nestedHasMore = response.hasMoreRoots?.value ?? false
-            await parseContents(for: flatten(nestedRoots))
-            comments = buildNestedComments(from: nestedRoots)
-            await resolveTitleStyles(for: flatten(nestedRoots).compactMap(\.userTitle))
+            if reset { TopicSnapshot.saveReplies(raw, id: topicID, sort: replySort.apiValue) }
+            await applyNested(response, reset: reset)
         } catch {
             // Deliberately keeps whatever is already on screen. Emptying the
             // rows here meant one failed refresh — a 429 right after posting is
@@ -594,16 +677,15 @@ final class TopicStore {
 
     /// Keyed on the cooked HTML itself, not only the edit version.
     ///
-    /// The version alone assumes the server renders one body per post, which
-    /// discourse-permission breaks: a 回复可见 section is rendered for a viewer
-    /// who has replied and withheld from one who hasn't, at the *same* version
-    /// — replying changes nothing about the post, only about the reader. So a
-    /// version-keyed entry kept handing back the locked parse even after the
-    /// unlocked HTML had been fetched, and because this cache outlives the
-    /// store, leaving the topic and coming back didn't clear it either.
+    /// The version alone assumes the server renders one body per post, and it
+    /// doesn't: hidden-until-you-log-in sections, per-reader translations and
+    /// anything else viewer-dependent all arrive at the *same* version. A
+    /// version-keyed entry then hands back the earlier reader's parse, and
+    /// because this cache outlives the store, leaving the topic and coming
+    /// back doesn't clear it either.
     ///
-    /// Hashing the body covers every such case at once — permissions, and
-    /// anything else that renders per-viewer — rather than naming them.
+    /// Hashing the body covers every such case at once rather than naming
+    /// them, which is what keeps it correct as the server's rendering changes.
     /// `hashValue` is seeded per process, which is fine: this cache is
     /// in-memory and dies with the process.
     private static func cacheKey(_ post: TopicPost) -> String {
@@ -651,6 +733,27 @@ final class TopicStore {
 
     /// Parses every post body concurrently off the main actor and fills the
     /// cache. Doing this in one pass keeps `nestedComments` synchronous.
+    /// The first post of a topic that is already on disk, parsed and ready to
+    /// draw.
+    ///
+    /// For the reader's drag preview: the page sliding in used to be a
+    /// placeholder every time, which is what still looked like loading on a
+    /// *back* swipe — where the post is cached by definition, having just been
+    /// read. Reuses `ParsedContentCache`, so a post read this session costs
+    /// nothing to render again.
+    static func cachedFirstPost(topicID: Int) async -> PostContent? {
+        guard let snapshot = TopicSnapshot.load(id: topicID),
+              let topic = try? DiscourseClient.decodeTopic(snapshot.data),
+              let first = topic.postStream.posts.first
+        else { return nil }
+
+        let key = cacheKey(first)
+        if let hit = ParsedContentCache.shared.content(forKey: key) { return hit }
+        let parsed = await PostHTMLParser.parse(first.cooked)
+        ParsedContentCache.shared.insert(parsed, forKey: key)
+        return parsed
+    }
+
     private func parseContents(for posts: [TopicPost]) async {
         let pending = posts.filter { contentCache.content(forKey: Self.cacheKey($0)) == nil }
         guard !pending.isEmpty else { return }
@@ -728,7 +831,8 @@ final class TopicStore {
                     canDelete: post.canDelete ?? false,
                     isMine: post.yours ?? false,
                     isAcceptedAnswer: acceptedAnswerPostID == post.id,
-                    reportCount: post.reportCount
+                    reportCount: post.reportCount,
+                    editCount: max(0, (post.version ?? 1) - 1)
                 )
             )
             let nextTrails = trails + [!isLast]
@@ -817,49 +921,11 @@ final class TopicStore {
                     replyToPostNumber: replyToPostNumber
                 )
             }
-            await unlockReplyGatedContent(topicID: topicID)
             return created.postNumber
         } catch {
             ToastCenter.shared.showError(error)
             return nil
         }
-    }
-
-    /// Re-fetches the bodies that replying just unlocked.
-    ///
-    /// discourse-permission decides 回复可见 on the server, so posting a reply
-    /// changes what the server *would* render without changing anything about
-    /// the copy on screen — the section stayed locked until something asked for
-    /// the body again.
-    ///
-    /// Only the posts that actually carry a reply lock are re-fetched: usually
-    /// the OP alone, and on most topics none at all. That keeps
-    /// `insertPostedReply`'s promise below — the row array isn't swapped out
-    /// from under a reader who is scrolled into it — while still letting a
-    /// reply's own gated section unlock, which rides the `revealedContent`
-    /// override rather than needing the tree rebuilt.
-    private func unlockReplyGatedContent(topicID: Int) async {
-        var ids: [Int] = []
-        if content.hasReplyLockedContent, let firstPostID {
-            ids.append(firstPostID)
-        }
-        ids.append(contentsOf: comments.filter(\.content.hasReplyLockedContent).map(\.id))
-        guard !ids.isEmpty else { return }
-
-        guard let response = try? await client.topicPosts(topicID: topicID, postIDs: ids) else { return }
-        let posts = response.postStream.posts
-        // Re-parses rather than hitting the cache, because the unlocked HTML
-        // hashes differently — see `cacheKey`.
-        await parseContents(for: posts)
-
-        for post in posts {
-            if post.id == firstPostID {
-                content = parsedContent(for: post)
-            } else {
-                revealedContent[post.id] = parsedContent(for: post)
-            }
-        }
-        comments = buildNestedComments(from: nestedRoots)
     }
 
     /// Splices a just-posted reply into the thread already on screen, instead of
@@ -907,6 +973,19 @@ final class TopicStore {
                 self?.handleTopicEvent(event)
             }
         }
+    }
+
+    /// Pull-to-refresh on the reader.
+    ///
+    /// `load` short-circuits for the topic already on screen, so the marker has
+    /// to be cleared first — the same two steps `giveReward` and `blockAuthor`
+    /// take. The reload folds in anything the live-update pill was holding, so
+    /// the count goes with it.
+    func refresh() async {
+        guard let id = loadedID ?? topicID else { return }
+        loadedID = nil
+        pendingUpdateIDs = []
+        await load(topicID: id)
     }
 
     func stopLiveUpdates() {
@@ -1021,17 +1100,32 @@ final class TopicStore {
     func vote(_ direction: VoteDirection, postID: Int, reaction: String? = nil) async {
         guard let topicID else { return }
         let isFirstPost = postID == firstPostID
+        if isFirstPost {
+            guard Self.canCastVote(direction, canVoteUp: firstPostCanVoteUp, canVoteDown: firstPostCanVoteDown) else { return }
+        } else if let index = comments.firstIndex(where: { $0.id == postID }) {
+            guard Self.canCastVote(
+                direction,
+                canVoteUp: comments[index].canVoteUp,
+                canVoteDown: comments[index].canVoteDown
+            ) else { return }
+        }
 
         // Optimistic.
         if isFirstPost {
-            firstPostVoteScore = Self.applied(direction, from: firstPostVoteDirection, to: firstPostVoteScore)
+            firstPostVoteScore = Self.appliedScore(direction, from: firstPostVoteDirection, to: firstPostVoteScore)
+            firstPostVoteCount = Self.appliedCount(direction, from: firstPostVoteDirection, to: firstPostVoteCount)
             firstPostVoteDirection = direction
             firstPostLikedByMe = direction == .up
         } else if let index = comments.firstIndex(where: { $0.id == postID }) {
-            comments[index].voteScore = Self.applied(
+            comments[index].voteScore = Self.appliedScore(
                 direction,
                 from: comments[index].voteDirection,
                 to: comments[index].voteScore
+            )
+            comments[index].voteCount = Self.appliedCount(
+                direction,
+                from: comments[index].voteDirection,
+                to: comments[index].voteCount
             )
             comments[index].voteDirection = direction
             comments[index].isLiked = direction == .up
@@ -1044,7 +1138,11 @@ final class TopicStore {
                 if let response = try? await client.topicPosts(topicID: topicID, postIDs: [postID]),
                    let post = response.postStream.posts.first {
                     firstPostVoteScore = post.voteScore
+                    firstPostVoteCount = post.voteCount
                     firstPostVoteDirection = Self.direction(for: post)
+                    firstPostCanVoteUp = post.canVoteUp ?? true
+                    firstPostCanVoteDown = post.canVoteDown ?? false
+                    firstPostLikedByMe = post.likedByMe
                     firstPostLikeCount = post.likeCount
                     // A vote is a reaction, so the summary moves with it.
                     firstPostReactions = post.reactions ?? []
@@ -1059,8 +1157,13 @@ final class TopicStore {
                 if let response = try? await client.topicPosts(topicID: topicID, postIDs: [postID]),
                    let post = response.postStream.posts.first {
                     firstPostVoteScore = post.voteScore
+                    firstPostVoteCount = post.voteCount
                     firstPostVoteDirection = Self.direction(for: post)
+                    firstPostCanVoteUp = post.canVoteUp ?? true
+                    firstPostCanVoteDown = post.canVoteDown ?? false
                     firstPostLikedByMe = post.likedByMe
+                    firstPostLikeCount = post.likeCount
+                    firstPostReactions = post.reactions ?? []
                 }
             } else {
                 await replacePost(id: postID, topicID: topicID)
@@ -1068,16 +1171,31 @@ final class TopicStore {
         }
     }
 
-    private static func applied(_ target: VoteDirection, from current: VoteDirection, to score: Int?) -> Int? {
+    private static func appliedScore(_ target: VoteDirection, from current: VoteDirection, to score: Int?) -> Int? {
         guard let score else { return nil }
-        func weight(_ direction: VoteDirection) -> Int {
-            switch direction {
-            case .up: return 1
-            case .down: return -1
-            case .none: return 0
-            }
+        return score + scoreWeight(target) - scoreWeight(current)
+    }
+
+    private static func appliedCount(_ target: VoteDirection, from current: VoteDirection, to count: Int?) -> Int? {
+        guard let count else { return nil }
+        return count + votePresence(target) - votePresence(current)
+    }
+
+    private static func canCastVote(_ direction: VoteDirection, canVoteUp: Bool, canVoteDown: Bool) -> Bool {
+        guard canVoteUp else { return false }
+        return direction != .down || canVoteDown
+    }
+
+    private static func scoreWeight(_ direction: VoteDirection) -> Int {
+        switch direction {
+        case .up: return 1
+        case .down: return -1
+        case .none: return 0
         }
-        return score + weight(target) - weight(current)
+    }
+
+    private static func votePresence(_ direction: VoteDirection) -> Int {
+        direction == .none ? 0 : 1
     }
 
     /// The canonical URL for this topic.
@@ -1137,6 +1255,36 @@ final class TopicStore {
                 await replacePost(id: postID, topicID: topicID)
             }
             ToastCenter.shared.show(AppString("已保存修改"))
+            return true
+        } catch {
+            ToastCenter.shared.showError(error)
+            return false
+        }
+    }
+
+    /// A post's edit history for 编辑历史, oldest first.
+    func revisions(postID: Int) async throws -> [NLRevision] {
+        try await client.postRevisions(postID: postID)
+    }
+
+    /// Rolls a post back to an earlier revision, then reloads it the way a
+    /// save does. The server writes the old text as a new revision, so the
+    /// history only ever grows.
+    func restoreRevision(postID: Int, number: Int) async -> Bool {
+        guard let topicID else { return false }
+        do {
+            try await client.restoreRevision(postID: postID, number: number)
+            if postID == firstPostID {
+                if let response = try? await client.topicPosts(topicID: topicID, postIDs: [postID]),
+                   let post = response.postStream.posts.first {
+                    await parseContents(for: [post])
+                    content = parsedContent(for: post)
+                    firstPostEditCount = max(0, (post.version ?? 1) - 1)
+                }
+            } else {
+                await replacePost(id: postID, topicID: topicID)
+            }
+            ToastCenter.shared.show(AppString("已回滚到 v\(number)"))
             return true
         } catch {
             ToastCenter.shared.showError(error)
@@ -1550,13 +1698,19 @@ final class TopicStore {
                     ancestorTrails: ancestorTrails,
                     hasChildren: !childPosts.isEmpty,
                     groupID: groupID,
+                    isLiked: post.likedByMe,
+                    reactions: post.reactions ?? [],
+                    voteScore: post.voteScore,
+                    voteDirection: Self.direction(for: post),
+                    canVoteDown: post.canVoteDown ?? false,
                     mobileSource: post.mobileSource,
                     isDeletedPlaceholder: post.deletedPostPlaceholder ?? false,
                     deletedByModerator: post.deletedByKind == "moderator",
                     deleteReason: post.deleteReason,
                     isIgnoredPlaceholder: post.ignoredPostPlaceholder ?? false,
                     isAcceptedAnswer: acceptedAnswerPostID == post.id,
-                    reportCount: post.reportCount
+                    reportCount: post.reportCount,
+                    editCount: max(0, (post.version ?? 1) - 1)
                 )
             )
 

@@ -28,13 +28,6 @@ struct ContentView: View {
     @State private var isShowingSplash = true
     /// A universal link that arrived before the app was ready to show it.
     @State private var pendingLink: URL?
-    /// Resolved from `app.routedNodeSlug`; a link only carries the slug.
-    @State private var resolvedNode: SidebarNodeSummary?
-    /// A topic opened from a root-level cover (the custom feed page). Presented
-    /// here for the same reason that page is: `app.overlay` draws in `MainView`,
-    /// underneath these covers.
-    @State private var openedPost: Post?
-    @Namespace private var rootReaderNamespace
 
     var body: some View {
         ZStack {
@@ -96,42 +89,17 @@ struct ContentView: View {
         // Each gets its own presentation host: a cover renders above this view
         // and starts a fresh environment, so without one their links would
         // escape to Safari and their sheets would open behind the cover.
-        .fullScreenCover(item: $app.routedProfile) { target in
+        .fullScreenCover(item: cover($app.routedProfile)) { target in
             PublicProfileOverlay(target: target) { app.routedProfile = nil }
                 .appPresentationHost(app: app)
         }
-        .fullScreenCover(item: routedNode) { node in
+        .fullScreenCover(item: routedNodeCover) { node in
             NodeDetailOverlay(node: node) { app.routedNodeSlug = nil }
                 .appPresentationHost(app: app)
         }
-        .fullScreenCover(item: $app.routedCustomFeed) { target in
-            CustomFeedView(
-                target: target,
-                // Presented from inside this cover for the usual reason:
-                // `app.overlay` draws in `MainView`, behind it.
-                onOpenPost: { post in
-                    app.markTopicOpened(id: post.id)
-                    app.selectedPost = post
-                    openedPost = post
-                },
-                onOpenNode: { node in
-                    app.routedCustomFeed = nil
-                    app.openNode(slug: node.slug)
-                },
-                onDeleted: { app.routedCustomFeed = nil }
-            )
-            .appPresentationHost(app: app)
-        }
-        .fullScreenCover(item: $openedPost) { _ in
-            ZStack {
-                Theme.bg.ignoresSafeArea()
-                PostDetailOverlay(
-                    postTransitionNamespace: rootReaderNamespace,
-                    onClose: { openedPost = nil }
-                )
-            }
-            .environment(\.mediaAutoplayEnabled, true)
-            .appPresentationHost(app: app)
+        .fullScreenCover(item: cover($app.routedCustomFeed)) { target in
+            CustomFeedCover(target: target)
+                .appPresentationHost(app: app)
         }
         // A badge tapped at the root. Half height rather than full screen:
         // following a reference is a glance sideways, and the sheet leaves the
@@ -143,12 +111,13 @@ struct ContentView: View {
         }
         .task(id: app.routedNodeSlug) {
             guard let slug = app.routedNodeSlug else {
-                resolvedNode = nil
+                withAnimation(.overlayPush) { app.routedNode = nil }
                 return
             }
-            resolvedNode = await NodeCatalog.shared.node(slug: slug)
+            let node = await NodeCatalog.shared.node(slug: slug)
+            withAnimation(.overlayPush) { app.routedNode = node }
             // Unknown slug: fall back to the web page rather than doing nothing.
-            if resolvedNode == nil,
+            if node == nil,
                let url = URL(string: "/n/\(slug)", relativeTo: DiscourseConfig.baseURL)?.absoluteURL {
                 app.routedNodeSlug = nil
                 browser.open(url)
@@ -208,6 +177,9 @@ struct ContentView: View {
             // the website should be hidden here too, and someone unblocked
             // there should come back. See `BlockedUsersStore.loadFromServer`.
             await BlockedUsersStore.shared.loadFromServer()
+            // A device token issued before the session was restored has
+            // nowhere to go; this is the retry. See `syncRegistration`.
+            await PushNotificationService.shared.syncRegistration()
         }
         // A tapped push banner routes exactly like a tapped in-app link.
         .task(id: push.routedURL) {
@@ -268,14 +240,80 @@ struct ContentView: View {
 
     /// Clearing the binding also clears the slug, so the same node can be
     /// opened again after being dismissed.
-    private var routedNode: Binding<SidebarNodeSummary?> {
-        Binding(
-            get: { resolvedNode },
+    private var routedNodeCover: Binding<SidebarNodeSummary?> {
+        cover(Binding(
+            get: { app.routedNode },
             set: { newValue in
-                resolvedNode = newValue
+                app.routedNode = newValue
                 if newValue == nil { app.routedNodeSlug = nil }
             }
+        ))
+    }
+
+    /// A routed page's binding, emptied while `MainView` is drawing that page in
+    /// its content column instead (`AppState.routedPageInColumn`). One piece of
+    /// state, two possible presenters, and never both at once.
+    private func cover<Value>(_ source: Binding<Value?>) -> Binding<Value?> {
+        Binding(
+            get: { app.routedPageInColumn ? nil : source.wrappedValue },
+            set: { source.wrappedValue = $0 }
         )
+    }
+}
+
+// MARK: - Custom feed cover
+
+/// The custom feed page, plus the reader for a post opened from it.
+///
+/// The reader lives *here*, inside the same cover, and not beside the feed's
+/// cover in `ContentView`. Two `fullScreenCover` modifiers on one view can only
+/// ever have one of them presented: with the feed showing, the reader's request
+/// was simply dropped, so tapping a post did nothing until the feed was closed —
+/// at which point the reader finally appeared. Presenting from within the cover
+/// makes it a child of the thing it opens over, which is what stacks.
+///
+/// `app.overlay` is not an option for the same old reason: it draws in
+/// `MainView`, underneath every cover.
+private struct CustomFeedCover: View {
+    @Environment(AppState.self) private var app
+    let target: CustomFeedTarget
+    @State private var openedPost: Post?
+    @Namespace private var readerNamespace
+
+    var body: some View {
+        CustomFeedView(
+            target: target,
+            onOpenPost: { post in
+                app.markTopicOpened(id: post.id)
+                app.selectedPost = post
+                openedPost = post
+            },
+            onOpenNode: { node in
+                app.routedCustomFeed = nil
+                app.openNode(slug: node.slug)
+            },
+            onDeleted: { app.routedCustomFeed = nil }
+        )
+        // In the tree, not a cover: the same reason `NodeDetailOverlay` draws
+        // its reader inline. A cover renders nothing behind itself, so the
+        // reader's swipe-to-dismiss shrank away over a blank rectangle rather
+        // than over this feed. Stacked *over* the page here, which also keeps
+        // the earlier fix intact — the reader is a child of the presentation
+        // that showed this page, so it is not a second sibling cover.
+        .overlay {
+            if openedPost != nil {
+                ZStack {
+                    Theme.bg.ignoresSafeArea()
+                        .opacity(1 - app.readerDismissProgress)
+                    PostDetailOverlay(
+                        postTransitionNamespace: readerNamespace,
+                        onClose: { openedPost = nil }
+                    )
+                }
+                .environment(\.mediaAutoplayEnabled, true)
+                .transition(.opacity)
+            }
+        }
     }
 }
 

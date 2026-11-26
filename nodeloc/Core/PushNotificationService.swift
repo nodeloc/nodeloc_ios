@@ -2,15 +2,24 @@
 //  PushNotificationService.swift
 //  nodeloc
 //
-//  Message push, done client-side: a background refresh polls
-//  notifications.json and posts what's new as local notification banners.
-//  There is no APNs relay — Discourse only pushes to the official app's
-//  server — so delivery rides on BGAppRefreshTask, which iOS schedules
-//  opportunistically for regularly-used apps.
+//  Message push, two ways, in order of preference:
 //
-//  Needs two things set in Xcode (they can't be added from code):
-//   1. Signing & Capabilities → Background Modes → Background fetch.
-//   2. Info → BGTaskSchedulerPermittedIdentifiers containing `refreshTaskID`.
+//   1. **APNs.** The device registers, hands its token to the site
+//      (`/mobile/push/register`), and the server pushes. Real delivery:
+//      immediate, and it works with the app closed. `RemoteNotifications.swift`
+//      receives the token; `SERVER_TASKS_PUSH.md` is the server's half.
+//
+//   2. **Polling, as a fallback.** A background refresh reads
+//      notifications.json and posts what is new as local banners. This is what
+//      the app shipped with, and it stays for the case that matters: the site
+//      has not deployed the push endpoints yet, so registration 404s. It is
+//      *off* whenever APNs is live, or every notification would arrive twice.
+//
+//  Needs three things set in Xcode (none can be added from code):
+//   1. Signing & Capabilities → Background Modes → Background fetch *and*
+//      Remote notifications.
+//   2. Signing & Capabilities → + Capability → Push Notifications.
+//   3. Info → BGTaskSchedulerPermittedIdentifiers containing `refreshTaskID`.
 //  Without them the service degrades to no-ops instead of crashing
 //  (BGTaskScheduler traps when registering an unlisted identifier).
 //
@@ -111,6 +120,9 @@ final class PushNotificationService: NSObject {
     static let refreshTaskID = "com.nodeloc.notification-refresh"
 
     private static let lastSeenKey = "nodeloc.push.last_seen_id"
+    /// The token the server was last told about, so a relaunch doesn't re-post
+    /// an unchanged one and a changed one is noticed.
+    private static let registeredTokenKey = "nodeloc.push.apns_token"
 
     private let client = DiscourseClient()
     let preferences = PushPreferences.shared
@@ -121,6 +133,35 @@ final class PushNotificationService: NSObject {
     /// A tapped banner's deep link, consumed by ContentView and routed through
     /// `LinkRouter` like any other URL.
     var routedURL: URL?
+
+    /// This device's APNs token once iOS has issued one.
+    private(set) var deviceToken: String?
+
+    /// True once the site has accepted the token: real pushes are coming, so
+    /// the polling fallback stands down.
+    private(set) var isRemoteDeliveryLive = false
+
+    /// Why APNs is unavailable, when it is. Kept rather than logged: the
+    /// settings page tells the reader which of the two paths is running, and
+    /// "no valid aps-environment" is a build-configuration mistake worth
+    /// seeing rather than a silent fall back to polling.
+    private(set) var remoteRegistrationError: String?
+
+    private var registeredToken: String? {
+        get { UserDefaults.standard.string(forKey: Self.registeredTokenKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.registeredTokenKey) }
+    }
+
+    /// `development` for a debug build, `production` otherwise — APNs keeps
+    /// separate token spaces, and a token from one is meaningless to the
+    /// other. The server needs to know which gateway to use.
+    private var apnsEnvironment: String {
+        #if DEBUG
+        "development"
+        #else
+        "production"
+        #endif
+    }
 
     /// Whether the background-task identifier is present in the Info.plist —
     /// the one part of setup that can't be done from code.
@@ -163,6 +204,9 @@ final class PushNotificationService: NSObject {
     func setEnabled(_ enabled: Bool) async -> Bool {
         guard enabled else {
             preferences.isEnabled = false
+            // Otherwise the banners stop only because iOS is asked not to show
+            // them, while the server keeps sending.
+            Task { await unregisterFromServer() }
             return false
         }
         let center = UNUserNotificationCenter.current()
@@ -171,28 +215,108 @@ final class PushNotificationService: NSObject {
         await refreshAuthorizationStatus()
         preferences.isEnabled = granted
         if granted {
+            registerWithAPNs()
+            // Armed either way: until the site accepts a token there is
+            // nothing else delivering, and `checkForNewNotifications` stands
+            // itself down once there is.
             scheduleBackgroundRefresh()
-            registerForRemotePushIfAllowed()
         }
         return granted
     }
 
-    // MARK: Remote push (APNs)
+    // MARK: APNs
 
-    /// Asks iOS for the device token once push is on and someone is signed
-    /// in; the token itself arrives through the app delegate.
-    func registerForRemotePushIfAllowed() {
-        guard preferences.isEnabled, DiscourseAuth.shared.isAuthenticated else { return }
+    /// Asks iOS for a device token. Safe to call repeatedly — iOS answers from
+    /// its cache — so every path that could have changed the answer does.
+    func registerWithAPNs() {
+        guard preferences.isEnabled,
+              authorizationStatus == .authorized || authorizationStatus == .provisional
+        else { return }
         UIApplication.shared.registerForRemoteNotifications()
     }
 
-    /// The device token from APNs, registered with the server for the
-    /// signed-in account. The server pushes directly through APNs.
-    func didRegisterForRemoteNotifications(deviceToken: Data) {
-        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        PushTokenStore.token = token
-        guard DiscourseAuth.shared.isAuthenticated else { return }
-        Task { try? await client.registerPushDevice(token: token) }
+    /// Re-attempts registration now that something that gates it may have
+    /// changed — in practice, a session.
+    ///
+    /// Needed because the two events are racing on a cold start: iOS answers
+    /// with a token about a second in, while the credential is still being
+    /// restored, and `sendTokenIfNeeded` quietly gives up on a signed-out app.
+    /// Without this the device stayed unregistered until the *next* time the
+    /// app came to the foreground — which looked exactly like the server not
+    /// having the endpoint.
+    func syncRegistration() async {
+        registerWithAPNs()
+        await sendTokenIfNeeded()
+    }
+
+    /// The token arrived. Sends it to the site unless it has already been sent.
+    func deviceTokenArrived(_ token: String) async {
+        deviceToken = token
+        remoteRegistrationError = nil
+        await sendTokenIfNeeded()
+    }
+
+    func remoteRegistrationFailed(_ error: Error) {
+        isRemoteDeliveryLive = false
+        remoteRegistrationError = error.localizedDescription
+    }
+
+    /// Posts the token, and only then treats remote delivery as live.
+    ///
+    /// A 404 is the expected answer while the site has not deployed the
+    /// endpoints, and it is not an error worth showing: the polling fallback
+    /// covers it, which is the whole reason that code is still here.
+    private func sendTokenIfNeeded(force: Bool = false) async {
+        guard let deviceToken, DiscourseAuth.shared.isAuthenticated else { return }
+        guard force || deviceToken != registeredToken || !isRemoteDeliveryLive else { return }
+        do {
+            try await client.registerPushDevice(token: deviceToken)
+            registeredToken = deviceToken
+            isRemoteDeliveryLive = true
+            remoteRegistrationError = nil
+        } catch {
+            isRemoteDeliveryLive = false
+            // A 404 means the endpoints aren't deployed, which is the state
+            // the fallback exists for — not something to report.
+            if case DiscourseError.badResponse(404, _, _) = error {
+                remoteRegistrationError = nil
+            } else {
+                remoteRegistrationError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Signing out, or turning push off: the site must stop pushing to this
+    /// device. Best effort — a failure here is not something the reader can
+    /// act on, and the server drops tokens APNs reports as gone anyway.
+    func unregisterFromServer() async {
+        guard let token = registeredToken else { return }
+        registeredToken = nil
+        isRemoteDeliveryLive = false
+        try? await client.unregisterPushDevice(token: token)
+    }
+
+    /// A push arrived while the app was backgrounded or suspended.
+    ///
+    /// The payload is not turned into a banner here: an alert push is already
+    /// shown by iOS, and a silent one is deliberately quiet. What it is for is
+    /// keeping the counts honest — the inbox badge is what the reader sees on
+    /// the tab, and it would otherwise be as stale as the last foreground.
+    func remoteNotificationArrived(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        // The watermark moves with the push, so the polling fallback — if it
+        // ever runs again — doesn't banner what APNs has already delivered.
+        if let id = (userInfo["notification_id"] as? Int)
+            ?? Int(userInfo["notification_id"] as? String ?? "") {
+            lastSeenID = max(lastSeenID, id)
+        }
+        // `reload`, because the inbox's unread counts are what the tab badge
+        // reads and there is no narrower call for them.
+        await MessageCenterStore.shared.reload()
+        return .newData
+    }
+
+    private static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
     /// The app is frontmost again: the in-app badge supersedes anything
@@ -204,6 +328,11 @@ final class PushNotificationService: NSObject {
             try? await center.setBadgeCount(0)
             // The user may have changed the permission in system settings.
             await refreshAuthorizationStatus()
+            registerWithAPNs()
+            // Covers the two cases a token alone doesn't: the site deployed
+            // the endpoint since the last try, and the reader signed in after
+            // the token had already been issued.
+            await sendTokenIfNeeded()
         }
     }
 
@@ -240,6 +369,9 @@ final class PushNotificationService: NSObject {
 
     /// Fetches notifications and banners the new, allowed ones.
     func checkForNewNotifications() async {
+        // Nothing to do when the server is pushing: this would banner the same
+        // notifications a second time.
+        guard !isRemoteDeliveryLive else { return }
         guard preferences.isEnabled,
               DiscourseAuth.shared.isAuthenticated,
               authorizationStatus == .authorized || authorizationStatus == .provisional,
@@ -342,4 +474,5 @@ extension PushNotificationService: UNUserNotificationCenterDelegate {
         if let text = value as? String { return Int(text) }
         return nil
     }
+
 }

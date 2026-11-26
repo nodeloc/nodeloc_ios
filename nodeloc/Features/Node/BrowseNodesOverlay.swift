@@ -19,6 +19,8 @@ struct BrowseNodesOverlay: View {
     @State private var showsSearch = false
     @State private var showsGroupList = false
     @State private var selectedNode: SidebarNodeSummary?
+    /// Only so the toolbar's mark can send the directory back to the top.
+    @State private var browseScroll = ScrollPosition()
     let showsCloseButton: Bool
     private let headerIconFrame: CGFloat = 34
     private let headerContentHeight: CGFloat = 56
@@ -61,6 +63,12 @@ struct BrowseNodesOverlay: View {
                     }
                 }
                 .scrollIndicators(.hidden)
+                .scrollPosition($browseScroll)
+                .onChange(of: app.scrollToTopRequests) { _, _ in
+                    withAnimation(.easeOut(duration: 0.3)) {
+                        browseScroll.scrollTo(edge: .top)
+                    }
+                }
 
                 if !usesTabBarRow {
                     browseHeader()
@@ -79,6 +87,12 @@ struct BrowseNodesOverlay: View {
             }
             .background(Theme.bg.ignoresSafeArea())
         }
+        // A node page opened from this tab is drawn *inside* the tab's
+        // navigation stack, so — unlike a post, which comes from `app.overlay`
+        // and covers the whole column — it cannot cover the tab bar's row. The
+        // row stayed put above it, putting this screen's mark and tools beside
+        // the node page's own header. A full-screen page has no use for them.
+        .toolbar(usesTabBarRow && selectedNode != nil ? .hidden : .automatic, for: .navigationBar)
         .tabBarHeader(isPinned: usesTabBarRow) {
             browseLeadingItems
         } trailing: {
@@ -107,8 +121,7 @@ struct BrowseNodesOverlay: View {
                 .foregroundStyle(Theme.text)
                 .frame(width: headerIconFrame, height: headerIconFrame)
         }
-        .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-        .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+        .headerControlGlass(tint: Theme.bg.opacity(0.34), shadow: .black.opacity(0.08))
     }
 
     /// Guests get 登录 where 新建 would be — creating a node needs an account.
@@ -127,20 +140,23 @@ struct BrowseNodesOverlay: View {
                     .foregroundStyle(Theme.text)
                     .frame(width: headerIconFrame, height: headerIconFrame)
             }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+            .headerControlGlass(tint: Theme.bg.opacity(0.34), shadow: .black.opacity(0.08))
         }
     }
 
-    /// In the tab bar's row the title sits beside the back button rather than
-    /// centred — the centre belongs to the tab capsule.
+    /// Only ever rendered in the tab bar's row — `tabBarHeader` drops it
+    /// otherwise, and the floating header draws its own controls.
+    ///
+    /// Nothing but the back button, and *nothing at all* when there is no back
+    /// destination: a toolbar groups its leading items into one container, so
+    /// an empty `HStack` here was enough to stretch the shared mark's circle
+    /// into a rounded rectangle. The title used to live here too and truncated
+    /// to "N…" — the tab capsule leaves this corner no room, and the tab
+    /// already says which screen this is.
     @ViewBuilder
     private var browseLeadingItems: some View {
-        HStack(spacing: 8) {
-            if showsGroupList {
-                browseBackButton
-            }
-            browseTitle
+        if showsGroupList {
+            browseBackButton
         }
     }
 

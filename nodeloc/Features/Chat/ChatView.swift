@@ -103,6 +103,10 @@ struct ChatView: View {
     @State private var chatSearchText = ""
     @State private var chatSearchTask: Task<Void, Never>?
     @State private var path: [ChatRoute] = []
+    /// Only so the toolbar's mark can send this list back to the top. A
+    /// `ScrollPosition` rather than a `ScrollViewReader` and an anchor id,
+    /// because nothing here needs to scroll to a *row* — just to the edge.
+    @State private var inboxScroll = ScrollPosition()
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -132,8 +136,12 @@ struct ChatView: View {
                     }
                 }
                 .toolbar(usesTopTabBar ? .visible : .hidden, for: .navigationBar)
+                // No leading item: the tab capsule leaves that corner too
+                // narrow for "收件箱", which truncated to "I…", and the tab
+                // itself already says which screen this is. The phone's own
+                // header still draws the title.
                 .tabBarHeader(isPinned: usesTopTabBar, needsNavigationStack: false) {
-                    inboxTitle
+                    EmptyView()
                 } trailing: {
                     inboxHeaderTools
                 }
@@ -264,8 +272,7 @@ struct ChatView: View {
                 .foregroundStyle(Theme.text)
                 .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
         }
-        .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
-        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        .headerControlGlass(tint: FloatingHeader.glassTint)
         .accessibilityLabel("发起聊天")
     }
 
@@ -290,8 +297,7 @@ struct ChatView: View {
                 .foregroundStyle(Theme.text)
                 .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
         }
-        .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
-        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+        .headerControlGlass(tint: FloatingHeader.glassTint)
         // Deliberately never disabled: a disabled `.glass` button gets no
         // press response, which is what made this one feel dead next to the
         // hamburger. With nothing unread the tap is simply a no-op.
@@ -382,6 +388,12 @@ struct ChatView: View {
             .padding(.bottom, 100)
         }
         .scrollIndicators(.hidden)
+        .scrollPosition($inboxScroll)
+        .onChange(of: app.scrollToTopRequests) { _, _ in
+            withAnimation(.easeOut(duration: 0.3)) {
+                inboxScroll.scrollTo(edge: .top)
+            }
+        }
     }
 
     private var chatFilterBar: some View {

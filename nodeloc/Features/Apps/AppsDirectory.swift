@@ -374,7 +374,8 @@ struct AppDetailOverlay: View {
     /// Opens the app's host topic through the existing post reader.
     private func openDiscussion(_ item: DirectoryApp) {
         guard let topicID = item.hostTopicID else { return }
-        app.selectedPost = Post(
+        // No queue — see `ProfileView.openAction`.
+        app.openReader(Post(
             id: topicID,
             node: "",
             avatarLetter: String(item.name.prefix(1)).uppercased(),
@@ -385,7 +386,7 @@ struct AppDetailOverlay: View {
             baseVotes: 0,
             comments: 0,
             hasImage: false
-        )
+        ))
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }

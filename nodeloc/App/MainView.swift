@@ -67,6 +67,7 @@ struct MainView: View {
             // With no drawer to drag, the swipe gestures would only fight the
             // content's own horizontal scrolling.
             let drawerGestures: GestureMask = isPinned ? .none : .all
+            let openDrawerGestures: GestureMask = isPinned || app.sidebarSwipeSuppressed ? .none : .all
 
             ZStack(alignment: .leading) {
                 Theme.bg.ignoresSafeArea()
@@ -185,12 +186,21 @@ struct MainView: View {
                 // pinned sidebar has to stay reachable while a post, node or
                 // settings page is open. On iPhone `contentWidth` is the full
                 // width and the offset is zero, so this is unchanged there.
-                .overlay { overlayLayer }
+                // One overlay, not two: separate `.overlay` modifiers stack by
+                // the order they are applied, so their `zIndex` values would
+                // not compose and a reader opened from a routed page would draw
+                // *under* it.
+                .overlay {
+                    ZStack {
+                        routedPageLayer
+                        overlayLayer
+                    }
+                }
                 .offset(x: sidebarVisible ? sidebarWidth : 0)
                 .shadow(color: sidebarOpen ? .black.opacity(0.12) : .clear, radius: 24, x: -8, y: 0)
                 .simultaneousGesture(
                     openSidebarDragGesture(containerWidth: proxy.size.width),
-                    including: drawerGestures
+                    including: openDrawerGestures
                 )
                 .zIndex(1)
             }
@@ -206,8 +216,12 @@ struct MainView: View {
         // pinned column, dimming the content and eating taps.
         .onChange(of: isSidebarPinned) { _, pinned in
             if pinned, app.overlay == .sidebar { app.overlay = nil }
+            // Published for `ContentView`, which is above this view and so
+            // cannot read the environment value set just now.
+            app.sidebarIsPinned = pinned
         }
         .onAppear {
+            app.sidebarIsPinned = isSidebarPinned
             if app.tab != .search {
                 lastContentTab = app.tab
             }
@@ -311,6 +325,60 @@ struct MainView: View {
         return hasDirection && abs(horizontal) > vertical * 1.35
     }
 
+    /// Pages routed from a link or the drawer — a node, a profile, a custom
+    /// feed — drawn here instead of as a `ContentView` cover while the sidebar
+    /// is pinned, since a cover would hide the drawer that opened them.
+    ///
+    /// `AppState.routedPageInColumn` decides which of the two presents, once, at
+    /// the moment the page opens; `ContentView` withholds its cover to match, so
+    /// only ever one of them draws.
+    ///
+    /// Lowest in the stack deliberately: everything in `overlayLayer` — the
+    /// reader, search, settings, the composer — can be opened *from* one of
+    /// these pages and has to land on top of it.
+    @ViewBuilder
+    private var routedPageLayer: some View {
+        if app.routedPageInColumn {
+            Group {
+                if let node = app.routedNode {
+                    NodeDetailOverlay(node: node) {
+                        withAnimation(.overlayPush) { app.routedNodeSlug = nil }
+                    }
+                } else if let target = app.routedProfile {
+                    PublicProfileOverlay(target: target) {
+                        withAnimation(.overlayPush) { app.routedProfile = nil }
+                    }
+                } else if let target = app.routedCustomFeed {
+                    CustomFeedView(
+                        target: target,
+                        // The in-column reader, unlike the cover's copy of this
+                        // page: `app.overlay` draws in this very view, so from
+                        // here it is simply the layer above.
+                        onOpenPost: { post in
+                            app.markTopicOpened(id: post.id)
+                            app.selectedPost = post
+                            withAnimation(.overlayPush) { app.overlay = .post }
+                        },
+                        onOpenNode: { node in
+                            app.routedCustomFeed = nil
+                            app.openNode(slug: node.slug)
+                        },
+                        onDeleted: { app.routedCustomFeed = nil },
+                        // Nothing presented this, so `dismiss()` inside it has
+                        // nothing to dismiss — see `CustomFeedView.onClose`.
+                        onClose: {
+                            withAnimation(.overlayPush) { app.routedCustomFeed = nil }
+                        }
+                    )
+                }
+            }
+            .background(Theme.bg.ignoresSafeArea())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+            .zIndex(5)
+        }
+    }
+
     @ViewBuilder
     private var overlayLayer: some View {
         if let overlay = app.overlay {
@@ -319,7 +387,10 @@ struct MainView: View {
                 EmptyView()
             case .post:
                 ZStack {
+                    // Fades as the reader shrinks away, so what shows behind
+                    // the closing page is the feed rather than a flat colour.
                     Theme.bg.ignoresSafeArea()
+                        .opacity(1 - app.readerDismissProgress)
                     PostDetailOverlay(postTransitionNamespace: postTransitionNamespace)
                 }
                 .environment(\.mediaAutoplayEnabled, true)

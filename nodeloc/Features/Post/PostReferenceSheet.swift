@@ -69,8 +69,9 @@ struct PostReferenceSheet: View {
     /// sheet closes and the post overlay takes over.
     private func openPost(_ post: Post) {
         onClose()
-        app.markTopicOpened(id: post.id)
-        app.selectedPost = post
+        // No queue: a reference is a jump sideways out of whatever list the
+        // reader came from, so there is no "next post" here.
+        app.openReader(post)
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }

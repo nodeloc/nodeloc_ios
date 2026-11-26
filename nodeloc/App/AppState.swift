@@ -23,7 +23,9 @@ struct Post: Identifiable {
     /// `voteScore` nil means the plugin didn't serialize a score for this row —
     /// draw no control rather than a like count pretending to be one.
     var voteScore: Int? = nil
+    var voteCount: Int? = nil
     var voteDirection: VoteDirection = .none
+    var canVoteUp: Bool = true
     var canVoteDown: Bool = true
     /// The first post's id, which is what the vote call needs.
     var opPostID: Int? = nil
@@ -152,7 +154,9 @@ struct PostComment: Identifiable {
     let reactions: [PostReaction]
     /// discourse-vote. Nil score means voting doesn't apply to this topic.
     var voteScore: Int?
+    var voteCount: Int?
     var voteDirection: VoteDirection
+    var canVoteUp: Bool
     var canVoteDown: Bool
     /// discourse-reward rewards this reply has received.
     let rewards: [PostReward]
@@ -186,6 +190,9 @@ struct PostComment: Identifiable {
     let isAcceptedAnswer: Bool
     /// Pending reports against this reply, for a manager of the node.
     let reportCount: Int?
+    /// Times it was edited since publishing (`version - 1`). Above zero, the
+    /// reply offers 编辑历史.
+    let editCount: Int
 
     init(
         id: Int,
@@ -212,7 +219,9 @@ struct PostComment: Identifiable {
         isLiked: Bool = false,
         reactions: [PostReaction] = [],
         voteScore: Int? = nil,
+        voteCount: Int? = nil,
         voteDirection: VoteDirection = .none,
+        canVoteUp: Bool = true,
         canVoteDown: Bool = true,
         rewards: [PostReward] = [],
         mobileSource: String? = nil,
@@ -227,7 +236,8 @@ struct PostComment: Identifiable {
         canDelete: Bool = false,
         isMine: Bool = false,
         isAcceptedAnswer: Bool = false,
-        reportCount: Int? = nil
+        reportCount: Int? = nil,
+        editCount: Int = 0
     ) {
         self.id = id
         self.author = author
@@ -253,7 +263,9 @@ struct PostComment: Identifiable {
         self.isLiked = isLiked
         self.reactions = reactions
         self.voteScore = voteScore
+        self.voteCount = voteCount
         self.voteDirection = voteDirection
+        self.canVoteUp = canVoteUp
         self.canVoteDown = canVoteDown
         self.rewards = rewards
         self.mobileSource = mobileSource
@@ -269,6 +281,7 @@ struct PostComment: Identifiable {
         self.isMine = isMine
         self.isAcceptedAnswer = isAcceptedAnswer
         self.reportCount = reportCount
+        self.editCount = editCount
     }
 
     /// Convenience for sample data and previews, where the body is a literal
@@ -598,6 +611,72 @@ final class AppState {
         id: 0, node: "", avatarLetter: "N", variant: 0, time: "",
         title: "", excerpt: "", baseVotes: 0, comments: 0, hasImage: false
     )
+    /// How far the reader's dismiss-shrink has travelled, 0…1.
+    ///
+    /// Published because the backdrop that fades with it is not the reader's:
+    /// `MainView` draws an opaque `Theme.bg` *behind* the reader, and a page
+    /// shrinking away over a flat colour looks like it is closing into nothing
+    /// rather than back onto the list it came from.
+    var readerDismissProgress: CGFloat = 0
+    /// Local readers drawn inside content pages own horizontal drags while they
+    /// are on screen, so the outer drawer's right-swipe must stay quiet.
+    private var sidebarSwipeSuppressors: Set<UUID> = []
+    var sidebarSwipeSuppressed: Bool { !sidebarSwipeSuppressors.isEmpty }
+
+    func setSidebarSwipeSuppressed(_ suppressed: Bool, for token: UUID) {
+        if suppressed {
+            sidebarSwipeSuppressors.insert(token)
+        } else {
+            sidebarSwipeSuppressors.remove(token)
+        }
+    }
+
+    /// The rows of whichever list opened the reader, so a sideways swipe there
+    /// can move to the neighbouring post.
+    ///
+    /// Set by the opener next to `selectedPost`, because only it knows what the
+    /// reader was one of. Empty is the honest answer for a post reached from a
+    /// link, a notification or a reference sheet: there is no "next" then, and
+    /// the reader says so by doing nothing.
+    var readingQueue: [Post] = []
+
+    /// The post the current reading session started on.
+    ///
+    /// Swiping forwards can run to the end of the list, but swiping *back*
+    /// stops here: the reader opened this post, so going further back would
+    /// take them somewhere they never chose to be. At this post a back-swipe
+    /// leaves instead.
+    private(set) var readerEntryPostID: Int?
+
+    /// Opens `post` in the reader as one of `queue`.
+    ///
+    /// Every list that can open a post goes through here, so none of them can
+    /// forget the queue and leave the swipe silently dead on that screen.
+    func openReader(_ post: Post, in queue: [Post] = []) {
+        markTopicOpened(id: post.id)
+        selectedPost = post
+        readingQueue = queue
+        readerEntryPostID = post.id
+    }
+
+    /// Moves the reader along its queue, which `openReader` would not: this
+    /// leaves the entry point alone, and the entry point is what bounds how
+    /// far back the reader can swipe.
+    func pageReader(to post: Post) {
+        markTopicOpened(id: post.id)
+        selectedPost = post
+    }
+
+    /// The post before or after the one on screen, or nil at either end — where
+    /// the near end is the post this session opened, not the top of the list.
+    func postAdjacent(to post: Post, offset: Int) -> Post? {
+        if offset < 0, post.id == readerEntryPostID { return nil }
+        guard let index = readingQueue.firstIndex(where: { $0.id == post.id }) else { return nil }
+        let target = index + offset
+        guard readingQueue.indices.contains(target) else { return nil }
+        return readingQueue[target]
+    }
+
     /// App chosen from the directory, shown by the app detail overlay.
     var selectedApp: DirectoryApp?
     var likedPosts: Set<Int> = []
@@ -649,6 +728,15 @@ final class AppState {
     /// Text the search overlay opens with, e.g. "#slug " to scope to one node.
     /// Cleared by the search view once read.
     var searchInitialQuery = ""
+    /// Bumped to ask whichever tab is on screen to scroll back to the top.
+    ///
+    /// A counter rather than a flag: two taps in a row are two requests, and a
+    /// flag would need resetting by the receiver — which is a second write to
+    /// coordinate. Screens watch it with `onChange` and don't have to reply.
+    ///
+    /// It exists because the control that asks lives in the tab bar's toolbar
+    /// row, outside every screen's `ScrollViewReader`.
+    var scrollToTopRequests = 0
     /// The search tab's query. Lives here because the field is the system one
     /// in the tab bar (`.searchable` on the TabView, in MainView), while the
     /// results render in SearchView — two views that never meet otherwise.
@@ -675,15 +763,27 @@ final class AppState {
     func voteScore(for post: Post) -> Int? {
         guard let base = post.voteScore else { return nil }
         guard let override = voteOverrides[post.id] else { return base }
-        return base + weight(override) - weight(post.voteDirection)
+        return base + scoreWeight(override) - scoreWeight(post.voteDirection)
     }
 
-    private func weight(_ direction: VoteDirection) -> Int {
+    /// The total number of actual votes with this session's own change folded in.
+    /// Up and down both count as one vote; `.none` counts as zero.
+    func voteCount(for post: Post) -> Int? {
+        guard let base = post.voteCount else { return nil }
+        guard let override = voteOverrides[post.id] else { return base }
+        return base + votePresence(override) - votePresence(post.voteDirection)
+    }
+
+    private func scoreWeight(_ direction: VoteDirection) -> Int {
         switch direction {
         case .up: return 1
         case .down: return -1
         case .none: return 0
         }
+    }
+
+    private func votePresence(_ direction: VoteDirection) -> Int {
+        direction == .none ? 0 : 1
     }
 
     /// Votes cast in this session, keyed by topic id. Kept here rather than in
@@ -692,7 +792,7 @@ final class AppState {
     var voteOverrides: [Int: VoteDirection] = [:]
 
     func castVote(_ direction: VoteDirection, on post: Post, reaction: String? = nil) {
-        guard let postID = post.opPostID else { return }
+        guard let postID = post.opPostID, canCastVote(direction, on: post) else { return }
         voteOverrides[post.id] = direction
         Task {
             do {
@@ -706,6 +806,11 @@ final class AppState {
                 ToastCenter.shared.showError(error)
             }
         }
+    }
+
+    private func canCastVote(_ direction: VoteDirection, on post: Post) -> Bool {
+        guard post.canVoteUp else { return false }
+        return direction != .down || post.canVoteDown
     }
 
     func voteCount(_ post: Post) -> Int {
@@ -811,12 +916,16 @@ final class AppState {
     }
 
     func openProfile(username: String) {
-        routedProfile = UserProfileTarget(username: username)
+        // Through the other overload, so the presentation decision is made in
+        // one place. Setting `routedProfile` here directly is what left this
+        // route opening over the pinned sidebar while the rest opened beside it.
+        openProfile(UserProfileTarget(username: username))
     }
 
     /// When the caller already has a name and avatar, so the page draws its
     /// header before the request lands.
     func openProfile(_ target: UserProfileTarget) {
+        routedPageInColumn = prefersColumnPresentation
         routedProfile = target
     }
 
@@ -824,8 +933,35 @@ final class AppState {
     /// all the URL carries; `NodeCatalog` resolves it to a full summary.
     var routedNodeSlug: String?
 
+    /// The summary `routedNodeSlug` resolved to.
+    ///
+    /// Held here rather than in `ContentView` because two places present it: a
+    /// root cover on the phone, and — with the sidebar pinned — the content
+    /// column inside `MainView`, so the drawer stays beside the page it opened.
+    var routedNode: SidebarNodeSummary?
+
     func openNode(slug: String) {
+        routedPageInColumn = prefersColumnPresentation
         routedNodeSlug = slug
+    }
+
+    /// Mirrors the `\.sidebarIsPinned` environment value for code *above*
+    /// `MainView`, which sets it and therefore cannot be read from there.
+    var sidebarIsPinned = false
+
+    /// Where the current routed page (node, profile, custom feed) is drawn:
+    /// `MainView`'s content column, or a `ContentView` cover.
+    ///
+    /// Decided once, when the page is opened, rather than derived while it is
+    /// open. A live condition would move the page between the two presenters
+    /// the moment anything opened on top of it — rebuilding it, and losing its
+    /// scroll position on the way back.
+    var routedPageInColumn = false
+
+    /// Beside the pinned sidebar rather than over it — but only with nothing
+    /// presented, since the column draws under every cover and sheet.
+    private var prefersColumnPresentation: Bool {
+        sidebarIsPinned && !UIApplication.isPresentingContext
     }
 
     /// A custom feed requested by an `/f/<username>/<slug>` link, by the
@@ -833,7 +969,19 @@ final class AppState {
     /// is not to fall out to the web page.
     var routedCustomFeed: CustomFeedTarget?
 
-    func openCustomFeed(username: String, slug: String, name: String? = nil) {
+    /// - Parameter inColumn: Overrides where the page is drawn, for a caller
+    ///   that knows better than `prefersColumnPresentation` can. Creating a feed
+    ///   routes to it from the *completion of the form sheet*, while that sheet
+    ///   is still on screen — so the automatic answer is "a cover", and the new
+    ///   feed opened full screen over the sidebar a moment after the sheet that
+    ///   made it had gone.
+    func openCustomFeed(
+        username: String,
+        slug: String,
+        name: String? = nil,
+        inColumn: Bool? = nil
+    ) {
+        routedPageInColumn = inColumn ?? prefersColumnPresentation
         routedCustomFeed = CustomFeedTarget(username: username, slug: slug, name: name)
     }
 

@@ -809,6 +809,49 @@ struct DiscourseClient {
         ))
     }
 
+    /// The topic *and* the bytes to keep for next time (`TopicSnapshot`).
+    ///
+    /// On this backend the bytes are the adapter's output, not the server's
+    /// own — the shaped object is what `TopicResponse` decodes. That still
+    /// leaves one decoding path, which is the property the snapshot needs: a
+    /// re-encoded model would be a second one, free to drift.
+    func topicWithRaw(id: Int) async throws -> (response: TopicResponse, raw: Data) {
+        _ = try? await loadNodes()
+        let detail: NLTopicDetail = try await get("api/v1/topics/\(id)", query: [URLQueryItem(name: "limit", value: "1")])
+        state.store(posts: detail.posts, topicID: id)
+        if detail.permissions?.moderate == true { state.topicModerators.insert(id) }
+        let extras = await topicExtras(topicID: id, topic: detail.topic, posts: detail.posts)
+        let object = DiscourseShape.topicResponse(
+            detail, polls: extras.polls, lottery: extras.lottery, redEnvelope: extras.redEnvelope
+        )
+        let raw = try JSONSerialization.data(withJSONObject: object)
+        return (try Self.decodeTopic(raw), raw)
+    }
+
+    /// Decodes a snapshot's bytes back, so a cached topic and a fresh one go
+    /// through exactly the same path.
+    static func decodeTopic(_ data: Data) throws -> TopicResponse {
+        try NodelocJSON.decode(TopicResponse.self, from: data)
+    }
+
+    /// The nested replies *and* their bytes, for the same snapshot reason as
+    /// `topicWithRaw`: the reply list is a second request, and without it
+    /// cached the reader still watched a skeleton on every visit.
+    func nestedTopicWithRaw(
+        id: Int,
+        slug: String = "topic",
+        sort: String,
+        page: Int = 0
+    ) async throws -> (response: NestedTopicResponse, raw: Data) {
+        let object = try await nestedTopicObject(id: id, sort: sort, page: page)
+        let raw = try JSONSerialization.data(withJSONObject: object)
+        return (try Self.decodeNestedTopic(raw), raw)
+    }
+
+    static func decodeNestedTopic(_ data: Data) throws -> NestedTopicResponse {
+        try NodelocJSON.decode(NestedTopicResponse.self, from: data)
+    }
+
     /// Polls are marked in the HTML; lottery and red envelope come only when
     /// the topic says it has one.
     private func topicExtras(topicID: Int, topic: NLTopicDetail.Topic, posts: [NLPost]) async -> (polls: [Int: [NLPoll]], lottery: NLLottery?, redEnvelope: NLRedEnvelope?) {
@@ -839,6 +882,12 @@ struct DiscourseClient {
 
     /// The replies as a tree, a page of top-level replies at a time.
     func nestedTopic(id: Int, slug: String = "topic", sort: String, page: Int = 0) async throws -> NestedTopicResponse {
+        try Self.shaped(try await nestedTopicObject(id: id, sort: sort, page: page))
+    }
+
+    /// The shaped reply tree before decoding, so the snapshot can keep the
+    /// same bytes the decode runs on.
+    private func nestedTopicObject(id: Int, sort: String, page: Int) async throws -> [String: Any] {
         let thread: NLThreadPage = try await get("api/v1/topics/\(id)/thread", query: [
             URLQueryItem(name: "sort", value: Self.replySort(sort)),
             URLQueryItem(name: "offset", value: String(page * Self.pageSize)),
@@ -859,7 +908,7 @@ struct DiscourseClient {
         if let answer = thread.acceptedAnswer {
             object["accepted_answer"] = DiscourseShape.acceptedAnswer(answer)
         }
-        return try Self.shaped(object)
+        return object
     }
 
     func nestedChildren(topicID: Int, postNumber: Int, slug: String = "topic", sort: String, page: Int = 0) async throws -> NestedChildrenResponse {
@@ -994,6 +1043,13 @@ struct DiscourseClient {
         var body: [String: Any] = ["hidden": hidden]
         if hidden, let reason, !reason.isEmpty { body["reason"] = reason }
         try await send("PUT", "api/v1/posts/\(id)/hidden", json: body)
+    }
+
+    /// A post's edit history, oldest first. Shown to the author and to the
+    /// post's managers; anyone else gets 403.
+    func postRevisions(postID: Int) async throws -> [NLRevision] {
+        let list: NLRevisionList = try await get("api/v1/posts/\(postID)/revisions")
+        return list.revisions.sorted { $0.number < $1.number }
     }
 
     /// Rolls a post back to revision `n` from its edit history (1 is as first

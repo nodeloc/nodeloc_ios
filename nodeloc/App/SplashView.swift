@@ -2,14 +2,12 @@
 //  SplashView.swift
 //  nodeloc
 //
-//  The launch animation: the NODELOC wordmark writing itself, stroke by
+//  The launch animation: the nodeloc wordmark writing itself, stroke by
 //  stroke, in the order you'd draw it by hand (n·o·d·e·l·o·c).
 //
-//  It writes the *real* brand artwork rather than a hand-traced imitation:
-//  `WordmarkStrokes` is a skeleton following each letter's pen path, stroked
-//  thick enough to cover the glyphs and animated with `trim`, then used as a
-//  mask over `NodelocWordmark`. So the shapes are always exactly the brand's,
-//  and only their reveal is animated.
+//  The visible mark is the canonical wordmark artwork. The vector path below is
+//  only a reveal mask, so the finished frame matches the logo asset exactly
+//  instead of redrawing the letters from approximate centre-lines.
 //
 //  The static launch screen (Info.plist UILaunchScreen) is background-only so
 //  it hands over to this without the mark popping in fully drawn first.
@@ -25,33 +23,13 @@ struct SplashView: View {
     @State private var isFadingOut = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The wordmark asset's own pixel aspect (252 × 73).
-    private let wordmarkAspect: CGFloat = 252.0 / 73.0
     private let wordmarkWidth: CGFloat = 210
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
 
-            Image("NodelocWordmark")
-                .resizable()
-                .scaledToFit()
-                .frame(width: wordmarkWidth, height: wordmarkWidth / wordmarkAspect)
-                .mask {
-                    WordmarkStrokes()
-                        .trim(from: 0, to: penProgress)
-                        .stroke(
-                            style: StrokeStyle(
-                                // The glyphs are 8 units thick in the
-                                // skeleton's 252-wide space; 15 covers them
-                                // with margin so no edge is left behind.
-                                lineWidth: 15 * (wordmarkWidth / 252),
-                                lineCap: .round,
-                                lineJoin: .round
-                            )
-                        )
-                        .frame(width: wordmarkWidth, height: wordmarkWidth / wordmarkAspect)
-                }
+            RevealedWordmark(progress: penProgress, width: wordmarkWidth)
                 .accessibilityLabel("NodeLoc")
         }
         .opacity(isFadingOut ? 0 : 1)
@@ -73,12 +51,42 @@ struct SplashView: View {
     }
 }
 
-/// Pen paths for "nodeloc", in the wordmark asset's own 252 × 73 space.
+private struct RevealedWordmark: View {
+    let progress: CGFloat
+    let width: CGFloat
+
+    private let aspect: CGFloat = 960.0 / 280.0
+    private var height: CGFloat { width / aspect }
+    private var scale: CGFloat { width / 252 }
+
+    var body: some View {
+        Image("NodelocWordmark")
+            .resizable()
+            .interpolation(.high)
+            .scaledToFit()
+            .frame(width: width, height: height)
+            .mask {
+                WordmarkRevealPath()
+                    .trim(from: 0, to: progress)
+                    .stroke(
+                        style: StrokeStyle(
+                            // Wider than the pen path so the mask reveals the
+                            // real anti-aliased wordmark edges as it moves.
+                            lineWidth: 15 * scale,
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
+                    )
+                    .frame(width: width, height: height)
+            }
+    }
+}
+
+/// Pen paths for the reveal mask, in the original 252 × 73 wordmark grid.
 ///
-/// Every coordinate is measured from the artwork: x-height runs y 28…61,
-/// ascenders start at y 11, and the strokes are 8 units thick — so letter
-/// centre-lines sit 4 units inside each glyph's bounding box.
-private struct WordmarkStrokes: Shape {
+/// These coordinates describe how the virtual pen travels; the visible shape
+/// still comes from the artwork asset above.
+private struct WordmarkRevealPath: Shape {
     // Letter centre-lines, measured from the asset.
     private let baseline: CGFloat = 57      // 61 − 4
     private let xHeightTop: CGFloat = 32    // 28 + 4
@@ -132,9 +140,12 @@ private struct WordmarkStrokes: Shape {
         addRing(&path, center: point(191, midline), radius: ringRadius * scale)
 
         // c — open to the right.
+        let cCenter = point(229, midline)
+        let cRadius = 11.5 * scale
+        path.move(to: pointOnCircle(center: cCenter, radius: cRadius, degrees: -55))
         path.addArc(
-            center: point(229, midline),
-            radius: 11.5 * scale,
+            center: cCenter,
+            radius: cRadius,
             startAngle: .degrees(-55),
             endAngle: .degrees(-305),
             clockwise: true
@@ -152,6 +163,14 @@ private struct WordmarkStrokes: Shape {
             startAngle: .degrees(-90),
             endAngle: .degrees(270),
             clockwise: false
+        )
+    }
+
+    private func pointOnCircle(center: CGPoint, radius: CGFloat, degrees: CGFloat) -> CGPoint {
+        let radians = degrees * .pi / 180
+        return CGPoint(
+            x: center.x + cos(radians) * radius,
+            y: center.y + sin(radians) * radius
         )
     }
 }

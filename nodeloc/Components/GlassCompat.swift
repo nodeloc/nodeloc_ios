@@ -184,3 +184,67 @@ private struct LegacyGlassButtonStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.82 : 1)
     }
 }
+
+// MARK: - Header controls
+
+extension View {
+    /// Glass for a header control, dropped when the control is in the iPad tab
+    /// bar's toolbar row.
+    ///
+    /// A toolbar item already gets a glass container from the system. Adding
+    /// ours nested a second one inside it, which read as a grey shape sitting
+    /// in the middle of the button — the same collision `SidebarMenuButton`
+    /// works around. The shadow goes with it: how a toolbar item is lifted off
+    /// the content is the system's business.
+    func headerControlGlass(
+        tint: Color,
+        shape: GlassShape = .circle,
+        shadow: Color = FloatingHeader.shadow
+    ) -> some View {
+        modifier(HeaderControlGlass(tint: tint, shape: shape, shadowColor: shadow))
+    }
+
+    /// `headerControlGlass` for a *group* of controls sharing one surface.
+    func headerGroupGlass(
+        tint: Color,
+        shadow: Color = FloatingHeader.shadow
+    ) -> some View {
+        modifier(HeaderGroupGlass(tint: tint, shadowColor: shadow))
+    }
+}
+
+private struct HeaderControlGlass: ViewModifier {
+    @Environment(\.isInTabBarRow) private var isInTabBarRow
+    let tint: Color
+    let shape: GlassShape
+    let shadowColor: Color
+
+    func body(content: Content) -> some View {
+        if isInTabBarRow {
+            content.buttonBorderShape(shape.borderShape)
+        } else {
+            content
+                .glassButton(tint: tint, shape: shape)
+                .shadow(color: shadowColor, radius: 9, y: 6)
+        }
+    }
+}
+
+private struct HeaderGroupGlass: ViewModifier {
+    @Environment(\.isInTabBarRow) private var isInTabBarRow
+    let tint: Color
+    let shadowColor: Color
+
+    func body(content: Content) -> some View {
+        if isInTabBarRow {
+            content
+        } else {
+            content
+                // 7pt above/below a 34pt row reproduces what `.glass` does to a
+                // label, so the capsule matches a glass button's height.
+                .padding(.vertical, 7)
+                .glassSurface(tint: tint, interactive: true)
+                .shadow(color: shadowColor, radius: 9, y: 6)
+        }
+    }
+}

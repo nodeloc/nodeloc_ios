@@ -868,7 +868,48 @@ nonisolated struct NLEmojis: Codable, Sendable {
     let packs: [Pack]?
 }
 
-nonisolated struct NLRevision: Codable, Sendable {}
+/// One entry of a post's edit history (`GET /api/v1/posts/{id}/revisions`).
+///
+/// Number 1 is the post as first published; the highest number is what is
+/// shown now. Each revision carries the whole body rather than a patch, so
+/// the client diffs neighbours itself. Everything but `number` is optional
+/// so an entry the server trims (an editor who has since been deleted, a
+/// revision with no reason) still decodes.
+nonisolated struct NLRevision: Codable, Sendable, Identifiable, Hashable {
+    nonisolated struct Editor: Codable, Sendable, Hashable {
+        let id: Int?
+        let username: String?
+        let name: String?
+        let avatar: String?
+    }
+    let number: Int
+    let raw: String?
+    let title: String?
+    let editor: Editor?
+    /// The reason the editor wrote when saving, if any.
+    let reason: String?
+    /// Saved by a moderator or staff rather than the author.
+    let byModerator: Bool?
+    let createdAt: String?
+
+    var id: Int { number }
+}
+
+/// The revisions endpoint answers `{"revisions": [...]}`; a bare array is
+/// accepted as well.
+nonisolated struct NLRevisionList: Decodable, Sendable {
+    let revisions: [NLRevision]
+
+    init(from decoder: Decoder) throws {
+        if let array = try? [NLRevision](from: decoder) {
+            revisions = array
+            return
+        }
+        enum Keys: String, CodingKey { case revisions }
+        let container = try decoder.container(keyedBy: Keys.self)
+        revisions = try container.decode([NLRevision].self, forKey: .revisions)
+    }
+}
 
 // MARK: - Nodes
 

@@ -72,6 +72,7 @@ private enum SearchExperienceMode {
 
 private struct SearchExperience: View {
     @Environment(AppState.self) private var app
+    @Environment(\.usesTopTabBar) private var usesTopTabBar
     let postTransitionNamespace: Namespace.ID
     let mode: SearchExperienceMode
     var initialQuery: String = ""
@@ -87,6 +88,15 @@ private struct SearchExperience: View {
     @Namespace private var scopeSelectionNamespace
 
     private var isOverlay: Bool { mode == .overlay }
+
+    /// Whether this screen has to draw its own search field.
+    ///
+    /// On the phone the field comes from `.searchable` on the tab view, whose
+    /// tab bar morphs into it. iPad doesn't get `.searchable` — it would be a
+    /// second search affordance beside the search tab already in the top tab
+    /// bar — so the tab has to supply the field itself, or it is a results
+    /// screen with nothing to type into.
+    private var drawsOwnField: Bool { !isOverlay && usesTopTabBar }
     private var isSearching: Bool {
         query.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
     }
@@ -102,6 +112,12 @@ private struct SearchExperience: View {
                 // system writes too, and went missing whenever the two
                 // disagreed. This is the same bar the overlay draws, owned by
                 // the app, so it is simply always there.
+                if drawsOwnField {
+                    searchField
+                        .padding(.horizontal, 16)
+                        .padding(.top, 6)
+                }
+
                 if !isOverlay {
                     scopeBar
                         .padding(.horizontal, 16)
@@ -161,6 +177,13 @@ private struct SearchExperience: View {
                 showHistory = false
                 apply(term)
             }
+        }
+        // Only for the shared leading control — this screen has no header of
+        // its own to hand over. `MainView` already wraps it in a stack.
+        .tabBarHeader(isPinned: drawsOwnField, needsNavigationStack: false) {
+            EmptyView()
+        } trailing: {
+            EmptyView()
         }
     }
 
@@ -324,7 +347,8 @@ private struct SearchExperience: View {
                     withAnimation(.panelSlide) {
                         selectedProfile = target
                     }
-                }
+                },
+                readingQueue: posts
             )
         }
     }
