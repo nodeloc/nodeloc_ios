@@ -150,6 +150,14 @@ final class TopicStore {
     /// The viewer's permissions on the topic and the OP, straight from the
     /// server. Absent flags mean "no", which is how a node moderator's rights
     /// stay inside their node without the app knowing the boundary.
+    /// The accepted best answer, and whether this reader may accept one. The
+    /// server already applies the rules (help tag present, reader is the author
+    /// or can moderate the node), so the "Accept" action follows it rather than
+    /// re-deriving them. The id goes nil once that reply is deleted or hidden,
+    /// even while the topic stays solved.
+    private(set) var acceptedAnswerPostID: Int?
+    private(set) var acceptedAnswerBy: String?
+    private(set) var canAcceptAnswer = false
     private(set) var canEditTopic = false
     private(set) var canDeleteTopic = false
     private(set) var canCloseTopic = false
@@ -259,6 +267,9 @@ final class TopicStore {
             pinnedPostIDs = []
             revealedContent = [:]
             revealingPostIDs = []
+            acceptedAnswerPostID = nil
+            acceptedAnswerBy = nil
+            canAcceptAnswer = false
             canEditTopic = false
             canDeleteTopic = false
             canCloseTopic = false
@@ -341,6 +352,9 @@ final class TopicStore {
             canCloseTopic = details?.canCloseTopic ?? details?.canModerate ?? false
             canPinTopic = details?.canPinUnpinTopic ?? false
             canBannerTopic = details?.canBannerTopic ?? false
+            acceptedAnswerPostID = topic.acceptedAnswer?.postId
+            acceptedAnswerBy = topic.acceptedAnswer?.acceptedBy
+            canAcceptAnswer = topic.canAcceptAnswer ?? false
 
             // Parse the OP off the main actor before touching @Observable state.
             await parseContents(for: posts)
@@ -697,6 +711,8 @@ final class TopicStore {
                     mobileSource: post.mobileSource,
                     isPinned: pinnedPostIDs.contains(post.id),
                     isDeletedPlaceholder: post.deletedPostPlaceholder ?? false,
+                    deletedByModerator: post.deletedByKind == "moderator",
+                    deleteReason: post.deleteReason,
                     // Revealing replaces the placeholder with the real reply.
                     isIgnoredPlaceholder: (post.ignoredPostPlaceholder ?? false)
                         && revealedContent[post.id] == nil,
@@ -704,7 +720,8 @@ final class TopicStore {
                     canRecover: post.canRecover ?? false,
                     canEdit: post.canEdit ?? false,
                     canDelete: post.canDelete ?? false,
-                    isMine: post.yours ?? false
+                    isMine: post.yours ?? false,
+                    isAcceptedAnswer: acceptedAnswerPostID == post.id
                 )
             )
             let nextTrails = trails + [!isLast]
@@ -1352,6 +1369,35 @@ final class TopicStore {
         }
     }
 
+    /// Accepts a reply as the best answer, or withdraws the current one. Once
+    /// a topic has an answer it can only be withdrawn, not re-pointed, so the
+    /// caller only ever offers one of the two.
+    func toggleAcceptedAnswer(postID: Int) async {
+        let withdrawing = acceptedAnswerPostID == postID
+        do {
+            try await client.acceptAnswer(postID: postID, accepted: !withdrawing)
+            acceptedAnswerPostID = withdrawing ? nil : postID
+            acceptedAnswerBy = withdrawing ? nil : "author"
+            comments = buildNestedComments(from: nestedRoots)
+            ToastCenter.shared.show(withdrawing ? AppString("已撤销采纳") : AppString("已采纳为最佳答案"))
+        } catch {
+            ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// Whether to offer "Accept" on this reply. The server decides who may
+    /// accept at all (`canAcceptAnswer`); the cases it answers 422 for are
+    /// filtered here so the action never appears where it would fail: the
+    /// first post, the reader's own reply, the author's own reply, and a
+    /// placeholder. An already-accepted reply keeps the action, as withdraw.
+    func canAccept(_ comment: PostComment) -> Bool {
+        guard canAcceptAnswer, !comment.isLoadMore, !comment.isPlaceholder else { return false }
+        guard comment.postNumber != 1, !comment.isMine else { return false }
+        if comment.isAcceptedAnswer { return true }
+        guard acceptedAnswerPostID == nil else { return false }
+        return comment.author.lowercased() != firstAuthor?.username.lowercased()
+    }
+
     /// Whether this reply can be pinned at all: a root reply, and the viewer is
     /// staff. Nested replies and the OP are never pinnable.
     func canPin(_ comment: PostComment) -> Bool {
@@ -1481,7 +1527,10 @@ final class TopicStore {
                     groupID: groupID,
                     mobileSource: post.mobileSource,
                     isDeletedPlaceholder: post.deletedPostPlaceholder ?? false,
-                    isIgnoredPlaceholder: post.ignoredPostPlaceholder ?? false
+                    deletedByModerator: post.deletedByKind == "moderator",
+                    deleteReason: post.deleteReason,
+                    isIgnoredPlaceholder: post.ignoredPostPlaceholder ?? false,
+                    isAcceptedAnswer: acceptedAnswerPostID == post.id
                 )
             )
 

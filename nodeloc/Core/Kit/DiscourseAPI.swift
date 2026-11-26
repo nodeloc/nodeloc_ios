@@ -473,12 +473,19 @@ struct DiscourseClient {
         let posts = thread.posts.filter { $0.postNumber > 1 }
         state.store(posts: posts, topicID: id)
         let canModerate = state.topicModerators.contains(id)
-        return try Self.shaped([
+        // `/thread` has no `topic`, so the best answer and whether this reader
+        // may accept one arrive at the top level.
+        var object: [String: Any] = [
             "roots": DiscourseShape.nestedRoots(posts, canModerate: canModerate),
             "has_more_roots": thread.nextOffset != nil,
             "page": page,
             "sort": sort,
-        ])
+            "can_accept_answer": thread.canAccept ?? false,
+        ]
+        if let answer = thread.acceptedAnswer {
+            object["accepted_answer"] = DiscourseShape.acceptedAnswer(answer)
+        }
+        return try Self.shaped(object)
     }
 
     func nestedChildren(topicID: Int, postNumber: Int, slug: String = "topic", sort: String, page: Int = 0) async throws -> NestedChildrenResponse {
@@ -690,6 +697,15 @@ struct DiscourseClient {
 
     func unlikePost(id: Int) async throws {
         _ = try await castVote(postID: id, direction: .none)
+    }
+
+    /// Accept a reply as the topic's best answer, or withdraw one. The server
+    /// refuses with 422 for the cases the caller shouldn't offer anyway: the
+    /// first post, the author's own reply, the reader's own reply, and
+    /// replies that are deleted or hidden.
+    @discardableResult
+    func acceptAnswer(postID: Int, accepted: Bool = true) async throws -> Data {
+        try await send("PUT", "api/v1/posts/\(postID)/accepted", json: ["accepted": accepted])
     }
 
     /// Who voted isn't public on the backend.

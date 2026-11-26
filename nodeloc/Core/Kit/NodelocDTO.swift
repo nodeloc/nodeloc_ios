@@ -224,6 +224,11 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     let imageUrl: String?
     let adult: Bool?
     let bumpedAt: String?
+    /// The topic accepted a best answer, so the row shows a "solved" badge.
+    let solved: Bool?
+    /// The first post is hidden. Only moderators and the node's managers see
+    /// such a topic in a list at all; the author sees it in his own topics.
+    let hidden: Bool?
 }
 
 nonisolated struct NLTopicPage: Codable, Sendable {
@@ -278,6 +283,12 @@ nonisolated struct NLPost: Codable, Sendable {
     let authorBlocked: Bool?
     let ackLabel: String?
     let viewerAcknowledged: Bool?
+    /// Only on a deleted post: `author` when the author deleted it himself,
+    /// `moderator` otherwise (a system account or old data without an actor
+    /// counts as `moderator`). `deleteReason` comes only with a moderator's
+    /// deletion, and only when one was written.
+    let deletedBy: String?
+    let deleteReason: String?
     /// Only `GET /topics/{id}` sends these.
     let canEdit: Bool?
     let canDelete: Bool?
@@ -287,6 +298,16 @@ nonisolated struct NLPost: Codable, Sendable {
     let replies: Int?
 
     var score: Int { (upvotes ?? 0) - (downvotes ?? 0) }
+}
+
+/// The accepted best answer. `acceptedBy` is `author` or `moderator` (a
+/// moderator may accept on the author's behalf). Null once that reply is
+/// deleted or hidden, even though the topic still counts as solved.
+nonisolated struct NLAcceptedAnswer: Codable, Sendable {
+    let postId: Int
+    let postNumber: Int?
+    let username: String?
+    let acceptedBy: String?
 }
 
 nonisolated struct NLTopicDetail: Codable, Sendable {
@@ -312,6 +333,11 @@ nonisolated struct NLTopicDetail: Codable, Sendable {
         let hasLottery: Bool?
         let hasTrade: Bool?
         let hasRedEnvelope: Bool?
+        /// Best answer. `canAccept` is true when the topic carries the help
+        /// tag and the reader is the author or can moderate the node — the
+        /// signal to draw "Accept" on someone else's reply.
+        let acceptedAnswer: NLAcceptedAnswer?
+        let canAccept: Bool?
     }
     struct Permissions: Codable, Sendable {
         let reply: Bool?
@@ -327,6 +353,9 @@ nonisolated struct NLThreadPage: Codable, Sendable {
     let posts: [NLPost]
     let nextOffset: Int?
     let nextAfter: Int?
+    /// `/thread` carries no `topic`, so these two sit at the top level.
+    let acceptedAnswer: NLAcceptedAnswer?
+    let canAccept: Bool?
 }
 
 nonisolated struct NLCreatedTopic: Codable, Sendable {

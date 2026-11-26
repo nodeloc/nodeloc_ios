@@ -2026,6 +2026,7 @@ final class SearchStore {
                 // is `posts_count - 1`.
                 comments: max(0, (topic.postsCount ?? 1) - 1),
                 hasImage: false,
+                isSolved: topic.solved ?? false,
                 avatarURL: match?.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
                 authorUsername: author,
                 authorName: match?.name,

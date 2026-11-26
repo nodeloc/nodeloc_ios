@@ -319,6 +319,21 @@ struct PostDetailOverlay: View {
                     .buttonStyle(.pressable)
                 }
 
+                // Only on a help topic, and only for the author or someone who
+                // can moderate the node — the server reports both.
+                if topic.canAccept(comment) {
+                    Button {
+                        moreSheetComment = nil
+                        Task { await topic.toggleAcceptedAnswer(postID: comment.id) }
+                    } label: {
+                        moreSheetRow(
+                            comment.isAcceptedAnswer ? AppString("撤销采纳") : AppString("采纳为最佳答案"),
+                            systemImage: comment.isAcceptedAnswer ? "checkmark.seal.slash" : "checkmark.seal"
+                        )
+                    }
+                    .buttonStyle(.pressable)
+                }
+
                 ShareLink(item: postURL) {
                     moreSheetRow(AppString("分享"), systemImage: "square.and.arrow.up")
                 }
@@ -1700,12 +1715,23 @@ private struct NestedReplyRow: View {
     /// so its surviving children keep their place in the thread, but there is
     /// nothing to read and nothing to act on — the same as the web, which draws
     /// a trash-can gutter and a one-line label.
+    /// Who removed it, and why when a moderator said so — the same three
+    /// readings the web's placeholder has.
+    private var placeholderLabel: String {
+        guard comment.isDeletedPlaceholder else { return AppString("已忽略该用户的回复") }
+        guard comment.deletedByModerator else { return AppString("这条回复已被作者删除") }
+        guard let reason = comment.deleteReason, !reason.isEmpty else {
+            return AppString("这条回复已被版主删除")
+        }
+        return AppString("这条回复已被版主删除 · \(reason)")
+    }
+
     private var placeholderRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: comment.isDeletedPlaceholder ? "trash" : "eye.slash")
                     .font(.system(size: 11, weight: .semibold))
-                Text(comment.isDeletedPlaceholder ? AppString("此回复已删除") : AppString("已忽略该用户的回复"))
+                Text(placeholderLabel)
                     .font(Theme.body(12))
 
                 // Staff get the deleted body in the same payload, so this only
@@ -1818,6 +1844,10 @@ private struct NestedReplyRow: View {
 
             if comment.isPinned {
                 pinnedReplyBadge
+            }
+
+            if comment.isAcceptedAnswer {
+                acceptedAnswerBadge
             }
 
             Text("· \(comment.time)")
@@ -2037,6 +2067,18 @@ var pinnedReplyBadge: some View {
         .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(Theme.accent)
         .accessibilityLabel("已置顶")
+}
+
+/// The accepted answer's chip. Named rather than a bare glyph, because this is
+/// the one marker a reader scans a help topic for.
+var acceptedAnswerBadge: some View {
+    Label(AppString("最佳答案"), systemImage: "checkmark.seal.fill")
+        .labelStyle(CompactLabelStyle())
+        .font(Theme.body(10, weight: .semibold))
+        .foregroundStyle(Theme.accent700)
+        .padding(.vertical, 3)
+        .padding(.horizontal, 7)
+        .background(Theme.accent.opacity(0.12), in: Capsule())
 }
 
 /// The 小尾巴 discourse-mobile attaches to a post: what the author's app said

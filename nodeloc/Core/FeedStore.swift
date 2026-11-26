@@ -179,6 +179,8 @@ enum FeedMapper {
             pinned: topic.pinned ?? false,
             pinnedGlobally: topic.pinnedGlobally ?? false,
             isUnread: isUnread,
+            isSolved: topic.solved ?? false,
+            isHidden: topic.topicHidden ?? false,
             imageURL: media.first?.url,
             avatarURL: author?.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
             authorUsername: author?.username,

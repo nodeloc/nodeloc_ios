@@ -70,6 +70,12 @@ struct TopicListItem: Decodable, Identifiable {
     /// request, so absence means "not watching" / "not bookmarked".
     let notificationLevel: Int?
     let bookmarked: Bool?
+    /// The topic accepted a best answer. Drives the row's "solved" badge.
+    let solved: Bool?
+    /// The first post is hidden. Only a moderator, one of the node's managers,
+    /// or the author in his own list is served such a topic at all, so the row
+    /// marks it rather than dropping it.
+    let topicHidden: Bool?
     let views: Int?
     let createdAt: String?
     let lastPostedAt: String?
@@ -751,6 +757,10 @@ struct TopicPost: Decodable, Identifiable {
     /// alongside the flag; everyone else gets the stub described above. Either
     /// way the row has to stay, because its children are still there.
     let deletedPostPlaceholder: Bool?
+    /// On a deleted post: `author` or `moderator`, and the reason a moderator
+    /// gave if they wrote one. The placeholder reads from these.
+    let deletedByKind: String?
+    let deleteReason: String?
     /// Nested view: written by someone this viewer ignores. Keys are intact but
     /// `cooked` is blanked.
     let ignoredPostPlaceholder: Bool?
@@ -784,6 +794,10 @@ struct NestedTopicResponse: Decodable {
     /// per-post `pinned` field — and the server already returns a pinned root
     /// first in `roots`.
     let pinnedPostIds: [Int]?
+    /// The nested view carries the best answer itself — `/thread` sends no
+    /// `topic` to hang it off.
+    let acceptedAnswer: AcceptedAnswer?
+    let canAcceptAnswer: Bool?
 }
 
 /// What `PUT /n/{slug}/{id}/pin.json` answers: the topic's pinned replies after
@@ -997,6 +1011,19 @@ struct TopicResponse: Decodable {
     let pinnedGlobally: Bool?
     let archetype: String?
     let details: TopicDetails?
+    /// Best answer, and whether this reader may accept one. `acceptedAnswer`
+    /// goes null once that reply is deleted or hidden, while the topic stays
+    /// solved — the same thing the web's card does.
+    let acceptedAnswer: AcceptedAnswer?
+    let canAcceptAnswer: Bool?
+}
+
+/// The accepted reply. `acceptedBy` is `author` or `moderator`.
+struct AcceptedAnswer: Decodable {
+    let postId: Int
+    let postNumber: Int?
+    let username: String?
+    let acceptedBy: String?
 }
 
 /// `GET /topics/feature_stats.json` — how many topics already occupy each

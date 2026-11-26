@@ -41,6 +41,12 @@ struct Post: Identifiable {
     var pinnedGlobally: Bool = false
     /// New or has-unread-posts for the signed-in user — shows the read dot.
     var isUnread: Bool = false
+    /// The topic accepted a best answer, so the row carries a "solved" badge.
+    var isSolved: Bool = false
+    /// The first post is hidden. Only a moderator, one of the node's managers,
+    /// or the author in his own list is served such a row at all; it is marked
+    /// rather than dropped so they can see it still occupies the list.
+    var isHidden: Bool = false
     /// Real topic image (when loaded from Discourse); nil falls back to the hatch placeholder.
     var imageURL: URL? = nil
     /// Real author avatar (when loaded from Discourse); nil falls back to initials.
@@ -156,6 +162,10 @@ struct PostComment: Identifiable {
     /// row still has to exist: the nested view hangs surviving children off it,
     /// and dropping it would orphan them.
     let isDeletedPlaceholder: Bool
+    /// A moderator removed it rather than the author, and the reason they gave
+    /// if they wrote one. The placeholder says which, like the web does.
+    let deletedByModerator: Bool
+    let deleteReason: String?
     let isIgnoredPlaceholder: Bool
     /// A reveal request is in flight for this reply.
     let isRevealing: Bool
@@ -169,6 +179,8 @@ struct PostComment: Identifiable {
     let canEdit: Bool
     let canDelete: Bool
     let isMine: Bool
+    /// This reply is the topic's accepted best answer.
+    let isAcceptedAnswer: Bool
 
     init(
         id: Int,
@@ -201,12 +213,15 @@ struct PostComment: Identifiable {
         mobileSource: String? = nil,
         isPinned: Bool = false,
         isDeletedPlaceholder: Bool = false,
+        deletedByModerator: Bool = false,
+        deleteReason: String? = nil,
         isIgnoredPlaceholder: Bool = false,
         isRevealing: Bool = false,
         canRecover: Bool = false,
         canEdit: Bool = false,
         canDelete: Bool = false,
-        isMine: Bool = false
+        isMine: Bool = false,
+        isAcceptedAnswer: Bool = false
     ) {
         self.id = id
         self.author = author
@@ -238,12 +253,15 @@ struct PostComment: Identifiable {
         self.mobileSource = mobileSource
         self.isPinned = isPinned
         self.isDeletedPlaceholder = isDeletedPlaceholder
+        self.deletedByModerator = deletedByModerator
+        self.deleteReason = deleteReason
         self.isIgnoredPlaceholder = isIgnoredPlaceholder
         self.isRevealing = isRevealing
         self.canRecover = canRecover
         self.canEdit = canEdit
         self.canDelete = canDelete
         self.isMine = isMine
+        self.isAcceptedAnswer = isAcceptedAnswer
     }
 
     /// Convenience for sample data and previews, where the body is a literal

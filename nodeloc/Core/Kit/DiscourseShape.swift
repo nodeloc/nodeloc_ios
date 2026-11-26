@@ -142,6 +142,8 @@ enum DiscourseShape {
             object["liked"] = viewerVote > 0
         }
         if let level = state.topicLevels[topic.id] { object["notification_level"] = level }
+        if topic.solved == true { object["solved"] = true }
+        if topic.hidden == true { object["topic_hidden"] = true }
         return object
     }
 
@@ -202,6 +204,10 @@ enum DiscourseShape {
         if deleted {
             object["deleted_at"] = time(post.editedAt ?? post.createdAt)
             object["deleted_post_placeholder"] = true
+            // Who removed it, and why, so the placeholder reads like the web's
+            // ("deleted by the author" / "deleted by a moderator · reason").
+            object["deleted_by_kind"] = value(post.deletedBy)
+            object["delete_reason"] = value(post.deleteReason)
         }
         if post.authorBlocked == true {
             object["ignored_post_placeholder"] = true
@@ -289,7 +295,22 @@ enum DiscourseShape {
         if let redEnvelope {
             object["red_envelope"] = self.redEnvelope(redEnvelope)
         }
+        object["can_accept_answer"] = topic.canAccept ?? false
+        if let answer = topic.acceptedAnswer {
+            object["accepted_answer"] = acceptedAnswer(answer)
+        }
         return object
+    }
+
+    /// The best-answer card's fields. Shared by the topic and `/thread`, which
+    /// carries the same two keys at its top level.
+    static func acceptedAnswer(_ answer: NLAcceptedAnswer) -> Object {
+        [
+            "post_id": answer.postId,
+            "post_number": value(answer.postNumber),
+            "username": value(answer.username),
+            "accepted_by": value(answer.acceptedBy),
+        ]
     }
 
     /// `/thread` rows (flat, with depth) → the nested view's roots with their

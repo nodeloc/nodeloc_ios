@@ -1704,3 +1704,30 @@ extension ButtonStyle where Self == PressableButtonStyle {
         PressableButtonStyle(scale: 0.88, opacity: 0.5)
     }
 }
+
+/// The small state capsules a topic row carries after its timestamp: solved,
+/// and — only for the few readers served such a row at all — first post
+/// hidden. Shared so the home feed and a node's list stay in step.
+struct TopicStateBadges: View {
+    let isSolved: Bool
+    let isHidden: Bool
+
+    var body: some View {
+        if isSolved {
+            badge(AppString("已解决"), icon: "checkmark.seal.fill", tint: Theme.accent700, background: Theme.accent)
+        }
+        if isHidden {
+            badge(AppString("已隐藏"), icon: "eye.slash.fill", tint: Theme.muted(0.7), background: Theme.muted(0.5))
+        }
+    }
+
+    private func badge(_ title: String, icon: String, tint: Color, background: Color) -> some View {
+        Label(title, systemImage: icon)
+            .labelStyle(CompactLabelStyle())
+            .font(Theme.body(10, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 7)
+            .background(background.opacity(0.1), in: Capsule())
+    }
+}
