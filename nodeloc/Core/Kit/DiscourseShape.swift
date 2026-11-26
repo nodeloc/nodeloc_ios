@@ -147,6 +147,48 @@ enum DiscourseShape {
         return object
     }
 
+    /// A node's pinned rows, shaped like any other list so the same card
+    /// renders them. `pinned_until` rides along for the "until" line.
+    static func pinnedCarousel(_ pins: [NLNodePins.Pin], nodeSlug: String) -> Object {
+        var rows: [Object] = []
+        var users: [Object] = []
+        var seen = Set<String>()
+        for pin in pins {
+            let slug = pin.nodeSlug ?? nodeSlug
+            let nodeID = state.nodeID(forSlug: slug)
+            state.setNode(slug: slug, topicID: pin.id)
+            let author = pin.author ?? ""
+            state.remember(username: author, id: nil, avatar: pin.authorAvatar)
+            if !author.isEmpty, seen.insert(author.lowercased()).inserted {
+                users.append(user(username: author, avatar: pin.authorAvatar))
+            }
+            let replies = pin.replyCount ?? 0
+            var row: Object = [
+                "id": pin.id,
+                "title": pin.title,
+                "slug": "topic",
+                "posts_count": replies + 1,
+                "reply_count": replies,
+                "like_count": max(pin.voteScore ?? 0, 0),
+                "op_like_count": max(pin.voteScore ?? 0, 0),
+                "created_at": time(pin.createdAt),
+                "last_posted_at": time(pin.createdAt),
+                "bumped_at": time(pin.createdAt),
+                "category_id": nodeID,
+                "pinned": true,
+                "pinned_globally": false,
+                "archetype": "regular",
+                "excerpt": value(pin.excerpt),
+                "pinned_at": time(pin.pinnedAt),
+                "pinned_until": time(pin.pinnedUntil),
+                "posters": [["user_id": state.userID(for: author), "description": "Original Poster"] as Object],
+            ]
+            if let image = pin.imageUrl { row["image_url"] = image }
+            rows.append(row)
+        }
+        return ["users": users, "topic_list": ["topics": rows] as Object]
+    }
+
     static func users(for topics: [NLTopicSummary]) -> [Object] {
         var seen = Set<String>()
         var out: [Object] = []

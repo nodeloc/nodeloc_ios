@@ -1481,6 +1481,12 @@ struct PostDetailOverlay: View {
                     if topic.hasMoreComments {
                         loadMoreRepliesButton(for: post)
                     }
+
+                    // The web's three columns, at the foot of the page.
+                    RelatedTopicsSection(topicID: post.id) { related in
+                        app.openTopic(id: related.id)
+                    }
+                    .padding(.top, 24)
                 }
             }
         }

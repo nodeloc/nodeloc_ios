@@ -691,6 +691,10 @@ struct NodeDetailOverlay: View {
             .padding(.vertical, 52)
         } else {
             LazyVStack(spacing: 0) {
+                // Pinned first, as a strip of its own — unpaged and outside the
+                // sort, the same way the web's node page carries it.
+                NodePinnedCarousel(posts: store.visiblePinnedPosts, onOpen: { open($0) })
+
                 ForEach(store.visiblePosts) { post in
                     NodeTopicRow(
                         post: post,
@@ -1051,6 +1055,61 @@ struct NodeTopicRow: View {
             }
             .buttonStyle(.pressable)
             Spacer(minLength: 0)
+        }
+    }
+}
+
+/// A node's pinned topics, swiped horizontally above the sorted list. Unpaged
+/// — there are only ever a handful — and empty for a node with no pins, in
+/// which case it takes no space at all.
+struct NodePinnedCarousel: View {
+    let posts: [Post]
+    let onOpen: (Post) -> Void
+
+    var body: some View {
+        if !posts.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(AppString("置顶"), systemImage: "pin.fill")
+                    .labelStyle(CompactLabelStyle())
+                    .font(Theme.body(11, weight: .semibold))
+                    .foregroundStyle(Theme.muted(0.5))
+                    .padding(.horizontal, 16)
+
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 10) {
+                        ForEach(posts) { post in
+                            Button { onOpen(post) } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(post.title)
+                                        .font(Theme.body(13, weight: .semibold))
+                                        .foregroundStyle(Theme.text)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    if !post.excerpt.isEmpty {
+                                        Text(post.excerpt)
+                                            .font(Theme.body(11))
+                                            .foregroundStyle(Theme.muted(0.5))
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+                                    }
+                                }
+                                .padding(12)
+                                .frame(width: 228, alignment: .leading)
+                                .background(
+                                    Theme.surface,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                            }
+                            .buttonStyle(.pressable)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .scrollTargetLayout()
+                }
+                .scrollTargetBehavior(.viewAligned)
+                .scrollIndicators(.hidden)
+            }
+            .padding(.vertical, 12)
         }
     }
 }

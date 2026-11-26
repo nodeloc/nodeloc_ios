@@ -576,6 +576,49 @@ nonisolated struct NLNodeEnvelope: Codable, Sendable {
     let node: NLNode
 }
 
+/// A node's pinned carousel. Same rows as a topic list plus when the pin was
+/// placed and when it lapses (null = forever). Not paged — there are only ever
+/// a handful — and readable signed out.
+nonisolated struct NLNodePins: Codable, Sendable {
+    nonisolated struct Pin: Codable, Sendable {
+        let id: Int
+        let title: String
+        let excerpt: String?
+        let nodeSlug: String?
+        let author: String?
+        let authorAvatar: String?
+        let replyCount: Int?
+        let voteScore: Int?
+        let createdAt: String?
+        let imageUrl: String?
+        let pinnedAt: String?
+        let pinnedUntil: String?
+    }
+    let topics: [Pin]
+}
+
+/// The home banner carousel, readable signed out.
+nonisolated struct NLHomeAnnouncements: Codable, Sendable {
+    nonisolated struct Announcement: Codable, Sendable, Identifiable {
+        let id: Int
+        /// `notice`, `event`, `maintenance` or `rules`; `kindName` is the same
+        /// thing already written in the reader's language.
+        let kind: String?
+        let kindName: String?
+        let title: String
+        let excerpt: String?
+        let coverUrl: String?
+        let topicId: Int?
+        let url: String?
+        let publishedAt: String?
+        /// Always true today. A signed-in reader dismisses through the API so
+        /// it stays dismissed across devices; a guest has no account, so the
+        /// app remembers it locally and must *not* call that endpoint (401).
+        let dismissible: Bool?
+    }
+    let announcements: [Announcement]
+}
+
 nonisolated struct NLSlugAvailability: Codable, Sendable {
     let slug: String?
     let available: Bool?

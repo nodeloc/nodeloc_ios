@@ -158,6 +158,63 @@ struct DiscourseClient {
         return try Self.shaped(object)
     }
 
+    /// The three columns the topic page's "related" strip can show.
+    enum RelatedTopicsKind: String, CaseIterable, Sendable {
+        /// Same node and tags, most shared tags first.
+        case similar
+        /// Recently active in this topic's own node.
+        case node
+        /// Site-wide: posted in the last seven days, most upvoted.
+        case week
+
+        var title: String {
+            switch self {
+            case .similar: AppString("相关主题")
+            case .node: AppString("本节点最近")
+            case .week: AppString("本周热门")
+            }
+        }
+    }
+
+    /// One column of the topic page's "related" strip. Five at a time; a null
+    /// `nextOffset` means that column is exhausted, and the caller starts over
+    /// at 0 if it wants to cycle.
+    func relatedTopics(
+        topicID: Int,
+        kind: RelatedTopicsKind = .similar,
+        offset: Int = 0
+    ) async throws -> (topics: LatestResponse, nextOffset: Int?) {
+        let result: NLTopicPage = try await get("api/v1/topics/\(topicID)/related", query: [
+            URLQueryItem(name: "kind", value: kind.rawValue),
+            URLQueryItem(name: "offset", value: String(offset)),
+        ])
+        let shaped: LatestResponse = try Self.shaped(
+            DiscourseShape.latest(result.topics, hasMore: false)
+        )
+        return (shaped, result.nextOffset)
+    }
+
+    /// A node's pinned carousel. No paging, and readable signed out.
+    func nodePins(slug: String) async throws -> LatestResponse {
+        let pins: NLNodePins = try await get("api/v1/nodes/\(slug)/pins")
+        return try Self.shaped(DiscourseShape.pinnedCarousel(pins.topics, nodeSlug: slug))
+    }
+
+    /// The home banner carousel. Readable signed out, so a guest gets rows too
+    /// — only the dismissal below needs an account.
+    func homeAnnouncements() async throws -> [NLHomeAnnouncements.Announcement] {
+        let response: NLHomeAnnouncements = try await get("api/v1/announcements/home")
+        return response.announcements
+    }
+
+    /// Dismiss one for good, across this reader's devices. Signed-in only: a
+    /// guest has no account to record it against and would get a 401, so the
+    /// caller keeps a guest's dismissals on the device instead.
+    func dismissAnnouncement(id: Int) async throws {
+        guard auth.isAuthenticated else { return }
+        try await send("PUT", "api/v1/announcements/\(id)/dismissal")
+    }
+
     func nodeTopics(
         path: String,
         categoryID: Int,

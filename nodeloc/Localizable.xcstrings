@@ -5768,12 +5768,6 @@
             "state": "translated",
             "value": "Shuffle"
           }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "换一批"
-          }
         }
       }
     },
@@ -7295,12 +7289,32 @@
         }
       }
     },
+    "本周热门": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trending this week"
+          }
+        }
+      }
+    },
     "本节点": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "This node"
+          }
+        }
+      }
+    },
+    "本节点最近": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent in this node"
           }
         }
       }
@@ -8642,6 +8656,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Target %@"
+          }
+        }
+      }
+    },
+    "相关主题": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Related topics"
           }
         }
       }

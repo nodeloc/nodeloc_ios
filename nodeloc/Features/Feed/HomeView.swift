@@ -13,6 +13,7 @@ struct HomeView: View {
     @Environment(\.usesTopTabBar) private var usesTopTabBar
     let postTransitionNamespace: Namespace.ID
     @State private var feed = FeedStore()
+    @State private var announcements = HomeAnnouncementStore()
     @State private var lastOffset: CGFloat = 0
     @State private var headerHiddenAmount: CGFloat = 0
     /// Content offset when the current drag started, so its direction can be
@@ -50,6 +51,18 @@ struct HomeView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear.frame(height: usesTopTabBar ? 0 : headerHeight)
+
+                    // Above the first row, the way the web's front page has it.
+                    if !showsLoader {
+                        HomeAnnouncementCarousel(
+                            announcements: announcements.visible,
+                            onOpen: { openAnnouncement($0) },
+                            onDismiss: { announcement in
+                                Task { await announcements.dismiss(announcement) }
+                            }
+                        )
+                        .padding(.bottom, announcements.visible.isEmpty ? 0 : 14)
+                    }
 
                     if showsLoader {
                         feedSkeleton
@@ -105,8 +118,12 @@ struct HomeView: View {
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
-            .refreshable { await feed.load() }
+            .refreshable {
+                await feed.load()
+                await announcements.load()
+            }
             .task { await feed.loadIfNeeded() }
+            .task { await announcements.load() }
             // Settings is an overlay over this view, so `task` won't run again
             // when it closes. Reload the moment the choice changes instead.
             .onChange(of: preferences.homeFeed) { _, _ in
@@ -345,6 +362,12 @@ struct HomeView: View {
         withAnimation(.expandCollapse) {
             app.overlay = .post
         }
+    }
+
+    /// A banner points at a topic; the id is all the overlay needs.
+    private func openAnnouncement(_ announcement: NLHomeAnnouncements.Announcement) {
+        guard let topicID = announcement.topicId else { return }
+        app.openTopic(id: topicID)
     }
 
     /// Friendly failure/empty state with a retry, shown when the first load

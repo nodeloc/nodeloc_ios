@@ -942,6 +942,13 @@ final class NodeDetailStore {
     /// rather than at the next fetch, and reading the blocked set here is what
     /// makes SwiftUI redraw the list the moment it changes (guideline 1.2).
     var visiblePosts: [Post] { BlockedUsersStore.shared.visible(posts) }
+    /// The node's pinned carousel — the same set the web's node page shows,
+    /// newest pin first, lapsed and hidden ones already excluded. Separate
+    /// from `posts` because it isn't paged and doesn't follow the sort.
+    var pinnedPosts: [Post] = []
+    var visiblePinnedPosts: [Post] { BlockedUsersStore.shared.visible(pinnedPosts) }
+    /// How many online readers the node reports, for the header.
+    var onlineCount: Int?
     var isLoading = false
     var isLoadingMore = false
     var errorText: String?
@@ -1005,9 +1012,30 @@ final class NodeDetailStore {
             }
         }
 
+        // The carousel is small and unpaged, so it is always refetched — it is
+        // also what changes most often on a busy node.
+        await loadPins()
+
         // Fresh cache: keep what we painted, skip the request entirely.
         if let cached, !cached.isStale { return }
         await loadPage(reset: true)
+    }
+
+    /// The pinned carousel. Readable signed out; a node that can't be seen
+    /// answers 404, in which case the strip simply stays empty.
+    private func loadPins() async {
+        guard !slug.isEmpty else { return }
+        guard let response = try? await client.nodePins(slug: slug) else {
+            pinnedPosts = []
+            return
+        }
+        let usersByID = Dictionary(
+            (response.users ?? []).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        pinnedPosts = response.topicList.topics.map {
+            FeedMapper.post(topic: $0, usersByID: usersByID, client: client, category: selfCategory)
+        }
     }
 
     /// First page per (node, ordering). Keyed by sort because switching the
