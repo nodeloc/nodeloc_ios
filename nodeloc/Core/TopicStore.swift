@@ -155,6 +155,10 @@ final class TopicStore {
     /// or can moderate the node), so the "Accept" action follows it rather than
     /// re-deriving them. The id goes nil once that reply is deleted or hidden,
     /// even while the topic stays solved.
+    /// Set when a manager hid or deleted this topic's first post. Drives the
+    /// panel the design calls 帖子被移除并扣除声望 — the author, the managers and
+    /// everyone else each see the slice the server sent them.
+    private(set) var removal: TopicRemoval?
     private(set) var acceptedAnswerPostID: Int?
     private(set) var acceptedAnswerBy: String?
     private(set) var canAcceptAnswer = false
@@ -267,6 +271,7 @@ final class TopicStore {
             pinnedPostIDs = []
             revealedContent = [:]
             revealingPostIDs = []
+            removal = nil
             acceptedAnswerPostID = nil
             acceptedAnswerBy = nil
             canAcceptAnswer = false
@@ -352,6 +357,7 @@ final class TopicStore {
             canCloseTopic = details?.canCloseTopic ?? details?.canModerate ?? false
             canPinTopic = details?.canPinUnpinTopic ?? false
             canBannerTopic = details?.canBannerTopic ?? false
+            removal = topic.removal
             acceptedAnswerPostID = topic.acceptedAnswer?.postId
             acceptedAnswerBy = topic.acceptedAnswer?.acceptedBy
             canAcceptAnswer = topic.canAcceptAnswer ?? false
@@ -1382,6 +1388,24 @@ final class TopicStore {
             ToastCenter.shared.show(withdrawing ? AppString("已撤销采纳") : AppString("已采纳为最佳答案"))
         } catch {
             ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// Appeals the removal of this topic's first post. The author gets one
+    /// attempt per removal and seven days to take it; the server answers 409
+    /// for a second attempt or a late one, which the toast reports as is.
+    func appealRemoval(text: String) async -> Bool {
+        guard let topicID else { return false }
+        do {
+            _ = try await client.appealRemoval(topicID: topicID, text: text)
+            // Reflect it at once; a reload would also bring the new state, but
+            // the button has to stop inviting a second attempt now.
+            ToastCenter.shared.show(AppString("申诉已提交，管理人员会处理"))
+            await load(topicID: topicID)
+            return true
+        } catch {
+            ToastCenter.shared.showError(error)
+            return false
         }
     }
 

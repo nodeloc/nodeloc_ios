@@ -18,7 +18,7 @@ struct SettingsOverlay: View {
     @State private var openAccountPage: AccountPage?
 
     private enum AccountPage: String, Identifiable {
-        case profile, associatedAccounts, security, pushNotifications, postSource, blockedUsers, deleteAccount
+        case profile, associatedAccounts, security, pushNotifications, postSource, blockedUsers, accountStatus, deleteAccount
         var id: String { rawValue }
     }
 
@@ -56,6 +56,7 @@ struct SettingsOverlay: View {
         case .pushNotifications: PushSettingsPage(onClose: onClose)
         case .postSource: PostSourcePage(onClose: onClose)
         case .blockedUsers: BlockedUsersPage(onClose: onClose)
+        case .accountStatus: AccountStatusPage(onClose: onClose)
         case .deleteAccount: DeleteAccountPage(onClose: onClose)
         }
     }
@@ -95,6 +96,12 @@ struct SettingsOverlay: View {
                             // `BlockedUsersPage`.
                             SettingsNavRow(title: AppString("屏蔽的用户"), icon: "hand.raised") {
                                 withAnimation(.panelSlide) { openAccountPage = .blockedUsers }
+                            }
+                            // Where a silenced or suspended member sees what
+                            // was done and appeals it. The web has no entry
+                            // for an author yet, so this is the only one.
+                            SettingsNavRow(title: AppString("账号状态"), icon: "exclamationmark.shield") {
+                                withAnimation(.panelSlide) { openAccountPage = .accountStatus }
                             }
                             if NodelocFeatures.postSource {
                                 SettingsNavRow(title: AppString("发帖来源"), icon: "iphone.gen3") {

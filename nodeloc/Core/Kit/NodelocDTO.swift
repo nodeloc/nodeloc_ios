@@ -405,6 +405,121 @@ nonisolated struct NLPost: Codable, Sendable {
     var score: Int { (upvotes ?? 0) - (downvotes ?? 0) }
 }
 
+/// `GET /api/v1/me/restrictions` — every penalty currently on this account,
+/// one row each, with whatever appeal has been made against it.
+nonisolated struct NLRestrictions: Codable, Sendable {
+    nonisolated struct Appeal: Codable, Sendable {
+        let id: Int?
+        /// `pending`, `accepted` or `rejected` — an ignored appeal counts as
+        /// rejected.
+        let status: String?
+        /// `wrong` or `will_improve`.
+        let kind: String?
+        let text: String?
+        /// What the handler wrote back.
+        let note: String?
+        let createdAt: String?
+        let resolvedAt: String?
+    }
+    nonisolated struct Node: Codable, Sendable {
+        let slug: String
+        let name: String?
+    }
+    nonisolated struct Restriction: Codable, Sendable, Identifiable {
+        /// `penalty` (site-wide, by a person), `legacy` (carried over from the
+        /// old site), `risk` (the current automatic one) or `node`.
+        let kind: String
+        /// The penalty's own id, which the appeal path needs. Named apart from
+        /// `id` because ids repeat between kinds, so row identity has to be
+        /// the pair — see `id` below.
+        let penaltyID: Int
+        /// `silence`/`suspend` site-wide, `mute`/`ban` in a node, or one of
+        /// risk control's levels.
+        let type: String?
+        let reason: String?
+        let startedAt: String?
+        /// Null means it doesn't lapse on its own.
+        let endsAt: String?
+        /// `staff`, `risk`, `node_owner` or `node_moderator` — never a name.
+        let by: String?
+        /// Only on a node restriction.
+        let node: Node?
+        /// Energy risk control clawed back, on a `reset`.
+        let clawed: Int?
+        let appeal: Appeal?
+        /// The server's own answer to "may this be appealed now"; the only
+        /// thing worth gating the button on.
+        let canAppeal: Bool?
+
+        /// Ids repeat between kinds, so identity has to carry both.
+        var id: String { "\(kind)-\(penaltyID)" }
+
+        /// The payload spells it `id`, so the renamed property needs a key of
+        /// its own. The rest stay as written: `convertFromSnakeCase` has
+        /// already camel-cased the incoming keys by the time these are
+        /// matched, so these raw values are camelCase, not snake_case.
+        enum CodingKeys: String, CodingKey {
+            case kind
+            case penaltyID = "id"
+            case type, reason, by, node, clawed, appeal
+            case startedAt
+            case endsAt
+            case canAppeal
+        }
+    }
+    let restrictions: [Restriction]
+}
+
+nonisolated struct NLAppealEnvelope: Codable, Sendable {
+    let appeal: NLRestrictions.Appeal
+}
+
+/// What `POST /api/v1/appeals` answers for a deleted or hidden post.
+nonisolated struct NLContentAppeal: Codable, Sendable {
+    nonisolated struct Appeal: Codable, Sendable {
+        let itemId: Int?
+        let status: String?
+    }
+    let appeal: Appeal
+}
+
+/// What a moderator did to a topic's first post, and what it cost. Present on
+/// `GET /api/v1/topics/{id}` only when the first post was hidden or deleted by
+/// a manager and there is a record of it.
+///
+/// Three audiences see three slices of the same object, which is why so much
+/// of it is optional: the before/after reputation goes to the author and to
+/// anyone who can manage the node, `canAppeal` only to the author, and
+/// `reviewItemId` only to a manager. Everyone else gets the public part — the
+/// reason, who did it, and the penalty — the way the design has it.
+nonisolated struct NLRemoval: Codable, Sendable {
+    /// `hide`, `post` or `topic`.
+    let kind: String?
+    let reason: String?
+    /// Display name of whoever did it; `byStaff` marks a site-wide manager
+    /// rather than one of the node's.
+    let by: String?
+    let byStaff: Bool?
+    let at: String?
+    /// Reputation actually taken — capped at the author's balance, so it can
+    /// be less than the moderator chose.
+    let reputationPenalty: Int?
+    let refunded: Bool?
+    /// How many times a manager has acted on this author in 90 days, this one
+    /// included.
+    let strikes90d: Int?
+    let appealable: Bool?
+    let appealed: Bool?
+    /// Seven days after the action; past it the appeal endpoint answers 409.
+    let appealDeadline: String?
+    let reputationBefore: Int?
+    let reputationAfter: Int?
+    /// Author only.
+    let canAppeal: Bool?
+    /// Managers only — what `refund-reputation` and undo act on.
+    let reviewItemId: Int?
+}
+
 /// The accepted best answer. `acceptedBy` is `author` or `moderator` (a
 /// moderator may accept on the author's behalf). Null once that reply is
 /// deleted or hidden, even though the topic still counts as solved.
@@ -443,6 +558,8 @@ nonisolated struct NLTopicDetail: Codable, Sendable {
         /// signal to draw "Accept" on someone else's reply.
         let acceptedAnswer: NLAcceptedAnswer?
         let canAccept: Bool?
+        /// Set when a manager hid or deleted the first post.
+        let removal: NLRemoval?
     }
     struct Permissions: Codable, Sendable {
         let reply: Bool?

@@ -1116,6 +1116,16 @@
     "your-node": {},
     "·": {},
     "· %@": {},
+    "· 90 天内第 %lld 次": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "· %lld times in 90 days"
+          }
+        }
+      }
+    },
     "×%lld": {},
     "•": {},
     "一次最多添加 %lld 张图片。": {
@@ -1759,6 +1769,16 @@
         }
       }
     },
+    "你已经申诉过，等待管理人员处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You've appealed; a moderator is reviewing it"
+          }
+        }
+      }
+    },
     "你已达到每人票数上限": {
       "localizations": {
         "en": {
@@ -1796,6 +1816,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "You don't have enough energy (you have %lld)."
+          }
+        }
+      }
+    },
+    "你的账号一切正常": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is in good standing"
           }
         }
       }
@@ -2514,6 +2544,16 @@
         }
       }
     },
+    "判错了": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This was a mistake"
+          }
+        }
+      }
+    },
     "到开奖时间时参与人数低于发起人设置的最少人数，本次抽奖流抽，所有已消耗的能量原路退还给参与者。": {
       "localizations": {
         "en": {
@@ -2772,6 +2812,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "History"
+          }
+        }
+      }
+    },
+    "原因：%@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reason: %@"
           }
         }
       }
@@ -3544,6 +3594,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enable smart lists in the editor"
+          }
+        }
+      }
+    },
+    "在节点 %@ 被封禁": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Banned from %@"
+          }
+        }
+      }
+    },
+    "在节点 %@ 被禁言": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Muted in %@"
           }
         }
       }
@@ -4756,6 +4826,16 @@
         }
       }
     },
+    "已返还 %lld 声望": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld reputation returned"
+          }
+        }
+      }
+    },
     "已选择 %lld/%lld": {
       "localizations": {
         "en": {
@@ -5198,6 +5278,16 @@
         }
       }
     },
+    "待处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pending review"
+          }
+        }
+      }
+    },
     "徽章": {
       "localizations": {
         "en": {
@@ -5445,6 +5535,16 @@
         }
       }
     },
+    "我会改": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I'll do better"
+          }
+        }
+      }
+    },
     "我的票": {
       "localizations": {
         "en": {
@@ -5461,6 +5561,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "I confirm this is illegal content and I take responsibility for this report."
+          }
+        }
+      }
+    },
+    "我要申诉": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal"
           }
         }
       }
@@ -5567,6 +5677,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Couldn't send the tip. Please try again shortly."
+          }
+        }
+      }
+    },
+    "扣除 %lld 声望": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "−%lld reputation"
           }
         }
       }
@@ -7809,6 +7929,16 @@
         }
       }
     },
+    "永久": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permanent"
+          }
+        }
+      }
+    },
     "永久注销": {
       "localizations": {
         "en": {
@@ -8489,6 +8619,16 @@
         }
       }
     },
+    "版主 %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderator %@"
+          }
+        }
+      }
+    },
     "版本": {
       "localizations": {
         "en": {
@@ -8560,6 +8700,106 @@
           "stringUnit": {
             "state": "translated",
             "value": "Created by %@"
+          }
+        }
+      }
+    },
+    "由管理人员处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applied by staff"
+          }
+        }
+      }
+    },
+    "由节点主处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applied by the node's owner"
+          }
+        }
+      }
+    },
+    "由节点版主处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applied by a node moderator"
+          }
+        }
+      }
+    },
+    "由风控系统处置": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applied by risk control"
+          }
+        }
+      }
+    },
+    "申诉": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal"
+          }
+        }
+      }
+    },
+    "申诉处理中": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal under review"
+          }
+        }
+      }
+    },
+    "申诉已提交，管理人员会处理": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal submitted. A moderator will review it."
+          }
+        }
+      }
+    },
+    "申诉截止 %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal closes %@"
+          }
+        }
+      }
+    },
+    "申诉未通过，维持原处罚": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal rejected; the penalty stands"
+          }
+        }
+      }
+    },
+    "申诉通过": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appeal upheld"
           }
         }
       }
@@ -8950,6 +9190,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Giveaways and events on the site"
+          }
+        }
+      }
+    },
+    "站务 %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Staff %@"
           }
         }
       }
@@ -9746,6 +9996,16 @@
         }
       }
     },
+    "至 %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Until %@"
+          }
+        }
+      }
+    },
     "至少需要一个完整的奖项（名称和奖品）。": {
       "localizations": {
         "en": {
@@ -10176,6 +10436,26 @@
         }
       }
     },
+    "说明你认为这次处理不妥的理由。一次处理只能申诉一次，管理人员会复核。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Explain why you think this was wrong. Each action can be appealed once, and a moderator will review it."
+          }
+        }
+      }
+    },
+    "说明你认为这次处罚不妥的理由。一次处罚只能申诉一次，管理人员会复核。": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Explain why you think this penalty was wrong. Each penalty can be appealed once, and a moderator will review it."
+          }
+        }
+      }
+    },
     "请保存这些备份码。每个只能用一次，可在无法使用验证器时登录。": {
       "localizations": {
         "en": {
@@ -10388,6 +10668,16 @@
         }
       }
     },
+    "账号受到限制": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account restricted"
+          }
+        }
+      }
+    },
     "账号和你发布的内容会被永久删除，此操作无法撤销。": {
       "localizations": {
         "en": {
@@ -10408,12 +10698,62 @@
         }
       }
     },
+    "账号已被封禁": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account suspended"
+          }
+        }
+      }
+    },
+    "账号已被禁言": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account silenced"
+          }
+        }
+      }
+    },
     "账号注销申请：@%@": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Account deletion request: @%@"
+          }
+        }
+      }
+    },
+    "账号状态": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account status"
+          }
+        }
+      }
+    },
+    "账号被清零": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account reset"
+          }
+        }
+      }
+    },
+    "账号被限制": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account restricted"
           }
         }
       }
@@ -10754,6 +11094,26 @@
         }
       }
     },
+    "这个主题已被管理人员删除": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A moderator deleted this topic"
+          }
+        }
+      }
+    },
+    "这个主题已被管理人员隐藏": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A moderator hid this topic"
+          }
+        }
+      }
+    },
     "这个地址已经被使用了": {
       "localizations": {
         "en": {
@@ -10782,6 +11142,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "This mini app can"
+          }
+        }
+      }
+    },
+    "这个帖子已被管理人员删除": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A moderator deleted this post"
           }
         }
       }
@@ -11032,6 +11402,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "The connection timed out. Please try again shortly."
+          }
+        }
+      }
+    },
+    "追回 %lld 能量": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld energy clawed back"
           }
         }
       }

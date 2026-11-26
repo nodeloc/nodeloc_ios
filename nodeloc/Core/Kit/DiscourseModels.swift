@@ -1016,6 +1016,37 @@ struct TopicResponse: Decodable {
     /// solved — the same thing the web's card does.
     let acceptedAnswer: AcceptedAnswer?
     let canAcceptAnswer: Bool?
+    /// Set when a manager hid or deleted the first post. Three audiences see
+    /// three slices of it — see `TopicRemoval`.
+    let removal: TopicRemoval?
+}
+
+/// What a manager did to a topic's first post, and what it cost its author.
+///
+/// Most fields are optional because the server sends a different slice to each
+/// audience: the before/after reputation to the author and the node's
+/// managers, `canAppeal` to the author alone, `reviewItemId` to managers
+/// alone. Everyone else gets the public part — reason, who, and the penalty.
+struct TopicRemoval: Decodable {
+    /// `hide`, `post` or `topic`.
+    let kind: String?
+    let reason: String?
+    let by: String?
+    /// A site-wide manager rather than one of this node's.
+    let byStaff: Bool?
+    let at: String?
+    /// What was actually taken, capped at the author's balance.
+    let reputationPenalty: Int?
+    let refunded: Bool?
+    /// Manager actions against this author in 90 days, this one included.
+    let strikes90d: Int?
+    let appealable: Bool?
+    let appealed: Bool?
+    let appealDeadline: String?
+    let reputationBefore: Int?
+    let reputationAfter: Int?
+    let canAppeal: Bool?
+    let reviewItemId: Int?
 }
 
 /// The accepted reply. `acceptedBy` is `author` or `moderator`.

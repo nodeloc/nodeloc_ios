@@ -341,7 +341,32 @@ enum DiscourseShape {
         if let answer = topic.acceptedAnswer {
             object["accepted_answer"] = acceptedAnswer(answer)
         }
+        if let removal = topic.removal {
+            object["removal"] = self.removal(removal)
+        }
         return object
+    }
+
+    /// What a manager did to the first post. Passed through as it arrived —
+    /// the server already decided which of these keys this reader may see.
+    static func removal(_ removal: NLRemoval) -> Object {
+        [
+            "kind": value(removal.kind),
+            "reason": value(removal.reason),
+            "by": value(removal.by),
+            "by_staff": removal.byStaff ?? false,
+            "at": time(removal.at),
+            "reputation_penalty": value(removal.reputationPenalty),
+            "refunded": removal.refunded ?? false,
+            "strikes_90d": value(removal.strikes90d),
+            "appealable": removal.appealable ?? false,
+            "appealed": removal.appealed ?? false,
+            "appeal_deadline": time(removal.appealDeadline),
+            "reputation_before": value(removal.reputationBefore),
+            "reputation_after": value(removal.reputationAfter),
+            "can_appeal": removal.canAppeal ?? false,
+            "review_item_id": value(removal.reviewItemId),
+        ]
     }
 
     /// The best-answer card's fields. Shared by the topic and `/thread`, which

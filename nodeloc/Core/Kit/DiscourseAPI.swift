@@ -207,6 +207,56 @@ struct DiscourseClient {
         return (shaped, result.nextOffset)
     }
 
+    // MARK: Account status and appeals
+
+    /// Every penalty currently on this account. Empty for an account in good
+    /// standing, which is the common case.
+    func myRestrictions() async throws -> [NLRestrictions.Restriction] {
+        let response: NLRestrictions = try await get("api/v1/me/restrictions")
+        return response.restrictions
+    }
+
+    /// Why an appeal is being made. `wrong` is the default.
+    enum AppealReason: String, CaseIterable, Sendable {
+        case wrong
+        case willImprove = "will_improve"
+
+        var title: String {
+            switch self {
+            case .wrong: AppString("判错了")
+            case .willImprove: AppString("我会改")
+            }
+        }
+    }
+
+    /// Appeal one penalty. One appeal per penalty ever — a second attempt is
+    /// 409 whether or not the first was decided — and five a day per account.
+    @discardableResult
+    func appealRestriction(
+        kind: String,
+        id: Int,
+        reason: AppealReason = .wrong,
+        text: String
+    ) async throws -> NLRestrictions.Appeal {
+        let response: NLAppealEnvelope = try await sendDecoding(
+            "POST", "api/v1/me/restrictions/\(kind)/\(id)/appeal",
+            json: ["reason": reason.rawValue, "text": text]
+        )
+        return response.appeal
+    }
+
+    /// Appeal a deleted or hidden post — or, when the whole topic went, the
+    /// topic. Only its author may, only once per removal, and only inside the
+    /// seven-day window (409 `appeal_expired` after that).
+    @discardableResult
+    func appealRemoval(postID: Int? = nil, topicID: Int? = nil, text: String) async throws -> NLContentAppeal.Appeal {
+        var body: [String: Any] = ["text": text]
+        if let postID { body["post_id"] = postID }
+        if let topicID { body["topic_id"] = topicID }
+        let response: NLContentAppeal = try await sendDecoding("POST", "api/v1/appeals", json: body)
+        return response.appeal
+    }
+
     /// One node's detail. Worth asking for even when the catalogue already has
     /// the node: for a signed-in reader this request is what records them as
     /// having looked at it, so app-only readers show up in `onlineCount`.

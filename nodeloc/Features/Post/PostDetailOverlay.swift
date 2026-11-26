@@ -66,6 +66,7 @@ struct PostDetailOverlay: View {
     @State private var replyTargetNumber: Int?
     /// A reply the ellipsis (…) sheet is open for.
     @State private var moreSheetComment: PostComment?
+    @State private var showsAppealSheet = false
     /// Which post the editor is open on, and whether it's the OP (whose body
     /// is the topic's first post rather than a reply).
     @State private var editTarget: EditTarget?
@@ -238,6 +239,15 @@ struct PostDetailOverlay: View {
         // 举报 — native, not a trip to the website.
         .sheet(item: $flagTarget) { target in
             FlagSheet(target: target)
+        }
+        // The author contesting a removal. One attempt, seven days.
+        .sheet(isPresented: $showsAppealSheet) {
+            AppealSheet(
+                title: AppString("申诉"),
+                note: AppString("说明你认为这次处理不妥的理由。一次处理只能申诉一次，管理人员会复核。")
+            ) { text in
+                await topic.appealRemoval(text: text)
+            }
         }
         // 注册/登录 bottom gate for guests.
         .sheet(isPresented: $showGuestGate) {
@@ -744,6 +754,13 @@ struct PostDetailOverlay: View {
                     .padding(.bottom, 14)
                     // The title standing in for the first post being on screen.
                     .onScrollVisibilityChange(threshold: 0.2) { reader.setVisible(1, $0) }
+
+                // Above the body: what a manager did to this topic, and the
+                // author's one chance to contest it.
+                if let removal = topic.removal {
+                    RemovalPanel(removal: removal) { showsAppealSheet = true }
+                        .padding(.bottom, 14)
+                }
 
                 if let envelope = topic.redEnvelope {
                     RedEnvelopeBanner(envelope: envelope)
