@@ -32,14 +32,6 @@ struct SidebarFeedSummary: Identifiable {
     let nodeCount: Int?
 }
 
-/// A tag found by search.
-struct SearchTagResult: Identifiable, Hashable {
-    let name: String
-    let label: String
-    let topicCount: Int
-    var id: String { name }
-}
-
 struct SidebarNodeSummary: Identifiable, Codable {
     let id: Int
     let name: String

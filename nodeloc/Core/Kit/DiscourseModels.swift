@@ -2287,3 +2287,11 @@ struct ChatChannelsResponse: Decodable {
         return structuredChannels.isEmpty ? (channels ?? []) : structuredChannels
     }
 }
+
+/// A tag found by search (`DiscourseClient.searchTags`).
+struct SearchTagResult: Identifiable, Hashable {
+    let name: String
+    let label: String
+    let topicCount: Int
+    var id: String { name }
+}

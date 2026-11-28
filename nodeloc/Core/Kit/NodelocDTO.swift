@@ -2033,3 +2033,13 @@ nonisolated enum ServerFieldErrors {
         return envelope.error?.fields ?? [:]
     }
 }
+
+/// The server's captcha answers, by code (accounts.md 报错).
+nonisolated enum CaptchaFailure {
+    static func isCaptcha(_ error: Error) -> Bool {
+        guard let code = (error as? DiscourseError)?.serverCode else {
+            return ServerFieldErrors.last()["captcha"] != nil
+        }
+        return ["captcha_required", "captcha_invalid"].contains(code)
+    }
+}

@@ -22,6 +22,14 @@ nonisolated enum AppLanguage: String, Sendable {
     static var accountChoice: String?
 }
 
+/// The server language chosen in settings (`AppLocale.swift`); the package
+/// always follows `AppLanguage.resolved`.
+nonisolated struct ServerLanguage: Sendable {
+    let code: String
+    var acceptLanguage: String { code }
+    static var choice: ServerLanguage? { nil }
+}
+
 /// `CurrentUser.userOption`; the adapter never fills it.
 struct UserPreferences: Decodable {}
 
@@ -45,6 +53,7 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
     case top = 3
     case rising = 4
     case fresh = 5
+    case following = 6
     var id: Int { rawValue }
 }
 
@@ -81,6 +90,7 @@ nonisolated struct LotteryDraft: Sendable, Equatable {
     var minParticipants = 5
     var maxParticipants = ""
     var maxTicketsPerUser = 10
+    var minTicketsPerUser = 1
     var minTrustLevel = 1
     var drawAt: Date?
     var levels: [LotteryLevel] = [LotteryLevel()]
