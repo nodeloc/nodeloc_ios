@@ -166,11 +166,6 @@ struct HomeView: View {
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
-            // The sort tabs stay put under the bar while the list scrolls.
-            // A bar, not a plain inset: on iOS 26 the navigation bar's soft
-            // scroll-edge effect is drawn over the scroll view's top inset, and
-            // it blurred the tab labels. `safeAreaBar` makes the strip part of
-            // the bar area, so the effect sits under it instead.
             .refreshable {
                 await feed.load()
                 await announcements.load()
@@ -519,6 +514,10 @@ struct HomeFeedTabs: View {
         }
         .scrollIndicators(.hidden)
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        // The strip's row is a scroll view right under the navigation bar,
+        // so iOS 26 gave it the bar's soft top edge effect, which blurred its
+        // own labels. Nothing scrolls under the bar here: no edge effect.
+        .topScrollEdgeHidden(true)
         // The bar's copy is narrower than the row: keep the current tab in view.
         .onAppear { if inBar { proxy.scrollTo(selection, anchor: .center) } }
         .onChange(of: selection) { _, tab in

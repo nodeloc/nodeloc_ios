@@ -224,6 +224,16 @@ extension View {
             self
         }
     }
+
+    /// Hides the top scroll-edge effect (iOS 26) while `hidden` is true.
+    @ViewBuilder
+    func topScrollEdgeHidden(_ hidden: Bool) -> some View {
+        if #available(iOS 26.0, *) {
+            scrollEdgeEffectHidden(hidden, for: .top)
+        } else {
+            self
+        }
+    }
 }
 
 
