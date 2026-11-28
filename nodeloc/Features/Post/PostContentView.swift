@@ -28,13 +28,24 @@ final class EmojiImageStore {
     /// two dictionaries that only ever grew. NSCache bounds them and drops them
     /// under pressure; a re-decode is cheap at this size.
     private let images = NSCache<NSString, UIImage>()
-    private var loading: Set<String> = []
+    /// Bookkeeping only. Ignored by observation: `loadIfNeeded` runs from
+    /// inside view bodies, and mutating tracked state there invalidates the
+    /// very view being rendered.
+    @ObservationIgnored private var loading: Set<String> = []
+    /// Point sizes asked for while a url was loading, so its scaled copies can
+    /// be drawn off the main thread before the view asks again.
+    @ObservationIgnored private var requestedSides: [String: Set<Int>] = [:]
+    @ObservationIgnored private var bumpScheduled = false
     /// Scaled copies keyed by url + point size. `Text(Image(...))` renders an
     /// image at its intrinsic size and ignores `.resizable()`, so the UIImage
     /// itself has to be redrawn at the text's size.
     private let scaled = NSCache<NSString, UIImage>()
     /// See `VideoPosterStore.generation`: NSCache mutations are invisible to
     /// `@Observable`, and a loaded emoji must replace its `:shortcode:`.
+    ///
+    /// Every emoji paragraph reads this, so each bump re-renders all of them.
+    /// Bumps are batched (`scheduleBump`): a topic with forty emoji used to
+    /// re-render every paragraph forty times as they trickled in.
     private var generation = 0
 
     private init() {
@@ -70,33 +81,53 @@ final class EmojiImageStore {
         //
         // Round so a handful of body sizes don't spawn a cache entry each.
         let side = pointSize.rounded()
-        let key = "\(urlString)@\(Int(side))" as NSString
+        let key = Self.scaledKey(urlString, Int(side))
         if let cached = scaled.object(forKey: key) { return cached }
         guard let original = images.object(forKey: urlString as NSString) else { return nil }
 
-        let resized = Self.resize(original, to: side)
+        // Normally pre-scaled off the main thread by `loadIfNeeded`; this is
+        // the fallback for a size first asked for after the load.
+        let resized = Self.resize(original, to: side, scale: 0)
         scaled.setObject(resized, forKey: key, cost: Self.cost(resized))
         return resized
     }
 
-    private func store(_ image: UIImage, for urlString: String) {
-        images.setObject(image, forKey: urlString as NSString, cost: Self.cost(image))
-        generation &+= 1
+    private static func scaledKey(_ urlString: String, _ side: Int) -> NSString {
+        "\(urlString)@\(side)" as NSString
     }
 
-    private static func cost(_ image: UIImage) -> Int {
+    private func store(_ image: UIImage, for urlString: String) {
+        images.setObject(image, forKey: urlString as NSString, cost: Self.cost(image))
+        scheduleBump()
+    }
+
+    /// One `generation` bump per short window rather than one per emoji.
+    private func scheduleBump() {
+        guard !bumpScheduled else { return }
+        bumpScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.bumpScheduled = false
+                self.generation &+= 1
+            }
+        }
+    }
+
+    private nonisolated static func cost(_ image: UIImage) -> Int {
         max(Int(image.size.width * image.scale * image.size.height * image.scale * 4), 1)
     }
 
     /// Aspect-fits into a square box; custom emoji aren't always square.
-    private static func resize(_ image: UIImage, to side: CGFloat) -> UIImage {
+    /// `scale` 0 matches the screen so Retina emoji stay sharp.
+    private nonisolated static func resize(_ image: UIImage, to side: CGFloat, scale: CGFloat) -> UIImage {
         let size = image.size
         guard size.width > 0, size.height > 0 else { return image }
-        let scale = min(side / size.width, side / size.height)
-        let target = CGSize(width: size.width * scale, height: size.height * scale)
+        let factor = min(side / size.width, side / size.height)
+        let target = CGSize(width: size.width * factor, height: size.height * factor)
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 0 // Match the screen so Retina emoji stay sharp.
+        format.scale = scale
         format.opaque = false
         return UIGraphicsImageRenderer(size: target, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: target))
@@ -105,27 +136,45 @@ final class EmojiImageStore {
 
     /// Kicks off a load if needed. Returns immediately; the `@Observable`
     /// mutation re-renders whatever `Text` was showing the fallback shortcode.
-    func loadIfNeeded(_ urlString: String) {
-        guard images.object(forKey: urlString as NSString) == nil,
-              !loading.contains(urlString) else { return }
+    ///
+    /// Pass the text's `pointSize` so the scaled copy is drawn off the main
+    /// thread along with the load.
+    func loadIfNeeded(_ urlString: String, pointSize: CGFloat? = nil) {
+        guard images.object(forKey: urlString as NSString) == nil else { return }
+        if let pointSize {
+            requestedSides[urlString, default: []].insert(Int(pointSize.rounded()))
+        }
+        guard !loading.contains(urlString) else { return }
         guard let url = resolvedURL(urlString) else { return }
 
         loading.insert(urlString)
         // Emoji are drawn at text size and get redrawn again in `resize`, so
         // there is no reason to inflate Discourse's 72pt+ source art.
         let maxPixel = Self.sourceMaxPixel
+        let screenScale = UITraitCollection.current.displayScale
+        let displayScale = screenScale > 0 ? screenScale : 3
         Task { [weak self] in
-            if let cached = RemoteImageMemoryCache.shared.image(for: url, atLeast: maxPixel) {
-                self?.store(cached, for: urlString)
-                self?.loading.remove(urlString)
-                return
+            var loaded = RemoteImageMemoryCache.shared.image(for: url, atLeast: maxPixel)
+            if loaded == nil {
+                loaded = await RemoteImageDiskCache.shared.image(for: url, maxPixel: maxPixel)
+                if let loaded {
+                    RemoteImageMemoryCache.shared.insert(loaded, for: url, maxPixel: maxPixel)
+                }
             }
-            let loaded = await RemoteImageDiskCache.shared.image(for: url, maxPixel: maxPixel)
+            guard let self else { return }
+            let sides = self.requestedSides.removeValue(forKey: urlString) ?? []
             if let loaded {
-                RemoteImageMemoryCache.shared.insert(loaded, for: url, maxPixel: maxPixel)
-                self?.store(loaded, for: urlString)
+                let copies = await Task.detached(priority: .userInitiated) {
+                    sides.map { side in
+                        (side, Self.resize(loaded, to: CGFloat(side), scale: displayScale))
+                    }
+                }.value
+                for (side, copy) in copies {
+                    self.scaled.setObject(copy, forKey: Self.scaledKey(urlString, side), cost: Self.cost(copy))
+                }
+                self.store(loaded, for: urlString)
             }
-            self?.loading.remove(urlString)
+            self.loading.remove(urlString)
         }
     }
 
@@ -197,9 +246,9 @@ enum PostInlineRenderer {
                     return Text("\(accumulated)\(glyph)")
                 }
                 // Not loaded yet: show the shortcode so the sentence still reads.
-                emoji.loadIfNeeded(url)
+                emoji.loadIfNeeded(url, pointSize: metrics.bodySize)
                 var fallback = AttributedString(shortcode)
-                fallback.foregroundColor = Theme.muted(0.5)
+                fallback.foregroundColor = Theme.textMuted
                 return Text("\(accumulated)\(Text(fallback))")
             }
         }
@@ -316,7 +365,10 @@ struct PostContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(content.blocks) { block in
+            // Keyed by position, not `PostBlock.id`: a body never reorders, and
+            // that id is built from the block's text on every diff — and isn't
+            // unique (two paragraphs that start alike collide).
+            ForEach(Array(content.blocks.enumerated()), id: \.offset) { _, block in
                 PostBlockView(
                     block: block,
                     metrics: metrics,
@@ -338,6 +390,47 @@ struct PostContentView: View {
         // Final backstop: user content can always surprise us, and one wide
         // block shouldn't be able to shift the whole screen sideways.
         .clampedToWidth()
+    }
+}
+
+/// The same blocks as `PostContentView`, emitted as separate views rather
+/// than inside one `VStack`.
+///
+/// For a long post inside the reader's `LazyVStack`: wrapped in a stack, the
+/// whole body was a single lazy row, so opening a long topic laid out and drew
+/// every paragraph, code block and image at once, and that one huge row was
+/// re-measured as it scrolled. As separate rows the lazy stack only builds and
+/// draws the blocks near the screen.
+struct PostContentRows: View {
+    let content: PostContent
+    var metrics: PostTextMetrics = .body
+    var onImageTap: ((PostImage) -> Void)?
+    var pollProvider: ((String) -> AnyView?)?
+    var onBackgroundTap: (() -> Void)?
+    /// The gap `PostContentView` puts between blocks.
+    var spacing: CGFloat = 14
+
+    var body: some View {
+        let videos = content.videos
+        let last = content.blocks.count - 1
+        ForEach(Array(content.blocks.enumerated()), id: \.offset) { index, block in
+            PostBlockView(
+                block: block,
+                metrics: metrics,
+                onImageTap: onImageTap,
+                pollProvider: pollProvider,
+                onBackgroundTap: onBackgroundTap
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                TapGesture().onEnded { onBackgroundTap?() },
+                isEnabled: onBackgroundTap != nil && !block.containsReference
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, index == last ? 0 : spacing)
+            .environment(\.postVideoSiblings, videos)
+            .clampedToWidth()
+        }
     }
 }
 
@@ -369,6 +462,13 @@ private struct MediaAutoplayKey: EnvironmentKey {
     static let defaultValue = true
 }
 
+/// Whether a post body's text takes long-press range selection (handles and
+/// the system Copy / Look Up / Translate / Share menu). On for the reader's
+/// first post; replies leave it off.
+private struct PostTextSelectableKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 /// Actions the full-screen chrome invokes that the player can't perform itself.
 struct PostVideoActions {
     /// Sends the like to the server; the local toggle is handled centrally.
@@ -396,6 +496,11 @@ extension EnvironmentValues {
         get { self[MediaAutoplayKey.self] }
         set { self[MediaAutoplayKey.self] = newValue }
     }
+
+    var postTextSelectable: Bool {
+        get { self[PostTextSelectableKey.self] }
+        set { self[PostTextSelectableKey.self] = newValue }
+    }
 }
 
 struct PostBlockView: View {
@@ -412,6 +517,7 @@ struct PostBlockView: View {
     /// full-screen cover opens its sheet *there* rather than behind the cover.
     @Environment(\.openPostReference) private var openPostReference
     @Environment(\.openURL) private var openURL
+    @Environment(\.postTextSelectable) private var selectable
 
     var body: some View {
         switch block {
@@ -419,12 +525,18 @@ struct PostBlockView: View {
             inlineText(inlines)
 
         case .heading(let level, let inlines):
-            PostInlineRenderer.text(for: inlines, metrics: metrics, emoji: emoji)
+            let heading = PostInlineRenderer.text(for: inlines, metrics: metrics, emoji: emoji)
                 .font(Theme.heading(headingSize(level), weight: .semibold))
                 .foregroundStyle(Theme.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 2)
+            // A heading is short: the system's copy of the whole line.
+            if selectable {
+                heading.textSelection(.enabled)
+            } else {
+                heading
+            }
 
         case .image(let image):
             PostImageView(image: image) { onImageTap?(image) }
@@ -444,8 +556,8 @@ struct PostBlockView: View {
         case .blockquote(let blocks):
             PostBlockquoteView(blocks: blocks, metrics: metrics, onImageTap: onImageTap)
 
-        case .list(let ordered, let items):
-            PostListView(ordered: ordered, items: items, metrics: metrics, onImageTap: onImageTap)
+        case .list(let ordered, let items, let start):
+            PostListView(ordered: ordered, items: items, start: start, metrics: metrics, onImageTap: onImageTap)
 
         case .table(let headers, let rows):
             PostTableView(headers: headers, rows: rows, metrics: metrics)
@@ -478,7 +590,7 @@ struct PostBlockView: View {
 
     @ViewBuilder
     private func inlineText(_ inlines: [PostInline]) -> some View {
-        if inlines.containsReference {
+        if selectable || inlines.containsReference {
             // Badges are text attachments, which a SwiftUI `Text` can't hold —
             // see `PostReferenceTextView` for why this one paragraph shape gets
             // a UIKit renderer.
@@ -489,7 +601,11 @@ struct PostBlockView: View {
                 onTapLink: { openURL($0) },
                 // The paragraph owns every tap inside itself, so it has to
                 // pass the uninteresting ones back out.
-                onTapBackground: { onBackgroundTap?() }
+                onTapBackground: { onBackgroundTap?() },
+                // Selectable text goes through TextKit too: a SwiftUI `Text`
+                // only offers copying the whole paragraph, a `UITextView`
+                // gives a real range with handles.
+                selectable: selectable
             )
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
@@ -566,7 +682,7 @@ struct PostImageView: View {
                     Theme.hover.overlay {
                         Image(systemName: "photo")
                             .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.4))
+                            .foregroundStyle(Theme.textFaint)
                     }
                 }
             }
@@ -592,10 +708,13 @@ struct PostImageView: View {
 // MARK: - Animated GIF
 
 /// Displays an animated GIF (a `UIImageView` auto-animates a multi-frame
-/// `UIImage`). Frames are downsampled and cached off the main actor.
+/// `UIImage`). Frames are downsampled to the drawn size and cached off the
+/// main actor.
 private struct AnimatedGIFView: View {
     let url: URL
     @State private var image: UIImage?
+    @State private var measured: CGFloat = 0
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         ZStack {
@@ -605,11 +724,38 @@ private struct AnimatedGIFView: View {
                 Theme.hover.overlay {
                     Image(systemName: "photo")
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.4))
+                        .foregroundStyle(Theme.textFaint)
                 }
             }
         }
-        .task(id: url) { image = await AnimatedGIFStore.shared.load(url) }
+        // Measured so the frames are decoded at the size they're drawn — a
+        // sticker shouldn't pay for 900px frames.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            max(proxy.size.width, proxy.size.height)
+        } action: { side in
+            // Only grow, and only meaningfully, so settling layout doesn't
+            // trigger a second decode of every frame.
+            guard side > 0, side > measured * 1.25 else { return }
+            measured = side
+        }
+        .task(id: TaskKey(url: url, maxPixel: maxPixel)) {
+            // Wait for the measurement; the geometry change re-runs this.
+            guard let maxPixel else { return }
+            let loaded = await AnimatedGIFStore.shared.load(url, maxPixel: maxPixel)
+            if let loaded { image = loaded }
+        }
+        // A different GIF must not keep showing the previous one's frames.
+        .onChange(of: url) { image = nil }
+    }
+
+    private struct TaskKey: Equatable {
+        let url: URL
+        let maxPixel: Int?
+    }
+
+    private var maxPixel: Int? {
+        guard measured > 0 else { return nil }
+        return AnimatedGIFStore.bucket(measured * displayScale)
     }
 }
 
@@ -628,8 +774,14 @@ private struct GIFImageView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UIImageView, context: Context) {
-        view.image = image
-        view.startAnimating()
+        // SwiftUI calls this for any change around the view. Reassigning the
+        // image restarts the animation from frame 0 and re-uploads it.
+        if view.image !== image {
+            view.image = image
+            view.startAnimating()
+        } else if !view.isAnimating {
+            view.startAnimating()
+        }
     }
 }
 
@@ -639,48 +791,127 @@ final class AnimatedGIFStore {
     private let cache = NSCache<NSString, UIImage>()
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
 
-    private init() { cache.countLimit = 24 }
+    /// A decoded GIF is frames × width × height × 4 bytes, so a handful of
+    /// them used to be able to take hundreds of MB with only a count limit.
+    private static let totalCostLimit = 40 * 1024 * 1024
+    /// Anything bigger than this isn't cached; the view showing it holds it.
+    private static let maxEntryCost = 15 * 1024 * 1024
+    /// Upper bound on one GIF's decoded frames. Over it, frames are decoded
+    /// smaller (never below `minPixel`) rather than all at full size.
+    private nonisolated static let decodeBudget = 24 * 1024 * 1024
+    private nonisolated static let maxPixelCap = 900
+    private nonisolated static let minPixel = 160
+    /// Long GIFs keep every n-th frame past this, with the skipped frames'
+    /// delays folded in, so the timing is unchanged.
+    private nonisolated static let maxFrames = 150
 
-    func load(_ url: URL) async -> UIImage? {
-        let key = url.absoluteString
+    private init() {
+        cache.countLimit = 24
+        cache.totalCostLimit = Self.totalCostLimit
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.cache.removeAllObjects() }
+        }
+    }
+
+    /// Rounds a pixel size up to a coarse step, capped, so nearby widths share
+    /// one decode.
+    nonisolated static func bucket(_ pixels: CGFloat) -> Int {
+        let step = 64
+        let rounded = (Int(pixels.rounded(.up)) + step - 1) / step * step
+        return min(max(rounded, step), maxPixelCap)
+    }
+
+    func load(_ url: URL, maxPixel: Int) async -> UIImage? {
+        let key = "\(url.absoluteString)@\(maxPixel)"
         if let cached = cache.object(forKey: key as NSString) { return cached }
         if let existing = inFlight[key] { return await existing.value }
 
         let task = Task<UIImage?, Never> {
-            guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
-            return await Task.detached { Self.animatedImage(from: data, maxPixel: 900) }.value
+            // Through the disk cache, so a GIF isn't downloaded again on every
+            // visit (or for every size it's shown at).
+            guard let data = await RemoteImageDiskCache.shared.data(for: url) else { return nil }
+            return await Task.detached(priority: .userInitiated) {
+                Self.animatedImage(from: data, maxPixel: CGFloat(maxPixel))
+            }.value
         }
         inFlight[key] = task
         let image = await task.value
         inFlight[key] = nil
-        if let image { cache.setObject(image, forKey: key as NSString) }
+        if let image {
+            let cost = Self.cost(image)
+            if cost <= Self.maxEntryCost {
+                cache.setObject(image, forKey: key as NSString, cost: cost)
+            }
+        }
         return image
+    }
+
+    private static func cost(_ image: UIImage) -> Int {
+        let frames = max(image.images?.count ?? 1, 1)
+        let scale = image.scale
+        let bytes = image.size.width * scale * image.size.height * scale * 4
+        return max(Int(bytes) * frames, 1)
     }
 
     /// Builds an animated `UIImage` from GIF data, downsampling each frame.
     nonisolated static func animatedImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-            return UIImage(data: data)
+            return prepared(UIImage(data: data))
         }
         let count = CGImageSourceGetCount(source)
-        guard count > 1 else { return UIImage(data: data) }
+        guard count > 1 else { return prepared(UIImage(data: data)) }
+
+        let stride = max(1, Int((Double(count) / Double(maxFrames)).rounded(.up)))
+        let frameCount = (count + stride - 1) / stride
+        let pixel = budgetedPixel(source, requested: maxPixel, frames: frameCount)
 
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceThumbnailMaxPixelSize: pixel,
         ]
 
         var frames: [UIImage] = []
+        frames.reserveCapacity(frameCount)
         var duration: Double = 0
-        for index in 0..<count {
+        for index in Swift.stride(from: 0, to: count, by: stride) {
+            // Every source frame's delay counts, kept or not.
+            for skipped in index..<min(index + stride, count) {
+                duration += frameDelay(source, skipped)
+            }
             guard let cg = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else { continue }
             frames.append(UIImage(cgImage: cg))
-            duration += frameDelay(source, index)
         }
-        guard !frames.isEmpty else { return UIImage(data: data) }
+        guard !frames.isEmpty else { return prepared(UIImage(data: data)) }
         return UIImage.animatedImage(with: frames, duration: duration)
+    }
+
+    private nonisolated static func prepared(_ image: UIImage?) -> UIImage? {
+        guard let image else { return nil }
+        return image.preparingForDisplay() ?? image
+    }
+
+    /// The requested edge, shrunk if all frames at that size would blow the
+    /// per-GIF budget.
+    private nonisolated static func budgetedPixel(_ source: CGImageSource, requested: CGFloat, frames: Int) -> CGFloat {
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = CGFloat((properties?[kCGImagePropertyPixelWidth] as? Int) ?? 0)
+        let height = CGFloat((properties?[kCGImagePropertyPixelHeight] as? Int) ?? 0)
+        let longest = max(width, height)
+        guard longest > 0 else { return requested }
+        // Thumbnails never upscale, so the drawn edge is the smaller of the two.
+        let edge = min(requested, longest)
+        let aspect = min(width, height) / longest
+        let bytes = edge * edge * aspect * 4 * CGFloat(frames)
+        guard bytes > CGFloat(decodeBudget) else { return requested }
+        let fitted = (CGFloat(decodeBudget) / (aspect * 4 * CGFloat(frames))).squareRoot()
+        return max(fitted.rounded(.down), min(CGFloat(minPixel), edge))
     }
 
     private nonisolated static func frameDelay(_ source: CGImageSource, _ index: Int) -> Double {
@@ -868,7 +1099,7 @@ struct PostVideoView: View {
     @Environment(\.mediaAutoplayEnabled) private var autoplayEnabled
     @Environment(\.scenePhase) private var scenePhase
 
-    private let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+    private let shape = RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
 
     /// Used only until the clip's real dimensions are known.
     static let defaultAspect: CGFloat = 16.0 / 9.0
@@ -1304,6 +1535,11 @@ struct FeedVideoTile: View {
     let url: URL
     /// Discourse's topic thumbnail, shown until the first frame decodes.
     var posterURL: URL?
+    /// Length in seconds and width ÷ height, when the list already knows them
+    /// (`card_media`): the badge shows at once and the card keeps its shape
+    /// from the first frame instead of resizing when the video decodes.
+    var duration: Double? = nil
+    var knownAspect: CGFloat? = nil
     /// When set, tapping plays full screen instead of falling through to the
     /// card. Unset means the card handles the tap and opens the post.
     var onTap: (() -> Void)?
@@ -1333,12 +1569,12 @@ struct FeedVideoTile: View {
     @Environment(\.mediaAutoplayEnabled) private var autoplayEnabled
     @Environment(\.scenePhase) private var scenePhase
 
-    private let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+    private let shape = RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
 
     /// Width ÷ height, from the decoded first frame. Matches the feed's image
     /// clamps so a video card and a photo card of the same shape agree.
     private var aspect: CGFloat {
-        guard let known = posters.aspect(for: url.absoluteString) else {
+        guard let known = knownAspect ?? posters.aspect(for: url.absoluteString) else {
             return 1 / Theme.FeedMedia.defaultAspect
         }
         return min(max(known, 1 / Theme.FeedMedia.maxAspect), 1 / Theme.FeedMedia.minAspect)
@@ -1354,6 +1590,18 @@ struct FeedVideoTile: View {
             .overlay { if showsLoading { VideoLoadingIndicator() } }
             .overlay(alignment: .bottomTrailing) {
                 if !isUnplayable { muteButton }
+            }
+            .overlay(alignment: .bottomLeading) { durationBadge }
+            .overlay {
+                // Low Data Mode doesn't autoplay: a play mark says it's a video.
+                if NetworkReachability.shared.isConstrained, player?.timeControlStatus != .playing, !isUnplayable {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 48, height: 48)
+                        .background(.black.opacity(0.5), in: Circle())
+                        .allowsHitTesting(false)
+                }
             }
             // Only one card can be centred, so a stricter threshold than the
             // post detail's: this decides which of several cards has focus.
@@ -1411,6 +1659,21 @@ struct FeedVideoTile: View {
             }
         } else {
             Theme.neutral300
+        }
+    }
+
+    @ViewBuilder
+    private var durationBadge: some View {
+        if let duration, duration > 0 {
+            let total = Int(duration.rounded())
+            FeedMediaBadge(
+                systemImage: "play.fill",
+                text: total >= 3600
+                    ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+                    : String(format: "%d:%02d", total / 60, total % 60)
+            )
+            .padding(10)
+            .allowsHitTesting(false)
         }
     }
 
@@ -1472,7 +1735,10 @@ struct FeedVideoTile: View {
 
     private func updatePlayback() {
         guard let player, !isUnplayable else { return }
+        // Muted autoplay, except in Low Data Mode, where the reader asked
+        // apps not to spend data on their own (a tap still plays it full screen).
         let shouldPlay = isVisible
+            && !NetworkReachability.shared.isConstrained
             && autoplayEnabled
             && !mute.isFullScreenActive
             && scenePhase == .active
@@ -1741,7 +2007,7 @@ struct PostVideoPager: View {
         guard let item = currentRecommendation else { return onComment }
         return {
             onClose()
-            app.openTopic(id: item.post.id)
+            app.openTopicPage(id: item.post.id)
         }
     }
 
@@ -2707,13 +2973,14 @@ private struct ZoomableImage: View {
 struct PostCodeBlockView: View {
     let language: String?
     let code: String
+    @Environment(\.postTextSelectable) private var selectable
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
                 Text(language)
                     .font(Theme.body(10, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.5))
+                    .foregroundStyle(Theme.textMuted)
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
             }
@@ -2721,19 +2988,24 @@ struct PostCodeBlockView: View {
             // The ScrollView must be clamped, or its content's intrinsic width
             // leaks out and widens the post instead of scrolling.
             ScrollView(.horizontal) {
-                Text(code)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(Theme.text.opacity(0.9))
-                    .textSelection(.enabled)
-                    .padding(12)
+                if selectable {
+                    SelectableCodeText(code: code)
+                        .padding(12)
+                } else {
+                    Text(code)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(Theme.text.opacity(0.9))
+                        .textSelection(.enabled)
+                        .padding(12)
+                }
             }
             .scrollIndicators(.hidden)
             .clampedToWidth()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
     }
@@ -2767,7 +3039,7 @@ struct PostQuoteView: View {
                     if let title = quote.topicTitle {
                         Text(title)
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.5))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
                 }
@@ -2814,6 +3086,8 @@ struct PostBlockquoteView: View {
 struct PostListView: View {
     let ordered: Bool
     let items: [[PostBlock]]
+    /// The number the first item shows — `<ol start>`.
+    var start: Int = 1
     let metrics: PostTextMetrics
     var onImageTap: ((PostImage) -> Void)?
 
@@ -2821,9 +3095,9 @@ struct PostListView: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(ordered ? "\(index + 1)." : "•")
+                    Text(ordered ? "\(start + index)." : "•")
                         .font(Theme.body(metrics.bodySize, weight: ordered ? .medium : .bold))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .frame(minWidth: ordered ? 18 : 10, alignment: .trailing)
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -2868,9 +3142,9 @@ struct PostTableView: View {
         .scrollIndicators(.hidden)
         // Without this the table scrolls *and* widens the post.
         .clampedToWidth()
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
     }
@@ -2926,9 +3200,9 @@ struct PostDetailsView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
     }
@@ -2954,16 +3228,16 @@ struct PostSpoilerView: View {
         // Blur stays constant and the *overlay* fades. Animating blur radius
         // itself flickers on iOS (the reveal snaps back mid-animation).
         .blur(radius: isRevealed ? 0 : 11)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                 .fill(Theme.hover)
                 .opacity(isRevealed ? 0 : 0.92)
                 .overlay {
                     if !isRevealed {
                         Label("点击查看", systemImage: "eye.slash")
                             .font(Theme.body(12, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.65))
+                            .foregroundStyle(Theme.textMuted)
                     }
                 }
         }
@@ -2990,7 +3264,7 @@ struct PostOneboxView: View {
                     Theme.hover
                 }
                 .frame(width: 64, height: 64)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -3005,7 +3279,7 @@ struct PostOneboxView: View {
                 if let description = onebox.descriptionText {
                     Text(description.breakingLongTokens())
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(2)
                 }
                 if let host = onebox.url.flatMap({ PostInlineRenderer.resolvedLink($0)?.host }) {
@@ -3020,7 +3294,7 @@ struct PostOneboxView: View {
                         }
                         Text(host)
                             .font(Theme.body(11))
-                            .foregroundStyle(Theme.muted(0.45))
+                            .foregroundStyle(Theme.textFaint)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -3031,12 +3305,12 @@ struct PostOneboxView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Theme.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .onTapGesture {
             if let url = onebox.url.flatMap({ PostInlineRenderer.resolvedLink($0) }) {
                 openURL(url)

@@ -266,9 +266,17 @@ final class PushNotificationService: NSObject {
     /// A 404 is the expected answer while the site has not deployed the
     /// endpoints, and it is not an error worth showing: the polling fallback
     /// covers it, which is the whole reason that code is still here.
+    /// The token a registration POST is in flight for.
+    private var registeringToken: String?
+
     private func sendTokenIfNeeded(force: Bool = false) async {
         guard let deviceToken, DiscourseAuth.shared.isAuthenticated else { return }
         guard force || deviceToken != registeredToken || !isRemoteDeliveryLive else { return }
+        // The token and the restored credential race at launch, so this runs
+        // two or three times at once; one POST is enough.
+        guard registeringToken != deviceToken else { return }
+        registeringToken = deviceToken
+        defer { registeringToken = nil }
         do {
             try await client.registerPushDevice(token: deviceToken)
             registeredToken = deviceToken

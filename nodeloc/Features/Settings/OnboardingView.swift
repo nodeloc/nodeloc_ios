@@ -18,7 +18,7 @@ struct OnboardingView: View {
                 .padding(.bottom, 8)
             Text("NODELOC is a home for every interest — pick a few Nodes to start your feed.")
                 .font(Theme.body(14))
-                .foregroundStyle(Theme.muted(0.75))
+                .foregroundStyle(Theme.textSecondary)
                 .padding(.bottom, 28)
 
             ScrollView {
@@ -34,7 +34,7 @@ struct OnboardingView: View {
             HStack {
                 Text("\(app.interests.count) selected")
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
+                    .foregroundStyle(Theme.textMuted)
                 Spacer()
                 Button("Continue") { app.onboardingDone = true }
                     .buttonStyle(PrimaryButtonStyle())

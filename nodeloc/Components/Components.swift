@@ -11,19 +11,32 @@ import UIKit
 
 // MARK: - Brand
 
+/// The current logo: the knot with its four orange nodes (the tab icon's and
+/// the launch animation's geometry, drawn at rest) and the nodeloc wordmark.
 struct NodelocLogo: View {
     var markSize: CGFloat = 30
     var wordSize: CGFloat = 19
 
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
-        HStack(spacing: 8) {
-            RoundedRectangle(cornerRadius: markSize * 0.3, style: .continuous)
-                .fill(Theme.accent)
-                .frame(width: markSize, height: markSize)
-            Text("NODELOC")
-                .font(Theme.heading(wordSize, weight: .semibold))
-                .tracking(-0.4)
+        HStack(spacing: markSize * 0.28) {
+            Canvas { context, size in
+                KnotDrawing.draw(
+                    in: &context,
+                    size: size,
+                    time: nil,
+                    green: colorScheme == .dark ? KnotDrawing.darkGreen : KnotDrawing.lightGreen
+                )
+            }
+            .frame(width: markSize, height: markSize)
+            Image("NodelocWordmark")
+                .resizable()
+                .scaledToFit()
+                .frame(height: wordSize * 1.15)
         }
+        .accessibilityElement()
+        .accessibilityLabel("nodeloc")
     }
 }
 
@@ -142,9 +155,14 @@ final class RemoteImageMemoryCache {
         return nil
     }
 
+    /// Bitmaps above this aren't kept: one would push out dozens of feed
+    /// images, and the view showing it already holds its own reference.
+    private static let maxEntryCost = 16 * 1024 * 1024
+
     func insert(_ image: UIImage, for url: URL, maxPixel: Int) {
         let scale = image.scale
         let cost = Int(image.size.width * scale * image.size.height * scale * 4)
+        guard cost <= Self.maxEntryCost else { return }
         cache.setObject(image, forKey: Self.key(url, maxPixel) as NSString, cost: max(cost, 1))
         lock.lock()
         sizesByURL[url.absoluteString, default: []].insert(maxPixel)
@@ -173,8 +191,11 @@ final class RemoteImageMemoryCache {
 actor RemoteImageDiskCache {
     static let shared = RemoteImageDiskCache()
 
-    private let directory: URL
+    private nonisolated let directory: URL
     private var inFlight: [Key: Task<UIImage?, Never>] = [:]
+    /// One download per URL, however many decode sizes are waiting on it: an
+    /// avatar requested at 44pt and 88pt at once used to fetch twice.
+    private var inFlightData: [URL: Task<Data?, Never>] = [:]
 
     /// One entry per (url, decode size): the same photo shown as a 44pt avatar
     /// and as a full-screen image are different decodes and must not collide.
@@ -182,6 +203,21 @@ actor RemoteImageDiskCache {
         let url: URL
         let maxPixel: Int
     }
+
+    /// Images get their own session with no `URLCache`. The bytes are already
+    /// persisted in `directory`; letting the shared session's HTTP cache keep a
+    /// second copy only doubled the disk and memory spent on every picture.
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
+    /// Full-resolution decodes are capped here. The zoomable viewer is the
+    /// only caller, and a 4096px edge is still sharp at its 6x zoom on a phone
+    /// while a 12000px panorama would otherwise inflate to hundreds of MB.
+    nonisolated static let fullResolutionCap = 4096
 
     private init() {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -195,24 +231,12 @@ actor RemoteImageDiskCache {
         let key = Key(url: url, maxPixel: maxPixel)
         if let existing = inFlight[key] { return await existing.value }
 
-        let file = Self.fileURL(for: url, in: directory)
-        // Detached so the download/decode never runs on this actor (or the main actor).
-        let task = Task.detached(priority: .utility) { () -> UIImage? in
-            if let data = try? Data(contentsOf: file) {
-                // Touch so the pruner treats a re-read file as recently used.
-                try? FileManager.default.setAttributes(
-                    [.modificationDate: Date()], ofItemAtPath: file.path
-                )
-                if let image = Self.decode(data, maxPixel: maxPixel) { return image }
-            }
-            guard let (data, response) = try? await URLSession.shared.data(from: url) else { return nil }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
-            guard let image = Self.decode(data, maxPixel: maxPixel) else { return nil }
-            // Only cache what actually decoded. Writing an HTML error page or
-            // an SVG here would make every later view re-read and re-fail on
-            // it, which is how one bad URL fills the console.
-            try? data.write(to: file, options: .atomic)
-            return image
+        let dataTask = dataTask(for: url)
+        // Detached so the decode never runs on this actor (or the main actor).
+        // On-screen loads, so they shouldn't queue behind background work.
+        let task = Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let data = await dataTask.value else { return nil }
+            return Self.decode(data, maxPixel: maxPixel)
         }
 
         inFlight[key] = task
@@ -221,17 +245,76 @@ actor RemoteImageDiskCache {
         return result
     }
 
+    /// The raw bytes for `url`, from disk or the network (then persisted).
+    /// For callers that decode themselves, such as animated GIFs.
+    func data(for url: URL) async -> Data? {
+        await dataTask(for: url).value
+    }
+
+    private func dataTask(for url: URL) -> Task<Data?, Never> {
+        if let existing = inFlightData[url] { return existing }
+        let file = Self.fileURL(for: url, in: directory)
+        let task = Task.detached(priority: .userInitiated) { () -> Data? in
+            if let data = try? Data(contentsOf: file) {
+                Self.touchIfStale(file)
+                return data
+            }
+            guard let (data, response) = try? await Self.session.data(from: url) else { return nil }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return nil }
+            // Only cache what is actually an image ImageIO can read. Writing an
+            // HTML error page or an SVG here would make every later view
+            // re-read and re-fail on it, which is how one bad URL fills the
+            // console.
+            guard Self.isDecodableImage(data) else { return nil }
+            try? data.write(to: file, options: .atomic)
+            return data
+        }
+        inFlightData[url] = task
+        Task { [weak self] in
+            _ = await task.value
+            await self?.finishData(url)
+        }
+        return task
+    }
+
+    private func finishData(_ url: URL) {
+        inFlightData[url] = nil
+    }
+
+    /// Touch so the pruner treats a re-read file as recently used — but only
+    /// when the date is more than a day old. Pruning works in 14-day units, so
+    /// rewriting the attribute on every single read was pure I/O churn.
+    private nonisolated static func touchIfStale(_ file: URL) {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: file.path)
+        let modified = attributes?[.modificationDate] as? Date ?? .distantPast
+        guard Date().timeIntervalSince(modified) > 24 * 3600 else { return }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
+    }
+
+    private nonisolated static func isDecodableImage(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary) else { return false }
+        return CGImageSourceGetStatus(source) == .statusComplete
+            && CGImageSourceGetCount(source) > 0
+            && CGImageSourceGetType(source) != nil
+    }
+
     /// Decodes straight to the size we'll draw at.
     ///
     /// `UIImage(data:)` inflates the full pixel buffer no matter how small the
     /// view is — a 1080×1350 feed photo costs ~5.8 MB even when drawn 365pt
     /// wide. ImageIO's thumbnail path decodes once, at the target size.
+    ///
+    /// Always returns a fully decoded bitmap. `UIImage(data:)` alone is lazy:
+    /// the actual decode then happens on the main thread the first time the
+    /// image is drawn, which is exactly the hitch this function runs detached
+    /// to avoid.
     nonisolated static func decode(_ data: Data, maxPixel: Int) -> UIImage? {
-        guard maxPixel > 0 else { return UIImage(data: data) }
         guard let source = CGImageSourceCreateWithData(data as CFData, [
             kCGImageSourceShouldCache: false
         ] as CFDictionary) else {
-            return UIImage(data: data)
+            return preparedFallback(data)
         }
         // ImageIO logs a noisy `CGImageSourceCreateThumbnailAtIndex … [-50]` to
         // the console for anything it can't rasterise — an HTML error page, an
@@ -240,18 +323,35 @@ actor RemoteImageDiskCache {
         // relying on the call to fail quietly.
         guard CGImageSourceGetStatus(source) == .statusComplete,
               CGImageSourceGetCount(source) > 0 else {
-            return UIImage(data: data)
+            return preparedFallback(data)
+        }
+        var target = maxPixel
+        if target <= 0 {
+            // Native size, capped. Thumbnailing at the native edge is a plain
+            // full decode, done here rather than lazily on the main thread.
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            let width = (properties?[kCGImagePropertyPixelWidth] as? Int) ?? 0
+            let height = (properties?[kCGImagePropertyPixelHeight] as? Int) ?? 0
+            let native = max(width, height)
+            target = native > 0 ? min(native, fullResolutionCap) : fullResolutionCap
         }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceThumbnailMaxPixelSize: target,
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
-            return UIImage(data: data)
+            return preparedFallback(data)
         }
         return UIImage(cgImage: cgImage)
+    }
+
+    /// `UIImage(data:)` for what ImageIO's thumbnail path can't handle, decoded
+    /// here rather than at first draw.
+    private nonisolated static func preparedFallback(_ data: Data) -> UIImage? {
+        guard let image = UIImage(data: data) else { return nil }
+        return image.preparingForDisplay() ?? image
     }
 
     /// Trims the cache directory. Called at launch.
@@ -259,7 +359,18 @@ actor RemoteImageDiskCache {
     /// Nothing pruned this before, so it grew for the life of the install. iOS
     /// may purge `Caches/` wholesale under storage pressure, which is worse
     /// than a bounded trim: it takes the whole cache instead of the cold tail.
-    func prune(maxAge: TimeInterval = 14 * 24 * 3600, maxBytes: Int = 256 * 1024 * 1024) {
+    ///
+    /// Nonisolated, with the file work detached: run on the actor, the
+    /// directory walk held it for its whole duration and every image the first
+    /// screen asked for queued up behind it.
+    nonisolated func prune(maxAge: TimeInterval = 14 * 24 * 3600, maxBytes: Int = 256 * 1024 * 1024) async {
+        let directory = directory
+        await Task.detached(priority: .background) {
+            Self.pruneFiles(in: directory, maxAge: maxAge, maxBytes: maxBytes)
+        }.value
+    }
+
+    private nonisolated static func pruneFiles(in directory: URL, maxAge: TimeInterval, maxBytes: Int) {
         let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory,
@@ -296,7 +407,7 @@ actor RemoteImageDiskCache {
         }
     }
 
-    private static func fileURL(for url: URL, in directory: URL) -> URL {
+    private nonisolated static func fileURL(for url: URL, in directory: URL) -> URL {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         return directory.appending(path: digest.map { String(format: "%02x", $0) }.joined())
     }
@@ -562,6 +673,13 @@ struct TitleStyle: Equatable {
         var isAnimated: Bool { self != .none }
     }
 
+    /// The v1 backend's `title_style` / `author_title_style`: `{"color": "#rrggbb", "effect": "…"}`.
+    nonisolated init?(color: String?, effect: String?) {
+        guard let color = Color(cssColor: color) else { return nil }
+        textColor = color
+        self.effect = Effect(pluginValue: effect)
+    }
+
     nonisolated init?(_ style: CustomBadgeStyle?) {
         guard let style, let color = Color(cssColor: style.textColor) else { return nil }
         textColor = color
@@ -764,7 +882,7 @@ struct SegmentedControl<Value: Hashable>: View {
                 } label: {
                     Text(option.label)
                         .font(Theme.body(14, weight: .semibold))
-                        .foregroundStyle(isSelected ? Theme.text : Theme.muted(0.55))
+                        .foregroundStyle(isSelected ? Theme.text : Theme.textMuted)
                         .frame(maxWidth: .infinity)
                         .frame(height: 34)
                         .background { pillBackground(isSelected: isSelected) }
@@ -976,7 +1094,7 @@ struct NodeField: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.7))
+                .foregroundStyle(Theme.textSecondary)
             Group {
                 if secure {
                     SecureField(placeholder, text: $text)
@@ -1078,73 +1196,109 @@ struct HeaderIconButton: View {
 }
 
 extension View {
-    /// Moves a root screen's header controls into the iPad tab bar's row.
-    ///
-    /// On iPad the tab bar is drawn in the navigation bar region at the top of
-    /// the content, which is why a floating header of our own lands *below* it
-    /// — the tab bar is inside the safe area the header respects. Toolbar items
-    /// are what actually sit on the same line, flanking the centred tab
-    /// capsule, so each root screen hands its leading and trailing controls
-    /// over here and hides its own bar.
-    ///
-    /// Off iPad this is a no-op, so the phone layout is untouched.
-    ///
-    /// - Parameter needsNavigationStack: False for screens that already have a
-    ///   `NavigationStack` of their own (the inbox drives one with a path);
-    ///   nesting a second would break their navigation.
+    /// A tab root's navigation bar: the system bar, inline, see-through at
+    /// rest, with the soft scroll edge effect once content passes under it —
+    /// how native iOS 26 apps draw it. The same bar shares the row with the
+    /// iPad's top tab bar, so there is no separate iPad path any more.
+    func tabRootNavigationBar() -> some View {
+        navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(.automatic, for: .navigationBar)
+            .softTopScrollEdge()
+    }
+
+    /// The bar for a page whose banner runs behind it to the very top (我的,
+    /// someone's profile, a node). No bar background while the banner is under
+    /// it — the toolbar buttons sit on the banner in their own glass — and the
+    /// usual scroll edge effect once the page's content has taken its place.
+    func bannerPageNavigationBar(bannerIsUnderBar: Bool) -> some View {
+        navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(bannerIsUnderBar ? .hidden : .automatic, for: .navigationBar)
+            .softTopScrollEdge()
+    }
+}
+
+/// How a page — someone's profile, a node — came to be on screen, which
+/// decides its leading button and whether it needs a navigation stack of its
+/// own for its bar.
+enum PageNavigation {
+    /// Pushed onto a stack: the system back button and swipe back.
+    case pushed
+    /// The first page of a stack that goes away with it (the routed page
+    /// cover): a ‹ that calls the page's close action.
+    case stackRoot
+    /// Layered in with no stack around it (over the post reader, in a sheet
+    /// or a cover): wraps itself in one, with a ‹ that calls the close action.
+    case standalone
+
+    /// Whether the page draws its own ‹ rather than getting the system's.
+    var drawsBackButton: Bool { self != .pushed }
+}
+
+extension View {
+    /// Gives a `.standalone` page the stack its toolbar needs. A pushed or
+    /// stack-root page is already in one, and nesting a second would break it.
     @ViewBuilder
-    func tabBarHeader<Leading: View, Trailing: View>(
-        isPinned: Bool,
-        needsNavigationStack: Bool = true,
-        @ViewBuilder leading: @escaping () -> Leading,
-        @ViewBuilder trailing: @escaping () -> Trailing
-    ) -> some View {
-        if isPinned {
-            if needsNavigationStack {
-                NavigationStack {
-                    tabBarToolbarItems(leading: leading, trailing: trailing)
-                }
-            } else {
-                tabBarToolbarItems(leading: leading, trailing: trailing)
-            }
+    func inPageNavigation(_ navigation: PageNavigation) -> some View {
+        if navigation == .standalone {
+            NavigationStack { self }
         } else {
             self
         }
     }
+}
 
-    private func tabBarToolbarItems<Leading: View, Trailing: View>(
-        @ViewBuilder leading: () -> Leading,
-        @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        toolbar {
-            ToolbarItem(placement: .topBarLeading) { leading() }
-            ToolbarItem(placement: .topBarTrailing) { trailing() }
+/// A page's own ‹, for when the system has no back button to show — see
+/// `PageNavigation.drawsBackButton`.
+struct PageBackButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .foregroundStyle(Theme.text)
         }
-        // The tab bar already fills this row; a navigation bar background and
-        // title would double up on it.
-        .toolbarBackground(.hidden, for: .navigationBar)
-        .navigationBarTitleDisplayMode(.inline)
+        .accessibilityLabel(AppString("返回"))
     }
 }
 
 /// Opens the sidebar. Shared so every root screen's top-left button is the
 /// same control rather than copies that drift apart.
+///
+/// Meant for a toolbar item: the system draws its glass. Callers leave the
+/// item out entirely while the sidebar is pinned (see `SidebarToolbarItem`),
+/// because an empty item still gets a glass container of its own.
 struct SidebarMenuButton: View {
     @Environment(AppState.self) private var app
-    @Environment(\.sidebarIsPinned) private var sidebarIsPinned
 
     var body: some View {
-        // Nothing to open when the sidebar is already a permanent column.
+        Button {
+            // Matches the drag-to-open animation in MainView.
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                app.overlay = .sidebar
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(Theme.text)
+        }
+        .accessibilityLabel(AppString("菜单"))
+    }
+}
+
+/// The hamburger as a tab root's leading toolbar item — nothing at all while
+/// the sidebar is a permanent column, since there is no drawer to open.
+///
+/// Takes the pinned flag rather than reading the environment: the caller
+/// already has it, and a toolbar's content is the wrong place to depend on
+/// environment reads behaving like a view's.
+struct SidebarToolbarItem: ToolbarContent {
+    let sidebarIsPinned: Bool
+
+    /// No badge: moderation and review activity is in 消息's notifications
+    /// (and the sidebar's 审核队列 row), not on this button.
+    var body: some ToolbarContent {
         if !sidebarIsPinned {
-            // The brand mark rather than a hamburger. It keeps the
-            // accessibility label "菜单", because the mark does not say
-            // "menu" to anyone who hasn't already learned it — VoiceOver
-            // users and the tap target should not have to.
-            HeaderIconButton(asset: "NodelocMark", accessibilityLabel: AppString("菜单")) {
-                // Matches the drag-to-open animation in MainView.
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
-                    app.overlay = .sidebar
-                }
+            ToolbarItem(placement: .topBarLeading) {
+                SidebarMenuButton()
             }
         }
     }
@@ -1288,7 +1442,7 @@ struct SectionKicker: View {
         Text(text.uppercased())
             .font(Theme.body(11))
             .tracking(0.9)
-            .foregroundStyle(Theme.muted(0.5))
+            .foregroundStyle(Theme.textMuted)
     }
 }
 
@@ -1339,21 +1493,85 @@ final class ToastCenter {
     static let shared = ToastCenter()
 
     private(set) var message: String?
+    /// A follow-up the notice offers (保存书签's 选择收藏夹), when it has one.
+    private(set) var actionTitle: String?
+    private var action: (() -> Void)?
     private var hideTask: Task<Void, Never>?
 
     func show(_ text: String) {
+        show(text, actionTitle: nil, action: nil)
+    }
+
+    /// A notice with one button; it stays a little longer to be reachable.
+    func show(_ text: String, actionTitle: String?, action: (() -> Void)?) {
         hideTask?.cancel()
-        withAnimation(.spring(duration: 0.3)) { message = text }
+        withAnimation(.spring(duration: 0.3)) {
+            message = text
+            self.actionTitle = actionTitle
+            self.action = action
+        }
+        let seconds = actionTitle == nil ? 2.6 : 4.5
         hideTask = Task {
-            try? await Task.sleep(for: .seconds(2.6))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.25)) { self.message = nil }
+            withAnimation(.easeOut(duration: 0.25)) {
+                self.message = nil
+                self.actionTitle = nil
+                self.action = nil
+            }
         }
     }
 
+    /// The notice's button: runs the follow-up and puts the notice away.
+    func performAction() {
+        let run = action
+        hideTask?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) {
+            message = nil
+            actionTitle = nil
+            action = nil
+        }
+        run?()
+    }
+
     /// The friendly line for a failed action — never the raw error.
+    ///
+    /// Two answers get more than a line: a penalty that blocked the action
+    /// (403 `silenced` / `suspended` / `node_restricted`) offers the account
+    /// status page, and 429 says how long to wait (`Retry-After`). The
+    /// server's own sentence is shown as it is either way.
     func showError(_ error: Error) {
-        show((error as? LocalizedError)?.errorDescription ?? AppString("操作失败，请稍后重试"))
+        let discourse = error as? DiscourseError
+        let message = (error as? LocalizedError)?.errorDescription
+        if let code = discourse?.serverCode, PenaltyAlertCenter.codes.contains(code) {
+            PenaltyAlertCenter.shared.present(message ?? AppString("账号受到限制，暂时不能这样做"))
+            return
+        }
+        if discourse?.statusCode == 429 {
+            let wait = DiscourseError.lastRetryAfter.map { Int(ceil($0)) } ?? 0
+            if let message, !message.isEmpty, discourse?.serverCode != nil {
+                show(message)
+            } else {
+                show(wait > 0 ? AppString("操作太频繁，请 \(wait) 秒后再试") : AppString("操作太频繁，请稍后再试"))
+            }
+            return
+        }
+        show(message ?? AppString("操作失败，请稍后重试"))
+    }
+}
+
+/// The alert for an action a penalty blocked: the server's sentence (it
+/// already says until when), 知道了, and 查看账号状态. Never signs out.
+@MainActor
+@Observable
+final class PenaltyAlertCenter {
+    static let shared = PenaltyAlertCenter()
+    static let codes: Set<String> = ["silenced", "suspended", "node_restricted"]
+
+    var message: String?
+
+    func present(_ text: String) {
+        message = text
     }
 }
 
@@ -1363,11 +1581,18 @@ struct ToastHost: View {
 
     var body: some View {
         if let message = center.message {
-            Text(message)
-                .font(Theme.body(13, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Text(message)
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                if let title = center.actionTitle {
+                    Button(title) { center.performAction() }
+                        .font(Theme.body(13, weight: .bold))
+                        .foregroundStyle(Theme.accent)
+                }
+            }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 11)
                 .glassSurface(tint: Theme.bg.opacity(0.5))
@@ -1581,7 +1806,7 @@ struct MentionSuggestionBar: View {
                 if let subtitle = suggestion.subtitle {
                     Text(subtitle)
                         .font(Theme.body(10))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
             }
@@ -1604,7 +1829,7 @@ struct MentionSuggestionBar: View {
                 size: 22
             )
         case .node:
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                 .fill(Color(cssHex: suggestion.colorHex ?? "") ?? Theme.accent)
                 .frame(width: 22, height: 22)
                 .overlay {
@@ -1657,6 +1882,9 @@ struct VoteControl: View {
     /// marks where the upvote's hit region ends; off in a bare row, where there
     /// is no container for it to divide.
     var showsDivider = true
+    /// The home feed row's bare bar: 22pt arrows, a 14pt score centred in a
+    /// 30pt slot, 8pt apart, no capsule.
+    var feedRow = false
     /// `reaction` nil casts the direction's default face.
     let onVote: (VoteDirection, String?) -> Void
 
@@ -1670,16 +1898,16 @@ struct VoteControl: View {
     @State private var pressing: VoteDirection?
 
     var body: some View {
-        HStack(spacing: compact ? 2 : 4) {
+        HStack(spacing: feedRow ? 8 : (compact ? 2 : 4)) {
             // Arrow *and* score in one hit region: the number belongs to the
             // upvote beside it, so tapping or holding it should do what the
             // arrow does rather than nothing.
             votable(.up) {
-                HStack(spacing: compact ? 2 : 4) {
+                HStack(spacing: feedRow ? 8 : (compact ? 2 : 4)) {
                     glyph(.up)
 
                     Text("\(score)")
-                        .font(Theme.body(compact ? 12 : 13, weight: .semibold))
+                        .font(Theme.body(feedRow ? 14 : (compact ? 12 : 13), weight: .semibold))
                         .foregroundStyle(scoreColor)
                         .monospacedDigit()
                         // A score never wraps: three digits in a tight capsule
@@ -1689,11 +1917,11 @@ struct VoteControl: View {
                         .fixedSize(horizontal: true, vertical: false)
                         // Minimum, so the row doesn't jump between "9" and
                         // "-10", but it still grows for "128".
-                        .frame(minWidth: compact ? 16 : 20)
+                        .frame(minWidth: feedRow ? 30 : (compact ? 16 : 20))
                 }
             }
 
-            if showsDivider {
+            if showsDivider && !feedRow {
                 // Separates the two directions, and marks where the upvote's
                 // hit region ends.
                 Rectangle()
@@ -1768,9 +1996,9 @@ struct VoteControl: View {
             .renderingMode(.template)
             .resizable()
             .scaledToFit()
-            .frame(width: compact ? 15 : 17, height: compact ? 15 : 17)
-            .foregroundStyle(isCast ? tint(for: target) : (neutralTint ?? Theme.muted(0.45)))
-            .frame(width: compact ? 22 : 26, height: compact ? 22 : 26)
+            .frame(width: feedRow ? 20 : (compact ? 15 : 17), height: feedRow ? 20 : (compact ? 15 : 17))
+            .foregroundStyle(isCast ? tint(for: target) : (neutralTint ?? (feedRow ? Theme.textMuted : Theme.textFaint)))
+            .frame(width: feedRow ? 22 : (compact ? 22 : 26), height: feedRow ? 22 : (compact ? 22 : 26))
     }
 
     /// Shared with the feed card, which draws its own pill.
@@ -1785,7 +2013,7 @@ struct VoteControl: View {
         switch direction {
         case .up: return tint(for: .up)
         case .down: return tint(for: .down)
-        case .none: return neutralTint ?? Theme.muted(0.6)
+        case .none: return neutralTint ?? Theme.textMuted
         }
     }
 
@@ -1823,7 +2051,7 @@ struct VoteFacePicker: View {
                             .frame(width: side, height: side)
                             .background(
                                 Theme.surface,
-                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                             )
                             .contentShape(Rectangle())
                         }
@@ -1904,7 +2132,7 @@ struct TopicStateBadges: View {
             badge(AppString("已解决"), icon: "checkmark.seal.fill", tint: Theme.accent700, background: Theme.accent)
         }
         if isHidden {
-            badge(AppString("已隐藏"), icon: "eye.slash.fill", tint: Theme.muted(0.7), background: Theme.muted(0.5))
+            badge(AppString("已隐藏"), icon: "eye.slash.fill", tint: Theme.textSecondary, background: Theme.muted(0.5))
         }
         if let reportCount, reportCount > 0 {
             badge("\(reportCount)", icon: "flag.fill", tint: Theme.danger, background: Theme.danger)

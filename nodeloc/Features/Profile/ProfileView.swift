@@ -18,14 +18,23 @@ struct ProfileView: View {
     @State private var activeSheet: ProfileSheet?
 
     private enum ProfileSheet: String, Identifiable {
-        case badges, nodes, upgrade, leaderboard
+        case badges, nodes, upgrade, editProfile
         var id: String { rawValue }
     }
     @State private var selectedTab: ProfileStore.ProfileTab = .topics
-    @State private var scrollOffset: CGFloat = 0
+    /// Scroll-derived banner pull and title reveal, observed only by the
+    /// views that draw them — see `BannerScrollChrome`.
+    @State private var chrome = BannerScrollChrome(revealStart: 110, revealLength: 40)
+    @State private var pullToRefresh = SilentPullToRefresh()
+    /// Set while 编辑资料 is up, so dismissing it knows to reload.
+    @State private var editedProfile = false
+    /// The reader's achievements from `GET /api/v1/achievements`. The profile
+    /// summary's badge list is always empty on this backend.
+    @State private var achievements: NLAchievementList?
 
     /// Anchor for the scroll-to-top the identity capsule performs.
     private let topAnchor = "profile-top"
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -33,20 +42,30 @@ struct ProfileView: View {
                 // Nothing pins: the tab bar scrolls with the content. Sticking
                 // it required a top safe-area inset, and that inset is what
                 // stopped the banner reaching the top of the screen.
-                LazyVStack(spacing: 18) {
-                    if store.isShowingSkeleton {
-                        profileSkeleton
-                            .id(topAnchor)
-                    } else {
+                // The phase is switched *outside* the lazy stack. Inside it,
+                // every branch carried the same `.id(topAnchor)`, and the lazy
+                // stack kept showing the skeleton it had already built for that
+                // id after the store had moved on — the view logged "loaded"
+                // while the screen stayed on the skeleton.
+                switch store.phase {
+                case .loading:
+                    profileSkeleton
+                        .id("profile-skeleton")
+                case .failed(let message):
+                    ProfileLoadFailedView(message: message) {
+                        Task { await store.loadPage(isAppAuthed: app.authed, force: true) }
+                    }
+                    .id("profile-failed")
+                case .loaded:
+                    LazyVStack(spacing: 0) {
                         profileHero
                             .id(topAnchor)
-                        redditStatsRow
 
                         tabBar
                         tabContent
-                            .padding(.top, 6)
                             .padding(.bottom, 112)
                     }
+                    .id("profile-loaded")
                 }
             }
             .scrollIndicators(.hidden)
@@ -57,103 +76,161 @@ struct ProfileView: View {
             .background(Theme.bg)
             // Raw offset, not clamped: pulling down gives a negative value,
             // which is what stretches the banner.
+            .tabBarFollowsScrollDirection()
             .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
+                geometry.contentOffset.y + geometry.contentInsets.top
             } action: { _, newValue in
-                scrollOffset = newValue
-            }
-            // Pinned above the scroll view so they stay reachable as the banner
-            // scrolls away, matching the home feed's floating controls. The
-            // overlay sits on the ignored area, so it re-applies the inset
-            // itself — otherwise the buttons land under the notch.
-            .overlay(alignment: .top) {
-                // Hidden once its controls have moved into the iPad tab bar's
-                // row, or they would appear twice.
-                if !usesTopTabBar {
-                    floatingHeaderButtons(scrollProxy: proxy)
-                        .padding(.top, UIApplication.topSafeAreaInset)
+                chrome.update(offset: newValue)
+                // Pull-to-refresh with no spinner — see `SilentPullToRefresh`.
+                pullToRefresh.track(offset: newValue) {
+                    await store.loadPage(isAppAuthed: app.authed, force: true)
+                    await store.loadTab(selectedTab)
                 }
             }
-            // No leading item of its own. The identity capsule that the phone
-            // reveals on scroll (`floatingHeaderButtons`) belongs here in
-            // principle, but a toolbar groups its leading items into one glass
-            // container — so even at opacity 0 it widened the corner into a
-            // capsule beside the mark, and revealing it made that corner change
-            // as you scrolled. Its only action, scroll to top, is what the mark
-            // itself does on iPad.
-            .tabBarHeader(isPinned: usesTopTabBar) {
-                EmptyView()
-            } trailing: {
-                headerTools
+            // The system bar, sitting on the banner. Inside the reader's
+            // closure because the identity title scrolls back to the top.
+            .toolbar {
+                SidebarToolbarItem(sidebarIsPinned: sidebarIsPinned)
+                // Not on iPad: the top tab bar owns the centre of that row.
+                if !usesTopTabBar {
+                    ToolbarItem(placement: .principal) {
+                        // Not tappable while invisible. Its own view so the
+                        // scroll re-renders only the title.
+                        BannerRevealView(chrome: chrome) {
+                            identityTitle(scrollProxy: proxy)
+                        }
+                    }
+                }
+                // 签到 and 设置 share one capsule, check-in first. Editing the
+                // profile lives in 设置 › 个人资料.
+                if !store.isGuest {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        CheckInBarButton(
+                            isCheckedIn: store.hasCheckedInToday,
+                            isBusy: store.isCheckingIn
+                        ) {
+                            if store.hasCheckedInToday {
+                                ToastCenter.shared.show(AppString("今天已签到，明天再来"))
+                            } else {
+                                Task { await store.checkIn() }
+                            }
+                        }
+                        Button {
+                            app.pushPage(.settings)
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .foregroundStyle(Theme.text)
+                        }
+                        .accessibilityLabel(AppString("设置"))
+                    }
+                } else {
+                    // Guests: 设置 has their display settings (appearance,
+                    // language) and 登录. No 签到 without an account.
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            app.pushPage(.settings)
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .foregroundStyle(Theme.text)
+                        }
+                        .accessibilityLabel(AppString("设置"))
+                    }
+                }
             }
-            // Inside the closure, for the same reason the line above says:
-            // this is where `proxy` exists. The request itself comes from the
-            // toolbar's mark, which sits outside every screen's reader.
+            .bannerPageNavigationBar(bannerIsUnderBar: chrome.bannerIsUnderBar)
+            // Inside the closure: this is where `proxy` exists.
             .onChange(of: app.scrollToTopRequests) { _, _ in
                 withAnimation(.easeOut(duration: 0.3)) {
                     proxy.scrollTo(topAnchor, anchor: .top)
                 }
             }
         }
-        .task(id: app.authed) { await store.load(isAppAuthed: app.authed) }
-        .task(id: tabTaskKey) { await store.loadTab(selectedTab) }
+        .task(id: app.authed) { await store.loadPage(isAppAuthed: app.authed) }
+        // 签到 is per day and per account: re-read it when the day turns over
+        // with the app open, when the app comes back, and on an account switch.
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+            // Posted off the main thread; the store is the main actor's.
+            Task { @MainActor in store.refreshCheckInDay() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { store.refreshCheckInDay() }
+        }
+        .onChange(of: DiscourseAuth.shared.username) { _, _ in store.refreshCheckInDay() }
+        .task(id: store.username) {
+            guard !store.username.isEmpty, !store.isGuest else {
+                achievements = nil
+                return
+            }
+            if let list = try? await DiscourseClient().achievementList() {
+                achievements = list
+            }
+        }
+        // The stream only sends this to someone with a queue, so it stays 0
+        // for everyone else — the same source settings uses.
+        // 15 s ceiling: a tab that never answers shows 重试, not endless rows.
+        .task(id: tabTaskKey) {
+            let tab = selectedTab
+            let finished = await withTimeout(seconds: 15) { await store.loadTab(tab) }
+            if !finished, store.actionItems[tab] == nil { store.failedTabs.insert(tab) }
+        }
         // The tab has to be reloaded explicitly. `force` clears `actionItems`,
         // but `tabTaskKey` is username + tab — neither changes on a refresh, so
         // the `.task(id:)` above never re-runs and the list was left empty.
-        .refreshable {
-            await store.load(isAppAuthed: app.authed, force: true)
-            await store.loadTab(selectedTab)
-        }
-        .sheet(item: $activeSheet) { sheet in
+        // 编辑资料 changes what this page shows, so closing it reloads.
+        .sheet(item: $activeSheet, onDismiss: {
+            guard editedProfile else { return }
+            editedProfile = false
+            Task { await store.loadPage(isAppAuthed: app.authed, force: true) }
+        }) { sheet in
             switch sheet {
+            case .editProfile:
+                ProfileEditPage(onClose: { activeSheet = nil })
+                    .onAppear { editedProfile = true }
             case .badges: badgeSheet
             case .nodes: nodesSheet
             case .upgrade:
                 if let progress = store.upgradeProgress {
                     UpgradeProgressSheet(report: progress)
                 }
-            case .leaderboard:
-                LeaderboardPage(
-                    onClose: { activeSheet = nil },
-                    onOpenProfile: { target in
-                        activeSheet = nil
-                        app.openProfile(target)
-                    }
-                )
             }
         }
     }
 
     /// Re-run tab loading when either the selected tab or the loaded user changes.
-    private var tabTaskKey: String { "\(store.username)-\(selectedTab.rawValue)" }
+    ///
+    /// Also keyed on whether the tab's list is empty-because-unloaded: when
+    /// the store resets its lists (a new user seeded, a refresh), the key
+    /// changes and the tab loads again. Without it the first page could
+    /// arrive, get cleared by that reset, and never be asked for again — the
+    /// rows stayed on their skeleton.
+    private var tabTaskKey: String {
+        "\(store.username)-\(selectedTab.rawValue)-\(store.actionItems[selectedTab] == nil)"
+    }
 
-    private let bannerHeight: CGFloat = 176
+    /// The banner runs under the navigation bar and then `bannerHeight` more,
+    /// so the avatar overlapping its bottom edge clears the bar.
+    private let bannerHeight: CGFloat = 64
+    /// About the navigation bar's height: the banner reaches this far under it.
+    private let headerRowHeight: CGFloat = 56
+    private let avatarSize: CGFloat = 72
 
     private var profileHero: some View {
         VStack(spacing: 0) {
-            // Extends to the physical top: the scroll view ignores the top
-            // safe area, so the banner's own frame already covers the status
-            // bar. Its height grows to match, keeping the avatar's overlap.
-            profileBanner
-                .frame(height: bannerHeight + UIApplication.topSafeAreaInset + pullStretch)
-                // On the banner rather than in the card: the banner spans the
-                // full width, so its leading edge is the screen's, and its
-                // bottom edge is the fixed reference the avatar is placed
-                // against — both of which the column needs.
-                .overlay(alignment: .bottomLeading) {
-                    upgradeProgressColumn
-                        .padding(.leading, progressTrackCentreX - progressTrackWidth / 2)
-                        .offset(y: -(avatarCentreAboveBanner - progressTrackLength / 2))
-                }
-                // Pinned to the top of the scroll content while it grows, so
-                // pulling down never opens a gap above the image.
-                .offset(y: -pullStretch)
-                .padding(.bottom, -pullStretch)
+            // The banner runs to the very top — behind the status bar and the
+            // navigation bar — and then `bannerHeight` more, so the part
+            // below the buttons is unchanged. Pulled down past the top it
+            // grows by the overscroll and stays pinned there: no gap opens
+            // above it.
+            BannerPullView(chrome: chrome) { pullStretch in
+                profileBanner
+                    .frame(height: UIApplication.topSafeAreaInset + headerRowHeight + bannerHeight + pullStretch)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .offset(y: -pullStretch)
+                    .padding(.bottom, -pullStretch)
+            }
 
-            profileCard
-                .padding(.horizontal, 16)
-                .offset(y: -54)
-                .padding(.bottom, -54)
+            identityBlock
         }
     }
 
@@ -170,230 +247,18 @@ struct ProfileView: View {
     /// seeded initial used to be what a cold start showed, which reads as data
     /// that failed rather than data that is coming.
     private var profileSkeleton: some View {
-        VStack(spacing: 18) {
-            // Banner and card, including the card's overlap onto the banner —
-            // the one piece of this layout that would be obvious if it moved.
-            VStack(spacing: 0) {
-                Rectangle()
-                    .fill(Theme.neutral300)
-                    .frame(height: bannerHeight + UIApplication.topSafeAreaInset)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .bottom, spacing: 12) {
-                        Circle()
-                            .fill(Theme.neutral300)
-                            .frame(width: 76, height: 76)
-                            .overlay { Circle().strokeBorder(Theme.bg, lineWidth: 4) }
-
-                        VStack(alignment: .leading, spacing: 7) {
-                            SkeletonLine(widthFraction: 0.52, height: 18)
-                            SkeletonLine(widthFraction: 0.34)
-                        }
-                        .padding(.bottom, 8)
-                    }
-
-                    SkeletonLine(widthFraction: 0.92)
-                    SkeletonLine(widthFraction: 0.64)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    Theme.surface,
-                    in: RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous)
-                )
-                .padding(.horizontal, 16)
-                .offset(y: -54)
-                .padding(.bottom, -54)
-            }
-
-            // Five evenly divided stats, as `redditStatsRow` lays them out.
-            HStack(spacing: 0) {
-                ForEach(0..<5, id: \.self) { _ in
-                    VStack(spacing: 5) {
-                        SkeletonLine(widthFraction: 0.46, height: 15)
-                        SkeletonLine(widthFraction: 0.66, height: 9)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-            .padding(.horizontal, 16)
-
-            // The five activity tabs.
-            HStack(spacing: 24) {
-                ForEach(0..<5, id: \.self) { _ in
-                    SkeletonLine(height: 14)
-                        .frame(width: 32)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-
-            VStack(spacing: 16) {
-                ForEach(0..<4, id: \.self) { _ in
-                    VStack(alignment: .leading, spacing: 8) {
-                        SkeletonLine(widthFraction: 0.88, height: 15)
-                        SkeletonLine(widthFraction: 0.42)
-                    }
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 6)
-            .padding(.bottom, 112)
-        }
-        .skeletonPulsing()
+        ProfileSkeleton(
+            topInset: UIApplication.topSafeAreaInset + headerRowHeight,
+            bannerHeight: bannerHeight
+        )
+        .padding(.bottom, 112)
     }
 
-    /// Stays put while the page scrolls. The identity capsule fades in between
-    /// the buttons once the profile card has scrolled past.
-    private func floatingHeaderButtons(scrollProxy: ScrollViewProxy) -> some View {
-        HStack(spacing: 8) {
-            SidebarMenuButton()
-
-            Spacer(minLength: 8)
-
-            identityCapsule(scrollProxy: scrollProxy)
-                .opacity(identityRevealProgress)
-                // Rises into place rather than just appearing.
-                .offset(y: (1 - identityRevealProgress) * 6)
-                // Not tappable while invisible, or it would swallow taps meant
-                // for whatever is beneath it.
-                .allowsHitTesting(identityRevealProgress > 0.9)
-
-            Spacer(minLength: 8)
-
-            headerTools
-        }
-        .padding(.horizontal, FloatingHeader.horizontalInset)
-        .padding(.top, 8)
-        .frame(height: headerBarHeight, alignment: .top)
-    }
-
-    /// 签到 · 设置 in one glass capsule, matching the node page and the post
-    /// reader rather than floating separate circles. 升级进度 lives on the
-    /// banner's bottom edge instead — see `upgradeProgressBar`.
-    private var headerTools: some View {
-        HStack(spacing: 6) {
-            // Guests have nothing to sign in for.
-            if !store.isGuest {
-                Button {
-                    Task { await store.checkIn() }
-                } label: {
-                    Group {
-                        if store.isCheckingIn {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            // The same mark the site's own checkin button
-                            // uses. Dimmed once today is done — the control is
-                            // disabled then, so it should read that way.
-                            Image("LucideCalendarHeart")
-                                .renderingMode(.template)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 17, height: 17)
-                                .foregroundStyle(store.hasCheckedInToday ? Theme.muted(0.35) : Theme.text)
-                        }
-                    }
-                    .frame(width: 28, height: FloatingHeader.controlHeight)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.pressable)
-                .disabled(store.isCheckingIn || store.hasCheckedInToday)
-                .accessibilityLabel(store.hasCheckedInToday ? AppString("今天已签到") : AppString("签到"))
-            }
-
-            Button { app.overlay = .settings } label: {
-                toolIcon("gearshape")
-            }
-            .buttonStyle(.pressable)
-            .accessibilityLabel("设置")
-        }
-        .padding(.horizontal, 8)
-        .headerGroupGlass(tint: FloatingHeader.glassTint)
-    }
-
-    private let progressTrackLength: CGFloat = 46
-    private let progressTrackWidth: CGFloat = 3
-    /// The avatar's centre, measured up from the banner's bottom edge: it is
-    /// 96pt tall and lifted 42pt above the card's top, which the card in turn
-    /// places 54pt above the banner's bottom. Keeping the column level with it
-    /// is why this is derived rather than eyeballed.
-    private let avatarCentreAboveBanner: CGFloat = 48
-
-    /// Lines the track up with the hamburger above it. `.glass` grows a 34pt
-    /// glyph into a 48pt circle, and that circle starts at the header's own
-    /// inset — so its centre is the inset plus half of 48.
-    private var progressTrackCentreX: CGFloat {
-        FloatingHeader.horizontalInset + (FloatingHeader.controlHeight + 14) / 2
-    }
-
-    /// 升级进度 down the left edge of the banner: a vertical track that fills
-    /// upward from the current level, named at the bottom, toward the level
-    /// being climbed to, named at the top. Drawn in `Theme.text` at two
-    /// strengths — so it inverts with the colour scheme — over a `Theme.bg`
-    /// halo, which is what keeps it legible on top of banner artwork.
-    /// Tapping opens the requirements.
-    @ViewBuilder
-    private var upgradeProgressColumn: some View {
-        if !store.isGuest, let report = store.upgradeProgress, report.hasConditions {
-            Button { activeSheet = .upgrade } label: {
-                HStack(spacing: 7) {
-                    Capsule()
-                        .fill(Theme.text.opacity(0.28))
-                        .frame(width: progressTrackWidth, height: progressTrackLength)
-                        .overlay(alignment: .bottom) {
-                            Capsule()
-                                .fill(Theme.text)
-                                .frame(height: progressTrackLength * report.fraction)
-                        }
-
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(nextLevelLabel(report))
-                        Spacer(minLength: 0)
-                        Text(report.currentLevelName ?? AppString("当前等级"))
-                    }
-                    .frame(height: progressTrackLength, alignment: .leading)
-                }
-                .font(Theme.body(10, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .frame(maxWidth: 110, alignment: .leading)
-                .contentShape(Rectangle())
-                // A halo in the page colour, not a black drop shadow: it has to
-                // separate the marks from a photo banner in both schemes.
-                .shadow(color: Theme.bg.opacity(0.8), radius: 3)
-                .shadow(color: Theme.bg.opacity(0.5), radius: 6)
-            }
-            .buttonStyle(.pressable)
-            .accessibilityLabel("升级进度")
-            .accessibilityValue("\(report.satisfiedCount)/\(report.allConditions.count)")
-        }
-    }
-
-    /// At the top level there is no next level, and the requirements become
-    /// upkeep — say that rather than showing a dash.
-    private func nextLevelLabel(_ report: UpgradeProgressReport) -> String {
-        if let next = report.nextLevelName, !next.isEmpty {
-            return next
-        }
-        return report.isRetention
-            ? AppString("维持中")
-            : AppString("最高等级")
-    }
-
-    private func toolIcon(_ systemImage: String) -> some View {
-        Image(systemName: systemImage)
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(Theme.text)
-            .frame(width: 28, height: FloatingHeader.controlHeight)
-            .contentShape(Rectangle())
-    }
-
-    /// Avatar + username, shown once the big card is out of view. Uses the same
-    /// glass capsule as the post reader's node pill. Tapping returns to the top,
-    /// which is the usual gesture for a collapsed title.
-    private func identityCapsule(scrollProxy: ScrollViewProxy) -> some View {
-        FloatingHeaderButton(borderShape: .capsule) {
+    /// Avatar + name as the bar's title, shown once the big card is out of
+    /// view. Tapping returns to the top, the usual gesture for a collapsed
+    /// title.
+    private func identityTitle(scrollProxy: ScrollViewProxy) -> some View {
+        Button {
             withAnimation(.easeInOut(duration: 0.3)) {
                 scrollProxy.scrollTo(topAnchor, anchor: .top)
             }
@@ -401,45 +266,33 @@ struct ProfileView: View {
             HStack(spacing: 8) {
                 if store.isGuest {
                     Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 24))
-                        .foregroundStyle(Theme.muted(0.4))
-                        .frame(width: 26, height: 26)
+                        .font(.system(size: 22))
+                        .foregroundStyle(Theme.textFaint)
+                        .frame(width: 24, height: 24)
                 } else {
                     RemoteAvatar(
                         url: store.avatarURL,
                         letter: store.initial,
                         variant: abs(store.username.hashValue),
-                        size: 26
+                        size: 24
                     )
                 }
                 Text(store.displayName)
-                    .font(Theme.body(14, weight: .semibold))
+                    .font(Theme.body(15, weight: .semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
             }
-            .padding(.leading, 4)
-            .padding(.trailing, 14)
-            .frame(height: FloatingHeader.controlHeight)
         }
-        .accessibilityLabel("回到顶部")
+        .buttonStyle(.plain)
+        .accessibilityLabel(AppString("回到顶部"))
     }
 
-    /// Fades the capsule in as the card's display name slides behind the header
-    /// bar. Measured, not guessed: the name sits at content y ≈ 190, which
-    /// passes under the floating buttons at a scroll of ≈ 81 — so the window is
-    /// 90…140 rather than something that would leave both names visible at once.
-    private var identityRevealProgress: CGFloat {
-        min(max((scrollOffset - 90) / 50, 0), 1)
-    }
-
-    /// Extra banner height while the user overscrolls downward. Zero at rest
-    /// and when scrolling up, so it only ever grows the image.
-    private var pullStretch: CGFloat {
-        max(0, -scrollOffset)
-    }
-
-    /// Height reserved for the floating button row.
-    private var headerBarHeight: CGFloat { FloatingHeader.controlHeight + 16 }
+    // The title fades in as the display name slides behind the bar (reveal
+    // from 110 over 40pt, in `chrome`). The name sits about 140pt below the
+    // safe-area top (bar, banner, the avatar's lower half), so it passes
+    // under the bar at a scroll of ≈ 90. The banner's pull stretch is
+    // `chrome.pull`: zero at rest and when scrolling up, so it only ever
+    // grows the image.
 
     /// Banner artwork. Scales to *cover* whatever height the hero gives it —
     /// enlarging a small image or shrinking a large one — then crops the
@@ -466,263 +319,270 @@ struct ProfileView: View {
     }
 
     private var profileBannerFallback: some View {
-        ZStack {
-            Theme.surface
-            HStack {
-                Spacer()
-                Image(systemName: "at")
-                    .font(.system(size: 118, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.08))
-                    .rotationEffect(.degrees(-8))
-                    .padding(.trailing, 20)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.divider)
-                .frame(height: 1)
-        }
+        Theme.profileBanner
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var profileCard: some View {
-        VStack(spacing: 14) {
-            Group {
-                if store.isGuest {
-                    // The generic guest avatar, same as the post reader's.
-                    Image(systemName: "person.crop.circle.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .foregroundStyle(Theme.muted(0.4))
-                        .frame(width: 96, height: 96)
-                        .background(Theme.bg, in: Circle())
-                } else {
-                    RemoteAvatar(
-                        url: store.avatarURL,
-                        letter: store.initial,
-                        variant: abs(store.username.hashValue),
-                        size: 96
-                    )
-                }
+    /// Avatar and actions, name and chips, handle, bio, meta, then the stats
+    /// and the two collection cards.
+    private var identityBlock: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Pulled up 32pt over the banner; the buttons drop 42pt so they
+            // sit under the banner, beside the avatar's lower half.
+            HStack(alignment: .top, spacing: 8) {
+                profileAvatar
+                Spacer(minLength: 8)
+                identityActions
+                    .padding(.top, 42)
             }
-            .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 5))
-            .shadow(color: .black.opacity(0.14), radius: 14, y: 8)
-            .offset(y: -42)
-            .padding(.bottom, -34)
+            .padding(.top, -32)
 
-            VStack(spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(store.displayName)
-                        .font(Theme.heading(24, weight: .bold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-
-                    if let title = store.title, !title.isEmpty {
-                        titleBadge(title)
-                    }
-                }
-
-                HStack(spacing: 6) {
-                    Text("@\(store.username)")
-                        .font(Theme.body(15, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.62))
-
-                    if let flair = store.flair {
-                        FlairBadge(flair: flair)
-                    }
-
-                    if let followers = store.followerCount {
-                        Text("·")
-                            .font(Theme.body(15, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.38))
-                        Text("\(followers) 粉丝")
-                            .font(Theme.body(14, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.62))
-                    }
-                }
+            FlowLayout(spacing: 6) {
+                Text(store.displayName)
+                    .font(Theme.heading(22, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .frame(minHeight: 29)
+                nameChips
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
 
-            HStack(spacing: 8) {
-                profilePill(store.lastSeen, icon: "circle.fill", iconColor: store.isGuest ? Theme.muted(0.38) : Theme.accent)
-                profilePill(store.joined, icon: "calendar")
-            }
-
-            if !store.roles.isEmpty {
-                FlowLayout(spacing: 8, alignment: .center) {
-                    ForEach(store.roles) { role in
-                        profileChip(role.label, color: roleColor(role))
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            }
-
-            if !store.badges.isEmpty || !store.recentNodes.isEmpty {
-                FlowLayout(spacing: 8, alignment: .center) {
-                    if !store.badges.isEmpty {
-                        achievementsLink
-                    }
-                    if !store.recentNodes.isEmpty {
-                        recentNodesLink
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            }
+            Text(handleLine)
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
 
             if !store.bio.isEmpty {
-                Text(store.bio)
+                // Raw bio text: its `:shortcode:`s become the site's emoji.
+                EmojiShortcodeText(text: store.bio.collapsingBlankLines, pointSize: 14)
                     .font(Theme.body(14))
-                    .foregroundStyle(Theme.text.opacity(0.78))
-                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineSpacing(5)
+                    .multilineTextAlignment(.leading)
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
             }
-
-            profileMeta
 
             if store.isGuest {
-                guestLoginAction
-                    .padding(.top, 2)
+                // No stats or cards follow, so the bio would otherwise sit
+                // right on the tab strip.
+                Spacer().frame(height: 12)
+            } else {
+                ProfileStatsCard(items: statItems)
+                    .padding(.top, 12)
             }
 
-            if store.isLoading {
-                ProgressView()
-                    .tint(Theme.accent)
-            } else if let errorText = store.errorText {
+            collectionCards
+                .padding(.top, 8)
+
+            // No inline spinner: the phase handles first loads, and a refresh
+            // shows the system's own. A spinner row here appeared mid-page on
+            // pull-to-refresh and shoved everything below it down a frame.
+            if !store.isLoading, let errorText = store.errorText {
                 Text(errorText)
                     .font(Theme.body(12))
                     .foregroundStyle(Theme.danger)
                     .lineLimit(2)
+                    .padding(.top, 8)
             }
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 18)
-    }
-
-    /// Guests still need a way into the login flow — the same glass 登录
-    /// button the home header shows.
-    private var guestLoginAction: some View {
-        GuestLoginButton()
+        .padding(.bottom, 12)
     }
 
     @ViewBuilder
-    private var profileMeta: some View {
-        let items = profileMetaItems
-        if !items.isEmpty {
-            // One row, wrapping only if it has to: 位置 and 网址 are each a few
-            // words, and a line apiece left the card taller than the facts
-            // justified. `FlowLayout` keeps them side by side on a normal phone
-            // and drops the second one down when a long website would collide.
-            FlowLayout(spacing: 14, alignment: .center) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    Button {
-                        item.action()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: item.icon)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.accent)
-                            Text(item.text)
-                                .font(Theme.body(12, weight: .medium))
-                                .foregroundStyle(Theme.muted(0.62))
-                                .lineLimit(1)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.pressable)
-                }
+    private var profileAvatar: some View {
+        Group {
+            if store.isGuest {
+                // The generic guest avatar, same as the post reader's.
+                Image(systemName: "person.crop.circle.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(Theme.textFaint)
+                    .frame(width: avatarSize, height: avatarSize)
+                    .background(Theme.bg, in: Circle())
+            } else {
+                RemoteAvatar(
+                    url: store.avatarURL,
+                    letter: store.initial,
+                    variant: abs(store.username.hashValue),
+                    size: avatarSize
+                )
             }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 4)
+        }
+        .background(Theme.bg, in: Circle())
+        .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 3))
+    }
+
+    /// Guests get the login button here; a signed-in reader's 签到 is in
+    /// the top bar and editing is in 设置 › 个人资料.
+    @ViewBuilder
+    private var identityActions: some View {
+        if store.isGuest {
+            guestLoginAction
         }
     }
 
-    /// 位置 opens Maps, 网址 opens the in-app browser. Both were plain text
-    /// before, which read like links and did nothing.
-    private var profileMetaItems: [(icon: String, text: String, action: () -> Void)] {
-        var items: [(icon: String, text: String, action: () -> Void)] = []
-        if let location = store.location, !location.isEmpty {
-            items.append(("mappin.and.ellipse", location, { openInMaps(location) }))
+    /// The 段位 (`tier_name`); absent when they hide their level.
+    private var tierName: String? {
+        guard let name = store.tierName, !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// The 头衔 (`title`), unless it only repeats the tier.
+    private var shownTitle: String? {
+        guard let title = store.title?.trimmingCharacters(in: .whitespaces), !title.isEmpty,
+              title != tierName
+        else { return nil }
+        return title
+    }
+
+    /// Tier, then the 头衔 when it isn't the tier, then roles and flair.
+    @ViewBuilder
+    private var nameChips: some View {
+        if let tierName {
+            ProfileNameChip(kind: .tier) { TierLabel(name: tierName, size: 12) }
+                .padding(.vertical, 2.5)
         }
-        if let website = store.website, !website.isEmpty {
-            let url = store.websiteURL
-            items.append(("link", website, { openProfileWebsite(url: url, displayText: website) }))
+        if let shownTitle {
+            UserTitleChip(title: shownTitle, style: store.titleStyle)
+                .padding(.vertical, 2)
+        }
+        // A guest's only role is GUEST, which the name already says.
+        if !store.isGuest {
+            ForEach(store.roles) { role in
+                ProfileNameChip(kind: .role) { Text(role.label) }
+                    .padding(.vertical, 2)
+            }
+        }
+        if let flair = store.flair {
+            FlairBadge(flair: flair)
+                .padding(.vertical, 4)
+        }
+    }
+
+    /// "u/username · 2024年3月 加入"; guests see their mode instead.
+    private var handleLine: String {
+        if store.isGuest { return store.lastSeen }
+        return store.joined.isEmpty ? "u/\(store.username)" : "u/\(store.username) · \(store.joined)"
+    }
+
+    /// 声望 / 能量 / 关注者 — the ones the store has. `ProfileStat.row` puts 能量
+    /// first and 声望 second.
+    private var statItems: [ProfileStatsCard.Item] {
+        var items: [ProfileStatsCard.Item] = []
+        // "--" is the store's not-loaded placeholder; leave those out.
+        if store.stats.count > 1, store.stats[1].value != "--" {
+            items.append(.init(
+                value: store.stats[1].value,
+                label: AppString("声望"),
+                action: { app.pushPage(.reputation) }
+            ))
+        }
+        if let energy = store.stats.first, energy.value != "--" {
+            items.append(.init(
+                value: energy.value,
+                label: AppString("能量"),
+                action: { app.pushPage(.energy) }
+            ))
+        }
+        if let followers = store.followerCount {
+            items.append(.init(value: "\(followers)", label: AppString("关注者")))
+        }
+        // 升级进度 as the fourth cell; tapping opens the requirements.
+        if let report = store.upgradeProgress, report.hasConditions {
+            items.append(.init(
+                value: "\(report.satisfiedCount)/\(report.allConditions.count)",
+                label: AppString("升级进度"),
+                action: { activeSheet = .upgrade }
+            ))
         }
         return items
     }
 
-    // MARK: Achievements link + badge sheet
-
-    private var achievementsLink: some View {
-        Button { activeSheet = .badges } label: {
-            HStack(spacing: 8) {
-                HStack(spacing: -7) {
-                    ForEach(store.badgeDetails.prefix(3)) { badge in
-                        ProfileBadgeIcon(badge: badge)
-                            .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
-                    }
-                }
-                Text("\(store.badges.count) 项徽章")
-                    .font(Theme.body(13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.5))
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 12)
-            .padding(.vertical, 6)
-            .background(Theme.surface, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
-        }
-        .buttonStyle(.pressable)
-    }
-
-    /// 头衔 next to the display name. Uses the admin-designed style from
-    /// discourse-custom-badge when one is configured for the user's group/badge.
-    /// Plain text — the color/effect carries the emphasis, no background chrome.
+    /// 成就 and 常去节点 side by side; each opens its sheet.
     @ViewBuilder
-    private func titleBadge(_ title: String) -> some View {
-        if let style = store.titleStyle {
-            StyledTitleText(text: title, style: style)
-                .lineLimit(1)
-        } else {
-            Text(title)
-                .font(Theme.body(13, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.62))
-                .lineLimit(1)
+    private var collectionCards: some View {
+        if achievements != nil || !store.badges.isEmpty || !store.recentNodes.isEmpty {
+            let visible = ProfileCollectionCard<EmptyView>.visibleCount
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
+                spacing: 8
+            ) {
+                if let list = achievements {
+                    // Most recently earned first.
+                    let unlocked = list.achievements
+                        .filter { $0.isUnlocked && $0.off != true }
+                        .sorted { ($0.lastAt ?? $0.unlockedAt ?? "") > ($1.lastAt ?? $1.unlockedAt ?? "") }
+                    let count = list.unlockedCount ?? unlocked.count
+                    let shown = Array(unlocked.prefix(visible))
+                    ProfileCollectionCard(
+                        title: AppString("成就"),
+                        count: list.total.map { "\(count) / \($0)" } ?? "\(count)",
+                        overflow: max(count - shown.count, 0),
+                        action: { app.pushPage(.reputation) }
+                    ) {
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, item in
+                            AchievementMedal(item: item, size: 40)
+                                .overlapRing(index: index)
+                        }
+                    }
+                } else if !store.badges.isEmpty {
+                    let shown = Array(store.badgeDetails.prefix(visible))
+                    ProfileCollectionCard(
+                        title: AppString("成就"),
+                        count: "\(store.badges.count)",
+                        overflow: max(store.badges.count - shown.count, 0),
+                        action: { activeSheet = .badges }
+                    ) {
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, badge in
+                            ProfileBadgeIcon(badge: badge, size: 40)
+                                .background(Theme.bg)
+                                .overlapRing(index: index)
+                        }
+                    }
+                }
+                if !store.recentNodes.isEmpty {
+                    let shown = Array(store.recentNodes.prefix(visible))
+                    ProfileCollectionCard(
+                        title: AppString("常去节点"),
+                        count: AppString("\(store.recentNodes.count) 个"),
+                        overflow: max(store.recentNodes.count - shown.count, 0),
+                        action: { activeSheet = .nodes }
+                    ) {
+                        ForEach(Array(shown.enumerated()), id: \.element.id) { index, node in
+                            // The shared node icon: logo, else the node's glyph on its colour.
+                            NodeSummaryIcon(node: node, size: 40, cornerRadius: 20)
+                                .background(Theme.bg, in: Circle())
+                                .overlapRing(index: index)
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// Recently visited nodes, styled like the achievements pill.
-    private var recentNodesLink: some View {
-        Button { activeSheet = .nodes } label: {
-            HStack(spacing: 8) {
-                HStack(spacing: -7) {
-                    ForEach(store.recentNodes.prefix(3)) { node in
-                        // The node's own logo, the same as the sheet shows —
-                        // an initial on a colour disc was a placeholder that
-                        // outlived the data being available.
-                        NodeAvatar(node: node, size: 22, cornerRadius: 11)
-                            .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 2))
-                    }
-                }
-                Text("\(store.recentNodes.count) 个节点")
-                    .font(Theme.body(13, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.5))
-            }
-            .padding(.leading, 8)
-            .padding(.trailing, 12)
-            .padding(.vertical, 6)
-            .background(Theme.surface, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
+    /// Guests still need a way into the login flow — the same auth flow as
+    /// the 登录 in the other tabs' bars, as a glass capsule of its own here.
+    private var guestLoginAction: some View {
+        Button {
+            presentAuth(app)
+        } label: {
+            Text("登录")
+                .font(Theme.body(13, weight: .semibold))
+                .foregroundStyle(Theme.headerText)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 14)
+                .frame(height: FloatingHeader.controlHeight)
         }
-        .buttonStyle(.pressable)
+        .glassButton(tint: FloatingHeader.glassTint, shape: .capsule)
+        .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
     }
+
+    // MARK: Sheets
 
     private var nodesSheet: some View {
         NavigationStack {
@@ -731,7 +591,7 @@ struct ProfileView: View {
                     ForEach(store.recentNodes) { node in
                         Button {
                             activeSheet = nil
-                            app.tab = .nodes
+                            app.openNode(slug: node.slug)
                         } label: {
                             ProfileNodeRow(node: node)
                         }
@@ -742,7 +602,7 @@ struct ProfileView: View {
             }
             .scrollIndicators(.hidden)
             .background(Theme.bg)
-            .navigationTitle("最近访问")
+            .navigationTitle("常去节点")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -763,7 +623,7 @@ struct ProfileView: View {
                 VStack(spacing: 10) {
                     ForEach(store.badgeDetails) { item in
                         HStack(spacing: 12) {
-                            ProfileBadgeIcon(badge: item, size: 44, cornerRadius: 12)
+                            ProfileBadgeIcon(badge: item, size: 44, cornerRadius: Theme.cornerMedium)
 
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(item.name)
@@ -772,7 +632,7 @@ struct ProfileView: View {
                                 if !item.description.isEmpty {
                                     Text(item.description)
                                         .font(Theme.body(12))
-                                        .foregroundStyle(Theme.muted(0.6))
+                                        .foregroundStyle(Theme.textMuted)
                                         .lineLimit(2)
                                 }
                             }
@@ -780,9 +640,9 @@ struct ProfileView: View {
                             Spacer(minLength: 0)
                         }
                         .padding(14)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                                 .strokeBorder(Theme.divider, lineWidth: 1)
                         }
                     }
@@ -807,78 +667,31 @@ struct ProfileView: View {
     }
 
 
-    // MARK: Reddit-style stats
+    // MARK: Activity tabs
 
-    private var redditStatsRow: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(store.stats.enumerated()), id: \.offset) { index, stat in
-                VStack(spacing: 3) {
-                    Text(stat.value)
-                        .font(Theme.heading(17, weight: .bold))
-                        .foregroundStyle(stat.isAccented ? Theme.accent : Theme.text)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                    Text(stat.label)
-                        .font(Theme.body(10, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.55))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-                .frame(maxWidth: .infinity)
-
-                if index < store.stats.count - 1 {
-                    Rectangle()
-                        .fill(Theme.divider)
-                        .frame(width: 1, height: 26)
-                }
-            }
-        }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 16)
-    }
-
-    // MARK: Sticky activity tabs
-
+    /// The system segmented control (the glass one on iOS 26).
     private var tabBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 24) {
-                ForEach(ProfileStore.ProfileTab.allCases) { tab in
-                    Button {
-                        withAnimation(.quick) { selectedTab = tab }
-                    } label: {
-                        VStack(spacing: 7) {
-                            Text(tab.label)
-                                .font(Theme.body(14, weight: selectedTab == tab ? .semibold : .medium))
-                                .foregroundStyle(selectedTab == tab ? Theme.text : Theme.muted(0.5))
-                            Rectangle()
-                                .fill(selectedTab == tab ? Theme.accent : Color.clear)
-                                .frame(height: 2)
-                                .clipShape(Capsule())
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.pressable)
-                }
+        Picker(AppString("内容"), selection: Binding(
+            get: { selectedTab },
+            set: { tab in withAnimation(.quick) { selectedTab = tab } }
+        )) {
+            ForEach(ProfileStore.ProfileTab.displayOrder, id: \.value) { item in
+                Text(item.label).tag(item.value)
             }
-            .padding(.horizontal, 16)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 4)
-        .background(Theme.bg)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
-        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     @ViewBuilder
     private var tabContent: some View {
         if selectedTab == .energy {
             energyContent
-        } else if store.loadingTab == selectedTab && (store.actionItems[selectedTab]?.isEmpty ?? true) {
-            ProgressView()
-                .tint(Theme.accent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 44)
+        } else if !store.isGuest, store.actionItems[selectedTab] == nil, !store.failedTabs.contains(selectedTab) {
+            // Not loaded yet (nil, not empty): rows, not "还没有…".
+            ProfileRowsSkeleton()
         } else if let items = store.actionItems[selectedTab], !items.isEmpty {
             LazyVStack(spacing: 0) {
                 ForEach(items) { activityRow($0) }
@@ -908,10 +721,10 @@ struct ProfileView: View {
         VStack(spacing: 10) {
             Image(systemName: "arrow.clockwise")
                 .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.4))
+                .foregroundStyle(Theme.textFaint)
             Text("加载失败")
                 .font(Theme.body(13))
-                .foregroundStyle(Theme.muted(0.55))
+                .foregroundStyle(Theme.textMuted)
             Button {
                 let tab = selectedTab
                 Task { await store.loadTab(tab) }
@@ -932,20 +745,17 @@ struct ProfileView: View {
     /// 能量 history from the discourse-points-service plugin.
     @ViewBuilder
     private var energyContent: some View {
-        if store.loadingTab == .energy && store.pointsHistory.isEmpty {
+        if !store.isGuest && !store.pointsLoaded && store.pointsHistory.isEmpty {
             ProgressView()
                 .tint(Theme.accent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 44)
         } else if store.pointsHistory.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: "bolt.slash")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.35))
-                Text(store.isGuest ? AppString("登录后查看你的能量历史") : AppString("暂无能量历史记录"))
-                    .font(Theme.body(13))
-                    .foregroundStyle(Theme.muted(0.5))
-            }
+            EmptyStateView(
+                icon: "bolt.slash",
+                message: store.isGuest ? AppString("登录后查看你的能量历史") : AppString("暂无能量历史记录"),
+                iconSize: 26
+            )
             .frame(maxWidth: .infinity)
             .padding(.vertical, 52)
         } else {
@@ -956,27 +766,10 @@ struct ProfileView: View {
         }
     }
 
-    /// Into 财富榜 — the same table as the web's /rank. A natural neighbour of
-    /// this reader's own energy history.
+    /// 当前能量 with the 财富榜 place and 全部明细 (the energy page), as the
+    /// artboard heads this tab.
     private var leaderboardRow: some View {
-        Button { activeSheet = .leaderboard } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "trophy")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.accent700)
-                Text(AppString("财富榜"))
-                    .font(Theme.body(14))
-                    .foregroundStyle(Theme.text)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.35))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 13)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.pressable)
+        EnergyTabHeader(balance: store.pointsTotal)
     }
 
     private func pointsRow(_ entry: PointsHistoryEntry) -> some View {
@@ -991,7 +784,7 @@ struct ProfileView: View {
                     .multilineTextAlignment(.leading)
                 Text(pointsDate(entry))
                     .font(Theme.body(11, weight: .medium))
-                    .foregroundStyle(Theme.muted(0.45))
+                    .foregroundStyle(Theme.textFaint)
             }
 
             Spacer(minLength: 8)
@@ -1018,76 +811,27 @@ struct ProfileView: View {
     }
 
     private func activityRow(_ item: UserActionItem) -> some View {
-        Button { openAction(item) } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(item.title ?? AppString("无标题"))
-                    .font(Theme.body(15, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-
-                let excerpt = DiscourseFormat.plainText(item.excerpt ?? "")
-                if !excerpt.isEmpty {
-                    Text(excerpt)
-                        .font(Theme.body(13))
-                        .foregroundStyle(Theme.muted(0.6))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-
-                HStack(spacing: 6) {
-                    Image(systemName: activityIcon(item))
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.accent)
-                    Text(DiscourseFormat.relative(item.createdAt))
-                        .font(Theme.body(11, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.45))
-                    Spacer(minLength: 0)
-                }
-            }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.pressable)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.divider).frame(height: 1).padding(.horizontal, 16)
-        }
+        ProfileActivityRow(item: item) { openAction(item) }
     }
 
     private var emptyTab: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "tray")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.35))
-            Text(store.isGuest ? AppString("登录后查看你的\(selectedTab.label)") : AppString("还没有\(selectedTab.label)"))
-                .font(Theme.body(13))
-                .foregroundStyle(Theme.muted(0.5))
-        }
+        EmptyStateView(
+            icon: "tray",
+            message: store.isGuest ? AppString("登录后查看你的\(selectedTab.displayLabel)") : AppString("还没有\(selectedTab.displayLabel)"),
+            iconSize: 26
+        )
         .frame(maxWidth: .infinity)
         .padding(.vertical, 52)
-    }
-
-    private func activityIcon(_ item: UserActionItem) -> String {
-        switch item.actionType {
-        case 1: return "heart.fill"
-        case 3: return "bookmark.fill"
-        case 4: return "doc.text.fill"
-        case 5: return "arrowshape.turn.up.left.fill"
-        default: return "circle.fill"
-        }
     }
 
     private func openAction(_ item: UserActionItem) {
         guard let topicId = item.topicId else { return }
         let author = item.name?.isEmpty == false ? item.name! : (item.username ?? "?")
-        // Through `openReader` with no queue: one activity row is not a list
-        // to page through, and inheriting the last screen's would send a swipe
-        // to an unrelated post.
+        // At the reply itself for a 帖子 row, as the public profile does.
+        let slug = item.categoryId.flatMap { NodelocAdapterState.shared.nodeSlug(forID: $0) }
         app.openReader(Post(
             id: topicId,
-            node: "",
+            node: slug.map { "n/\($0)" } ?? "",
             avatarLetter: String(author.prefix(1)).uppercased(),
             variant: abs(author.hashValue) % 2,
             time: DiscourseFormat.relative(item.createdAt),
@@ -1098,59 +842,9 @@ struct ProfileView: View {
             hasImage: false,
             authorUsername: item.username,
             authorName: item.name
-        ))
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
+        ), postNumber: item.postNumber)
     }
 
-    private func profilePill(_ text: String, icon: String, iconColor: Color = Theme.muted(0.46)) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: icon == "circle.fill" ? 8 : 11, weight: .semibold))
-                .foregroundStyle(iconColor)
-            Text(text)
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.62))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Theme.bg, in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
-    }
-
-    private func profileChip(_ text: String, color: Color, icon: String? = nil) -> some View {
-        HStack(spacing: 5) {
-            if let icon {
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(color)
-            }
-            Text(text)
-                .font(Theme.body(11, weight: .semibold))
-                .foregroundStyle(color)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(color.opacity(0.1), in: Capsule())
-        .overlay(Capsule().strokeBorder(color.opacity(0.22), lineWidth: 1))
-    }
-
-    /// Keyed on the role's kind, never on its label — the label is translated.
-    private func roleColor(_ role: ProfileRole) -> Color {
-        switch role.kind {
-        case .admin, .moderator:
-            return Theme.danger
-        case .trustLevel(let level) where level >= 3:
-            return Color(light: 0x8A36D6, dark: 0xC99BFF)
-        case .guest:
-            return Theme.muted(0.58)
-        case .trustLevel:
-            return Color(light: 0x2F6DF6, dark: 0x7EA7FF)
-        }
-    }
 }
 
 /// Node accent color from a Discourse category hex string.
@@ -1174,7 +868,7 @@ private struct ProfileNodeRow: View {
                     .lineLimit(1)
                 Text(node.description)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
             }
@@ -1183,32 +877,19 @@ private struct ProfileNodeRow: View {
 
             Text(node.memberCount)
                 .font(Theme.body(11, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.48))
+                .foregroundStyle(Theme.textFaint)
         }
         .padding(14)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder
     private var icon: some View {
-        if let logoURL = node.logoURL {
-            RemoteAvatar(url: logoURL, letter: letter, size: 44, cornerRadius: 12)
-        } else {
-            let tint = profileNodeColor(node.colorHex)
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(tint.opacity(0.16))
-                .frame(width: 44, height: 44)
-                .overlay {
-                    Text(letter)
-                        .font(Theme.heading(17, weight: .bold))
-                        .foregroundStyle(tint)
-                }
-        }
+        NodeSummaryIcon(node: node, size: 44, cornerRadius: Theme.cornerMedium)
     }
 
     private var letter: String { String(node.name.prefix(1)) }
@@ -1249,7 +930,7 @@ private struct UpgradeProgressSheet: View {
                         }
                     }
                 }
-                .padding(.horizontal, 18)
+                .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, 12)
                 .padding(.bottom, 32)
             }
@@ -1276,7 +957,7 @@ private struct UpgradeProgressSheet: View {
                  ? AppString("维持要求 \(report.satisfiedCount)/\(report.totalConditions ?? report.allConditions.count) 项达标")
                  : AppString("已满足 \(report.satisfiedCount)/\(report.totalConditions ?? report.allConditions.count) 项要求"))
                 .font(Theme.body(13))
-                .foregroundStyle(Theme.muted(0.6))
+                .foregroundStyle(Theme.textMuted)
 
             // At the top level the requirements are upkeep: falling behind
             // matters, so say so rather than implying there's nothing to do.
@@ -1343,7 +1024,7 @@ private struct UpgradeProgressSheet: View {
                 if let scope = condition.scope, !scope.isEmpty {
                     Text(scope)
                         .font(Theme.body(11))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                 }
             }
 
@@ -1352,9 +1033,9 @@ private struct UpgradeProgressSheet: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
     }
@@ -1377,7 +1058,7 @@ private struct UpgradeProgressSheet: View {
 
                 Image(systemName: met ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(met ? Theme.success : Theme.muted(0.3))
+                    .foregroundStyle(met ? Theme.success : Theme.textFaint)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -1388,7 +1069,7 @@ private struct UpgradeProgressSheet: View {
                 if let target = condition.target {
                     Text(condition.isLimit ? AppString("上限 \(number(target))") : AppString("目标 \(number(target))"))
                         .font(Theme.body(11))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                 }
 
                 Spacer(minLength: 0)
@@ -1399,14 +1080,14 @@ private struct UpgradeProgressSheet: View {
 
             Text(hint(for: condition))
                 .font(Theme.body(10, weight: .medium))
-                .foregroundStyle(met ? Theme.success : Theme.muted(0.55))
+                .foregroundStyle(met ? Theme.success : Theme.textMuted)
                 .lineLimit(1)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
     }
@@ -1424,5 +1105,43 @@ private struct UpgradeProgressSheet: View {
 
     private func number(_ value: Double) -> String {
         value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+    }
+}
+
+
+/// 签到 in the profile's top bar, beside 设置 in one capsule. Lucide's
+/// calendar-heart (ISC, see NOTICE.md) on its 24 grid, drawn the size of the
+/// settings symbol: a small orange dot until today's check-in, grey once
+/// done, a spinner while it runs.
+struct CheckInBarButton: View {
+    let isCheckedIn: Bool
+    let isBusy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                if isBusy {
+                    ProgressView()
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image("LucideCalendarHeart")
+                        .resizable()
+                        .renderingMode(.template)
+                        .frame(width: 23, height: 23)
+                        // Done for today: greyed, dimmer than 设置 beside it.
+                        .foregroundStyle(isCheckedIn ? Color(.secondaryLabel) : Theme.text)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                if !isCheckedIn, !isBusy {
+                    Circle()
+                        .fill(KnotDrawing.nodeOrange)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 2, y: -1)
+                }
+            }
+        }
+        .disabled(isBusy)
+        .accessibilityLabel(isCheckedIn ? AppString("今日已签到") : AppString("签到"))
     }
 }

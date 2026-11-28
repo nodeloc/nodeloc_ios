@@ -45,6 +45,10 @@ struct CustomFeedView: View {
     /// no presentation, so the close button did nothing at all — whoever draws
     /// it there has to say how to close it.
     var onClose: (() -> Void)?
+    /// On the routed page stack this is `.pushed` or `.stackRoot` and the
+    /// stack is the page stack's own; `.standalone` (the pinned-sidebar
+    /// column) brings its own stack and a ✕.
+    var navigation: PageNavigation
 
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -65,8 +69,10 @@ struct CustomFeedView: View {
         onOpenPost: @escaping (Post) -> Void,
         onOpenNode: ((SidebarNodeSummary) -> Void)? = nil,
         onDeleted: (() -> Void)? = nil,
-        onClose: (() -> Void)? = nil
+        onClose: (() -> Void)? = nil,
+        navigation: PageNavigation = .standalone
     ) {
+        self.navigation = navigation
         self.target = target
         self.onOpenPost = onOpenPost
         self.onOpenNode = onOpenNode
@@ -76,18 +82,26 @@ struct CustomFeedView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            content
-                .background(Theme.bg)
-                .navigationTitle(store.feed?.name ?? current.name ?? AppString("Custom Feed"))
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
+        content
+            .background(Theme.bg)
+            .navigationTitle(store.feed?.name ?? current.name ?? AppString("Custom Feed"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                switch navigation {
+                case .pushed:
+                    // The system back button.
+                    ToolbarItem(placement: .topBarTrailing) { manageMenu }
+                case .stackRoot:
+                    ToolbarItem(placement: .topBarLeading) { PageBackButton { close() } }
+                    ToolbarItem(placement: .topBarTrailing) { manageMenu }
+                case .standalone:
                     ToolbarItem(placement: .topBarLeading) {
                         Button { close() } label: { Image(systemName: "xmark") }
                     }
                     ToolbarItem(placement: .topBarTrailing) { manageMenu }
                 }
-        }
+            }
+            .inPageNavigation(navigation)
         .task(id: current.id) {
             await store.loadIfNeeded(username: current.username, slug: current.slug)
         }
@@ -119,10 +133,9 @@ struct CustomFeedView: View {
             CustomFeedNodePickerSheet(store: store)
                 .standardSheet()
         }
-        .confirmationDialog(
+        .alert(
             AppString("删除「\(store.feed?.name ?? "")」？"),
-            isPresented: $confirmsDelete,
-            titleVisibility: .visible
+            isPresented: $confirmsDelete
         ) {
             Button(AppString("删除"), role: .destructive) { deleteFeed() }
             Button(AppString("取消"), role: .cancel) {}
@@ -149,14 +162,25 @@ struct CustomFeedView: View {
                 .tint(Theme.accent)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.feed == nil {
-            EmptyStateView(
-                icon: "line.3.horizontal.decrease.circle",
-                message: store.errorText ?? AppString("找不到这个 Custom Feed")
-            )
+            VStack(spacing: 12) {
+                EmptyStateView(
+                    icon: "line.3.horizontal.decrease.circle",
+                    message: store.errorText ?? AppString("找不到这个 Custom Feed")
+                )
+                // Usually the network; the page had no way to try again.
+                if store.errorText != nil {
+                    Button(AppString("重试")) {
+                        Task { await store.load(username: current.username, slug: current.slug) }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.horizontal, 32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
                 LazyVStack(spacing: 0) {
+                    feedChips
                     header
 
                     SegmentedControl(
@@ -180,6 +204,7 @@ struct CustomFeedView: View {
                 .padding(.bottom, 24)
             }
             .scrollIndicators(.hidden)
+            .tabBarFollowsScrollDirection()
             // On the scroll view, so the swipe works anywhere on the page and
             // not just over the pills. None of `NodeTopicRow`'s content scrolls
             // horizontally, so there is nothing here for it to fight.
@@ -207,56 +232,44 @@ struct CustomFeedView: View {
         let description = DiscourseFormat.plainText(feed?.description)
 
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(nodeAccentColor(feed?.color ?? "009966"))
-                    .frame(width: 30, height: 30)
+            HStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Theme.text)
+                    .frame(width: 60, height: 60)
                     .overlay {
                         Image(systemName: "line.3.horizontal.decrease")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(Theme.bg)
                     }
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(feed?.name ?? current.name ?? "")
-                        .font(Theme.heading(19, weight: .semibold))
+                        .font(Theme.heading(22, weight: .bold))
                         .foregroundStyle(Theme.text)
-                    Text(AppString("\(feed?.nodeCount ?? store.nodes.count) 个节点"))
-                        .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                    // 由 u/x 创建 · 仅自己可见 · 3 个节点
+                    Text([
+                        feed?.creator?.username.map { AppString("由 u/\($0) 创建") },
+                        feed?.isPrivate == true ? AppString("仅自己可见") : AppString("公开"),
+                        AppString("\(feed?.nodeCount ?? store.nodes.count) 个节点"),
+                    ].compactMap { $0 }.joined(separator: " · "))
+                        .font(Theme.body(13))
+                        .foregroundStyle(Theme.textMuted)
                 }
 
-                Spacer(minLength: 8)
+                Spacer(minLength: 0)
+            }
 
-                if feed?.isPrivate == true {
-                    TagChip(text: AppString("私密"), style: .neutral)
-                }
+            if store.canEdit {
+                ownerActions
             }
 
             if !description.isEmpty {
                 Text(description)
                     .font(Theme.body(14))
-                    .foregroundStyle(Theme.muted(0.75))
+                    .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let creator = feed?.creator, let username = creator.username {
-                Button {
-                    app.openProfile(username: username)
-                } label: {
-                    HStack(spacing: 7) {
-                        RemoteAvatar(
-                            url: avatarURL(creator),
-                            letter: String(username.prefix(1)).uppercased(),
-                            size: 22
-                        )
-                        Text(AppString("由 \(creator.name?.isEmpty == false ? creator.name! : username) 创建"))
-                            .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.6))
-                    }
-                }
-                .buttonStyle(.plain)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -264,27 +277,127 @@ struct CustomFeedView: View {
         .padding(.bottom, 14)
     }
 
+    /// The reader's own feeds as chips, the current one inked, and a way to
+    /// start another (App-iOS-CustomFeed).
+    @ViewBuilder
+    private var feedChips: some View {
+        let feeds = SidebarModel.shared.snapshot.feeds
+        if app.authed || DiscourseAuth.shared.isAuthenticated {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(feeds) { feed in
+                        Button {
+                            guard feed.slug != current.slug else { return }
+                            current = CustomFeedTarget(username: feed.username, slug: feed.slug, name: feed.name)
+                        } label: {
+                            CapsuleChipLabel(title: feed.name, isSelected: feed.slug == current.slug, systemImage: "line.3.horizontal.decrease", unselectedWeight: .medium)
+                        }
+                        .buttonStyle(.pressable)
+                    }
+                    Button {
+                        editing = .create
+                    } label: {
+                        Label(AppString("创建信息流"), systemImage: "plus")
+                            .font(Theme.body(14, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .padding(.horizontal, 16)
+                            .frame(height: 44)
+                            .overlay(Capsule().strokeBorder(Theme.textFaint, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                    }
+                    .buttonStyle(.pressable)
+                }
+                .padding(.horizontal, 16)
+            }
+            .scrollIndicators(.hidden)
+            .padding(.top, 6)
+            .padding(.bottom, 12)
+        }
+    }
+
+    /// 编辑, the link and delete under the title, for the owner.
+    private var ownerActions: some View {
+        HStack(spacing: 10) {
+            Button { if let feed = store.feed { editing = .edit(feed) } } label: {
+                Text(AppString("编辑"))
+                    .font(Theme.body(14, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 16)
+                    .frame(height: 38)
+                    .background(Theme.chip, in: Capsule())
+            }
+            .buttonStyle(.pressable)
+            Button { copyLink() } label: {
+                Image(systemName: "link")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 38, height: 38)
+                    .background(Theme.chip, in: Circle())
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel(AppString("复制链接"))
+            Button { confirmsDelete = true } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.danger)
+                    .frame(width: 38, height: 38)
+                    .background(Theme.chip, in: Circle())
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel(AppString("删除"))
+        }
+    }
+
+    /// 热门 / 最新, and 管理节点 · N for the owner.
+    private var sortRow: some View {
+        HStack(spacing: 8) {
+            ForEach([("hot", AppString("热门")), ("new", AppString("最新"))], id: \.0) { key, title in
+                Button {
+                    guard store.sort != key else { return }
+                    store.sort = key
+                    Task { await store.load(username: current.username, slug: current.slug) }
+                } label: {
+                    CapsuleChipLabel(title: title, isSelected: store.sort == key, unselectedWeight: .medium)
+                }
+                .buttonStyle(.pressable)
+            }
+            Spacer(minLength: 0)
+            if store.canEdit {
+                Button { showsNodePicker = true } label: {
+                    Text(AppString("管理节点 · \(store.feed?.nodeCount ?? store.nodes.count)"))
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                        .padding(.horizontal, 16)
+                        .frame(height: 44)
+                        .background(Theme.chip, in: Capsule())
+                }
+                .buttonStyle(.pressable)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
     @ViewBuilder
     private var feedTab: some View {
+        sortRow
         if store.visiblePosts.isEmpty {
             EmptyStateView(
-                icon: "tray",
-                message: store.nodes.isEmpty
-                    ? AppString("这个 Custom Feed 还没有节点")
-                    : AppString("这些节点下还没有主题")
+                icon: store.errorText == nil ? "tray" : "wifi.exclamationmark",
+                // The header loaded but the topics didn't: say so rather than
+                // claim the nodes are empty. Pull to refresh retries.
+                message: store.errorText
+                    ?? (store.nodes.isEmpty
+                        ? AppString("这个 Custom Feed 还没有节点")
+                        : AppString("这些节点下还没有主题"))
             )
+            .padding(.horizontal, 32)
             .padding(.top, 30)
         } else {
             ForEach(store.visiblePosts) { post in
                 NodeTopicRow(
                     post: post,
                     mode: readingMode.mode,
-                    // The queue goes in here rather than at the callback,
-                    // which lives in the presenter and cannot see this list.
-                    onTap: {
-                        app.readingQueue = store.visiblePosts
-                        onOpenPost(post)
-                    }
+                    onTap: { onOpenPost(post) }
                 )
             }
 
@@ -323,17 +436,17 @@ struct CustomFeedView: View {
                                     .foregroundStyle(Theme.text)
                                 Text(node.name)
                                     .font(Theme.body(12))
-                                    .foregroundStyle(Theme.muted(0.6))
+                                    .foregroundStyle(Theme.textMuted)
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 8)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.muted(0.4))
+                                .foregroundStyle(Theme.textFaint)
                         }
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .disabled(onOpenNode == nil)
@@ -506,13 +619,14 @@ struct CustomFeedFormSheet: View {
             .navigationTitle(mode.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button(AppString("取消")) { dismiss() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(mode.submitTitle) { save() }
-                        .disabled(isSaving || name.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
+                PrimaryToolbarAction(
+                    title: mode.submitTitle,
+                    isEnabled: !name.trimmingCharacters(in: .whitespaces).isEmpty,
+                    isWorking: isSaving
+                ) { save() }
             }
             .onAppear(perform: prefill)
         }
@@ -638,7 +752,7 @@ struct CustomFeedNodePickerSheet: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(Theme.muted(0.5))
+                .foregroundStyle(Theme.textMuted)
             TextField(AppString("搜索节点"), text: $search.term)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -646,7 +760,7 @@ struct CustomFeedNodePickerSheet: View {
             if !search.term.isEmpty {
                 Button { search.clear() } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Theme.muted(0.4))
+                        .foregroundStyle(Theme.textFaint)
                 }
                 .buttonStyle(.plain)
             }
@@ -654,14 +768,14 @@ struct CustomFeedNodePickerSheet: View {
         .font(Theme.body(14))
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
         .padding(.top, 8)
     }
 
     private func sectionTitle(_ text: String) -> some View {
         Text(text)
             .font(Theme.body(12, weight: .semibold))
-            .foregroundStyle(Theme.muted(0.55))
+            .foregroundStyle(Theme.textMuted)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 6)
     }
@@ -675,7 +789,7 @@ struct CustomFeedNodePickerSheet: View {
                     .foregroundStyle(Theme.text)
                 Text(node.name)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
@@ -701,6 +815,6 @@ struct CustomFeedNodePickerSheet: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
     }
 }

@@ -105,19 +105,19 @@ struct TopicPinSheet: View {
                     : AppString("本主题排在 \(nodeLabel) 列表最上方；其它列表不受影响。")
             )
             .font(Theme.body(12))
-            .foregroundStyle(Theme.muted(0.55))
+            .foregroundStyle(Theme.textMuted)
             .fixedSize(horizontal: false, vertical: true)
 
             if let until = topic.topicPinnedUntil {
-                Text("将于 \(until.formatted(date: .abbreviated, time: .shortened)) 自动取消置顶。")
+                Text("将于 \(until.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(AppLanguage.resolved.locale))) 自动取消置顶。")
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
+                    .foregroundStyle(Theme.textMuted)
             }
 
             if let statsLine {
                 Text(statsLine)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.45))
+                    .foregroundStyle(Theme.textFaint)
             }
 
             if topic.canPinTopic {
@@ -169,13 +169,13 @@ struct TopicPinSheet: View {
                     : AppString("置顶到 \(nodeLabel) 列表的最上方。读者读完后可以自行取消置顶。")
             )
             .font(Theme.body(12))
-            .foregroundStyle(Theme.muted(0.55))
+            .foregroundStyle(Theme.textMuted)
             .fixedSize(horizontal: false, vertical: true)
 
             if let statsLine {
                 Text(statsLine)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.45))
+                    .foregroundStyle(Theme.textFaint)
             }
 
             Toggle(isOn: $hasDeadline) {
@@ -216,13 +216,13 @@ struct TopicPinSheet: View {
 
             Text("横幅显示在每个页面的顶部，读者可以自行关闭。全站只能有一个横幅——设置新的会替换掉原来的。")
                 .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.55))
+                .foregroundStyle(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let count = stats?.bannerCount {
                 Text(count > 0 ? AppString("当前已有一个横幅主题。") : AppString("当前没有横幅主题。"))
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.45))
+                    .foregroundStyle(Theme.textFaint)
             }
 
             if topic.isTopicBanner {

@@ -70,12 +70,23 @@ struct FlagSheet: View {
     private static let maxMessage = 500
 
     var body: some View {
+        if target.chatChannelID == nil {
+            // Posts and topics: the server's report reasons, or the handling
+            // dialog for someone who manages the post (PostReportFlow).
+            PostReportFlow(target: target)
+                .standardSheet([.large])
+        } else {
+            chatFlagSheet
+        }
+    }
+
+    private var chatFlagSheet: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("举报会交给管理人员审核。请选择最贴切的原因。")
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.bottom, 4)
 
@@ -93,9 +104,6 @@ struct FlagSheet: View {
                             .foregroundStyle(Theme.danger)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    submitButton
-                        .padding(.top, 6)
                 }
                 .padding(18)
             }
@@ -107,8 +115,14 @@ struct FlagSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
+                PrimaryToolbarAction(
+                    title: selected?.isNotifyUser == true ? AppString("发送") : AppString("提交"),
+                    isEnabled: canSubmit,
+                    isWorking: isSubmitting
+                ) {
+                    Task { await submit() }
+                }
             }
-            .disabled(isSubmitting)
         }
         .standardSheet()
         .task { await loadFlags() }
@@ -133,7 +147,7 @@ struct FlagSheet: View {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
                     .font(.system(size: 17))
-                    .foregroundStyle(isSelected ? Theme.accent : Theme.muted(0.35))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textFaint)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(label(for: flag))
@@ -142,7 +156,7 @@ struct FlagSheet: View {
                     if let detail = detail(for: flag) {
                         Text(detail)
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.55))
+                            .foregroundStyle(Theme.textMuted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -152,10 +166,10 @@ struct FlagSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 isSelected ? Theme.accent.opacity(0.08) : Theme.surface,
-                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                     .strokeBorder(isSelected ? Theme.accent.opacity(0.45) : Theme.divider, lineWidth: 1)
             }
             .contentShape(Rectangle())
@@ -168,15 +182,15 @@ struct FlagSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(flag.isNotifyUser ? AppString("给作者的消息") : AppString("补充说明"))
                 .font(Theme.body(13, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.55))
+                .foregroundStyle(Theme.textMuted)
 
             TextField("请至少写 \(Self.minMessage) 个字", text: $message, axis: .vertical)
                 .font(Theme.body(15))
                 .lineLimit(3...8)
                 .padding(12)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                         .strokeBorder(Theme.divider, lineWidth: 1)
                 }
 
@@ -184,7 +198,7 @@ struct FlagSheet: View {
                 Spacer(minLength: 0)
                 Text("\(message.count)/\(Self.maxMessage)")
                     .font(Theme.body(11))
-                    .foregroundStyle(message.count > Self.maxMessage ? Theme.danger : Theme.muted(0.4))
+                    .foregroundStyle(message.count > Self.maxMessage ? Theme.danger : Theme.textFaint)
                     .monospacedDigit()
             }
 
@@ -195,32 +209,11 @@ struct FlagSheet: View {
                 Toggle(isOn: $confirmedIllegal) {
                     Text("我确认这是违法内容，并愿意为此报告负责。")
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .tint(Theme.accent)
             }
         }
-    }
-
-    private var submitButton: some View {
-        Button {
-            Task { await submit() }
-        } label: {
-            Group {
-                if isSubmitting {
-                    ProgressView().tint(Theme.bg)
-                } else {
-                    Text(selected?.isNotifyUser == true ? AppString("发送消息") : AppString("提交举报"))
-                        .font(Theme.body(15, weight: .semibold))
-                }
-            }
-            .foregroundStyle(Theme.bg)
-            .frame(maxWidth: .infinity)
-            .frame(height: 48)
-            .background(canSubmit ? Theme.accent : Theme.muted(0.25), in: Capsule())
-        }
-        .buttonStyle(.pressable)
-        .disabled(!canSubmit || isSubmitting)
     }
 
     // MARK: Rules

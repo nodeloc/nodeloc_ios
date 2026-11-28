@@ -7,19 +7,24 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
     /// Decided once by MainView; drives whether the bar's leading slot holds
     /// the menu button or the wordmark.
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
     @Environment(\.usesTopTabBar) private var usesTopTabBar
+    @Environment(\.openURL) private var openURL
     let postTransitionNamespace: Namespace.ID
     @State private var feed = FeedStore()
     @State private var announcements = HomeAnnouncementStore()
-    @State private var lastOffset: CGFloat = 0
-    @State private var headerHiddenAmount: CGFloat = 0
-    /// Content offset when the current drag started, so its direction can be
-    /// judged on release. Nil between drags.
-    @State private var dragStartOffset: CGFloat?
+    /// Whether the sort tabs have moved up into the bar. Its own small
+    /// observable, written from the scroll handler only when the answer
+    /// flips, so scrolling never re-renders this view frame by frame.
+    @State private var chrome = HomeChromeState()
+    /// The guest 登录 label's width, for the bar centre's room.
+    @State private var trailingLabelWidth: CGFloat = 52
     @State private var selectedProfile: UserProfileTarget?
+    /// The sort tab on show. Starts from the default-homepage preference.
+    @State private var selectedTab: HomeFeed = HomeFeedTabs.tab(for: UserPreferencesStore.shared.homeFeed)
     /// Same store as the node pages, so one choice drives every list.
     private var readingMode = NodeReadingModeStore.shared
     /// Watched for the default-homepage choice.
@@ -31,51 +36,91 @@ struct HomeView: View {
 
     var body: some View {
         feedBody
-            .tabBarHeader(isPinned: usesTopTabBar) {
-                // Nothing of its own: `tabBarHeader` already puts the shared
-                // mark button first, and the wordmark that used to be here
-                // read as a title for the tab bar's row rather than as the
-                // app.
-                EmptyView()
-            } trailing: {
-                // No glass of our own here: the toolbar already puts each item
-                // in a glass container on iOS 26, and ours nested a circle
-                // inside that rounded rectangle.
-                headerTrailingAction(inToolbar: true)
+            .toolbar {
+                SidebarToolbarItem(sidebarIsPinned: sidebarIsPinned)
+                // Not on iPad: the top tab bar owns the centre of that row.
+                if !usesTopTabBar {
+                    // The logo and the compact tabs, both always in the bar,
+                    // switched by UIKit alpha straight from `chrome` (see
+                    // `HomeBarCenterView`): SwiftUI toolbar content, hosted by
+                    // the UIKit bar, was seen on the phone keeping the logo
+                    // after the strip had folded — no tabs anywhere.
+                    ToolbarItem(placement: .principal) {
+                        HomeBarCenterView(
+                            chrome: chrome,
+                            selection: selectedTab,
+                            onSelect: { tab in selectTabScrollingUp(tab) }
+                        )
+                        .frame(width: barCenterWidth, height: 44)
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    headerTrailingAction
+                }
+            }
+            .tabRootNavigationBar()
+            // Someone's profile is pushed onto this tab's stack, so the back
+            // button and the swipe back are the system's.
+            .navigationDestination(item: $selectedProfile) { target in
+                PublicProfileOverlay(target: target, navigation: .pushed) {
+                    selectedProfile = nil
+                }
             }
     }
 
     private var feedBody: some View {
-        ZStack(alignment: .top) {
+        // `visiblePosts` filters the whole list against the block list on
+        // every access, so take it once per render.
+        let visiblePosts = feed.visiblePosts
+        return ZStack(alignment: .top) {
             // Feed
             ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+                // The strip is laid out by the page itself, above the
+                // list — not as a system safe-area bar, which on the phone
+                // sometimes kept the strip's space but didn't draw it
+                // (logo in the bar, no tabs anywhere). Folding it moves the
+                // list up without touching its scroll offset or insets.
+                // The navigation bar always stays. Collapsed (with the bottom
+                // bar minimised), the strip folds to zero height under it and
+                // the tabs show in the bar's centre in place of the logo.
+                HomeTabStripSlot(chrome: chrome, alwaysShown: usesTopTabBar) {
+                    HomeFeedTabs(selection: selectedTab) { tab in
+                        selectTab(tab)
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(Self.topAnchor, anchor: .top)
+                        }
+                    }
+                }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     Color.clear
-                        .frame(height: usesTopTabBar ? 0 : headerHeight)
+                        .frame(height: 0)
                         .id(Self.topAnchor)
 
-                    // Above the first row, the way the web's front page has it.
+                    // Above the first row, the way the web's front page has it:
+                    // the site announcements, as one line.
                     if !showsLoader {
-                        HomeAnnouncementCarousel(
+                        HomeAnnouncementStrip(
                             announcements: announcements.visible,
                             onOpen: { openAnnouncement($0) },
                             onDismiss: { announcement in
                                 Task { await announcements.dismiss(announcement) }
                             }
                         )
-                        .padding(.bottom, announcements.visible.isEmpty ? 0 : 14)
                     }
 
-                    if showsLoader {
+                    if showsFollowingSignIn {
+                        followingSignIn
+                    } else if showsLoader {
                         feedSkeleton
-                    } else if feed.visiblePosts.isEmpty {
+                    } else if visiblePosts.isEmpty {
                         // Load failed or nothing came back: say so instead of
                         // an unexplained blank screen.
                         feedUnavailable
                     } else {
-                        ForEach(feed.visiblePosts) { post in
-                            switch readingMode.mode {
+                        ForEach(visiblePosts) { post in
+                            switch readingMode.homeMode {
                             case .card:
                                 PostCard(
                                     post: post,
@@ -84,14 +129,13 @@ struct HomeView: View {
                                         withAnimation(.panelSlide) {
                                             selectedProfile = target
                                         }
-                                    },
-                                    readingQueue: feed.visiblePosts
+                                    }
                                 )
                             case .compact, .expand:
                                 // The node pages' rows, so the two lists match.
                                 NodeTopicRow(
                                     post: post,
-                                    mode: readingMode.mode,
+                                    mode: readingMode.homeMode,
                                     onTap: { openPost(post) },
                                     // This list is inside `MainView`, so the
                                     // composer overlay presents normally here.
@@ -122,26 +166,61 @@ struct HomeView: View {
                 .padding(.bottom, 100)
             }
             .scrollIndicators(.hidden)
+            // The sort tabs stay put under the bar while the list scrolls.
+            // A bar, not a plain inset: on iOS 26 the navigation bar's soft
+            // scroll-edge effect is drawn over the scroll view's top inset, and
+            // it blurred the tab labels. `safeAreaBar` makes the strip part of
+            // the bar area, so the effect sits under it instead.
             .refreshable {
                 await feed.load()
                 await announcements.load()
+                chrome.settleAtTop()
             }
-            .task { await feed.loadIfNeeded() }
+            .task {
+                if feed.selectedFeed == nil {
+                    selectTab(selectedTab)
+                } else {
+                    await feed.loadIfNeeded()
+                }
+            }
             .task { await announcements.load() }
+            // A new reading language: titles, node names and notices come back
+            // in it, so the feed on screen isn't left in the old one.
+            .onReceive(NotificationCenter.default.publisher(for: .nodelocLanguageDidChange)) { _ in
+                Task {
+                    await feed.load()
+                    await announcements.load()
+                }
+            }
             // Settings is an overlay over this view, so `task` won't run again
             // when it closes. Reload the moment the choice changes instead.
-            .onChange(of: preferences.homeFeed) { _, _ in
-                Task { await feed.load() }
+            .onChange(of: preferences.homeFeed) { _, newValue in
+                selectTab(HomeFeedTabs.tab(for: newValue))
             }
-            .onScrollGeometryChange(for: CGFloat.self) { geo in
-                geo.contentOffset.y
+            .tabBarFollowsScrollDirection()
+            // Measured from the resting position under the navigation bar,
+            // so 0 is the top whatever the bar's height.
+            .onScrollGeometryChange(for: HomeScrollPosition.self) { geo in
+                HomeScrollPosition(raw: geo.contentOffset.y, fromTop: geo.contentOffset.y + geo.contentInsets.top)
             } action: { _, newValue in
-                handleScroll(newValue)
+                chrome.track(newValue)
             }
-            // The wordmark comes back on a released flick, not on any downward
-            // drag — see `handleScrollPhase`.
-            .onScrollPhaseChange { oldPhase, newPhase, context in
-                handleScrollPhase(from: oldPhase, to: newPhase, context: context)
+            // Back from the background at the top: the strip is down.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { chrome.settleAtTop() }
+            }
+            // A fling released, or the top reached: the bottom bar's rules
+            // flipped, and the strip moves with it in the same frame.
+            .onChange(of: TabBarScrollState.shared.chromeCollapsed) { _, _ in
+                chrome.sync()
+            }
+            // The system can open or close the bottom bar without a scroll
+            // frame here; a light check keeps the strip in step with it.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(250))
+                    chrome.sync()
+                }
             }
             // The toolbar's mark asks for this; only it knows whether the
             // layout has a drawer to open instead.
@@ -150,36 +229,17 @@ struct HomeView: View {
                     proxy.scrollTo(Self.topAnchor, anchor: .top)
                 }
             }
-            }
-
-            // Kept mounted while the reader is open, not removed. The reader
-            // is drawn above this whole view and is opaque, so hiding the
-            // header bought nothing — and putting it *back* was a separate
-            // beat after the closing page had gone, which is what read as the
-            // list refreshing behind it. Now the header is simply there, and
-            // shows through the page as it shrinks away.
-            if !usesTopTabBar {
-                persistentHeaderButtons
-            }
-
-            if let selectedProfile {
-                PublicProfileOverlay(target: selectedProfile) {
-                    withAnimation(.overlayPush) {
-                        self.selectedProfile = nil
-                    }
+            .onChange(of: chrome.scrollToTopRequests) { _, _ in
+                withAnimation(.easeOut(duration: 0.3)) {
+                    proxy.scrollTo(Self.topAnchor, anchor: .top)
                 }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-                .zIndex(30)
+            }
+            }
             }
         }
-        // The page colour, safe area included.
-        //
-        // Every row paints `Theme.bg` itself, but the strip above the first
-        // one — the status bar and the 56pt spacer the floating header sits
-        // over — was painted by nobody, so it showed the window's black. In
-        // dark mode that is a visible seam at 107pt: pure black above,
-        // 0x0B0F0E below. In light mode white-on-white hid it, which is why it
-        // read as "only dark mode is wrong".
+        // The page colour, safe area included: the strip under the status bar
+        // and the navigation bar is painted by no row, and showed the window's
+        // black in dark mode.
         .background(Theme.bg.ignoresSafeArea())
     }
 
@@ -187,104 +247,38 @@ struct HomeView: View {
     /// this view's `ScrollViewReader`.
     private static let topAnchor = "feed-top"
 
-    private let headerHeight: CGFloat = 56
     private let logoHeight: CGFloat = 30
-    /// Release speed, in points per second, that counts as a flick rather than
-    /// a drag. Empirical: a deliberate flick leaves the finger at well over a
-    /// thousand, while easing the list back down sits near zero.
-    private let flickRevealSpeed: CGFloat = 500
 
     /// First load with nothing to show yet — the skeleton stands in for it.
     private var showsLoader: Bool {
         feed.visiblePosts.isEmpty && feed.isLoading
     }
 
-    /// 1 when the header is fully shown, 0 once it has scrolled away.
-    private var logoRevealProgress: CGFloat {
-        guard headerHeight > 0 else { return 1 }
-        return 1 - min(max(headerHiddenAmount / headerHeight, 0), 1)
-    }
-
-    // MARK: Scroll → collapse behaviour
-
-    private func handleScroll(_ top: CGFloat) {
-        let last = lastOffset
-        lastOffset = top
-        let delta = top - last
-
-        if top <= 0 {
-            revealHeader(animated: true)
-            return
-        }
-
-        if delta > 0 {
-            headerHiddenAmount = min(headerHeight, max(0, headerHiddenAmount + delta))
-            if headerHiddenAmount >= headerHeight, top > 32, !app.navCollapsed {
-                withAnimation(.spring(duration: 0.3)) { app.navCollapsed = true }
-            }
-        } else if delta < 0, top < headerHeight {
-            // Within the header's own height the wordmark just tracks the
-            // offset. Further down the feed a downward drag deliberately does
-            // *nothing* — only a flick brings it back, decided on release in
-            // `handleScrollPhase`.
-            headerHiddenAmount = min(headerHiddenAmount, max(0, top))
-            if headerHiddenAmount == 0, app.navCollapsed {
-                withAnimation(.spring(duration: 0.3)) { app.navCollapsed = false }
-            }
-        }
-    }
-
-    /// Reveals the wordmark only when a downward drag is *released with
-    /// momentum*: easing the list back down leaves the header hidden, a flick
-    /// snaps it back. Replaces a per-frame delta threshold, which couldn't tell
-    /// a slow drag from a fast one reliably — one slow finger can produce the
-    /// same 14pt step as a flick, just less often.
-    ///
-    /// Direction is taken from the offset travelled during the drag, not from
-    /// the sign of `velocity`: Apple's own `onScrollPhaseChange` example works
-    /// that way, and the vector's sign convention isn't documented. Only the
-    /// magnitude comes from the velocity.
-    ///
-    /// The `top <= 0` branch in `handleScroll` stays the safety net — reaching
-    /// the very top always reveals the header, even if no flick is recognised.
-    private func handleScrollPhase(
-        from oldPhase: ScrollPhase,
-        to newPhase: ScrollPhase,
-        context: ScrollPhaseChangeContext
-    ) {
-        if newPhase == .interacting {
-            dragStartOffset = context.geometry.contentOffset.y
-            return
-        }
-
-        guard oldPhase == .interacting, let start = dragStartOffset else { return }
-        dragStartOffset = nil
-
-        // Negative travel means the content moved back toward the top, which is
-        // a downward drag.
-        let travelled = context.geometry.contentOffset.y - start
-        let speed = abs(context.velocity?.dy ?? 0)
-        guard travelled < 0, speed >= flickRevealSpeed else { return }
-        revealHeader(animated: true)
-    }
-
-    private func revealHeader(animated: Bool) {
-        let changes = {
-            headerHiddenAmount = 0
-            app.navCollapsed = false
-        }
-
-        if animated {
-            withAnimation(.spring(duration: 0.26)) { changes() }
-        } else {
-            changes()
-        }
+    /// A tab tapped up in the bar: switch, and go back to the top of the new
+    /// list (which also brings the wordmark back).
+    private func selectTabScrollingUp(_ tab: HomeFeed) {
+        selectTab(tab)
+        chrome.scrollToTopRequests += 1
+        // Back at the top: the bottom bar opens with the strip. A scroll by
+        // code doesn't count as arriving there for the bar's own rules.
+        TabBarScrollState.shared.expand()
     }
 
     // MARK: Header
 
     /// Always the plain wordmark: the skeleton (first load) and the system
     /// refresh spinner are the loading signals, so the header stays still.
+    /// The bar's centre is laid out centred, so it is as wide as the screen
+    /// less twice the larger side: the 16pt margin, the button (☰ is 44; the
+    /// trailing one is measured — its glass adds ~14pt each side to the
+    /// label) and an 8pt gap.
+    private var barCenterWidth: CGFloat {
+        let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.width ?? 393
+        let trailing = app.isGuest ? max(44, trailingLabelWidth + 28) : 44
+        let side = 16 + max(44, trailing) + 8
+        return max(160, min(screen, 600) - 2 * side)
+    }
+
     private var headerWordmark: some View {
         Image("NodelocWordmark")
             .resizable()
@@ -293,84 +287,66 @@ struct HomeView: View {
             .accessibilityLabel("NodeLoc")
     }
 
-    /// The phone's floating header. Unused while the sidebar is pinned: there
-    /// the menu button is gone and both the wordmark and the trailing action
-    /// have moved into the tab bar's own row as toolbar items.
-    private var persistentHeaderButtons: some View {
-        HStack {
-            SidebarMenuButton()
-
-            Spacer()
-
-            // Scrolls up out of the way with the header, while the glass
-            // buttons stay pinned.
-            headerWordmark
-                .opacity(logoRevealProgress)
-                .offset(y: -(1 - logoRevealProgress) * headerHeight * 0.6)
-
-            Spacer()
-
-            headerTrailingAction(inToolbar: false)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-    }
-
     /// 发帖 for members, 登录 for guests — posting needs an account either way.
-    /// Shared so the floating header and the iPad toolbar show the same control.
-    ///
-    /// - Parameter inToolbar: drops this view's own glass, because a toolbar
-    ///   item on iOS 26 already sits in a glass container and the two nest
-    ///   visibly — a circle inside a rounded rectangle.
     @ViewBuilder
-    private func headerTrailingAction(inToolbar: Bool) -> some View {
-        Group {
-            if app.isGuest {
-                GuestLoginButton()
-            } else {
-                composeButton(inToolbar: inToolbar)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func composeButton(inToolbar: Bool) -> some View {
-        let label = Image(systemName: "plus")
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(Theme.accent)
-            .frame(width: 34, height: 34)
-
-        // Not `glassButton(tint: nil)` for the toolbar case: an untinted glass
-        // is still a glass, and what doubles up there is the glass itself
-        // rather than its colour.
-        if inToolbar {
-            Button {
-                withAnimation(.overlayPush) { app.overlay = .compose }
-            } label: {
-                label
-            }
+    private var headerTrailingAction: some View {
+        if app.isGuest {
+            GuestLoginButton()
+                // Its real width (登录 / Log in differ), so the bar's centre
+                // can take everything up to it.
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trailingLabelWidth = $0 }
         } else {
             Button {
                 withAnimation(.overlayPush) { app.overlay = .compose }
             } label: {
-                label
+                Image(systemName: "plus")
+                    .foregroundStyle(Theme.accent)
             }
-            .glassButton(tint: Theme.accent.opacity(0.14), shape: .circle)
-            .shadow(color: .black.opacity(0.08), radius: 9, y: 6)
+            .accessibilityLabel(AppString("发帖"))
         }
+    }
+
+    /// 关注 needs an account: a guest gets the sign-in prompt, not a request
+    /// the server would answer with everything.
+    private var showsFollowingSignIn: Bool {
+        selectedTab == .following && app.isGuest
+    }
+
+    private func selectTab(_ tab: HomeFeed) {
+        selectedTab = tab
+        guard !(tab == .following && app.isGuest) else { return }
+        Task { await feed.select(tab) }
+    }
+
+    private var followingSignIn: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(Theme.textFaint)
+            Text(AppString("登录后查看你加入的节点里的新帖"))
+                .font(Theme.body(14))
+                .foregroundStyle(Theme.textMuted)
+                .multilineTextAlignment(.center)
+            Button(AppString("登录")) { requestLogin(app, .content) }
+                .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 130)
+        .padding(.horizontal, 32)
     }
 
     private func openPost(_ post: Post) {
-        app.openReader(post, in: feed.visiblePosts)
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
+        app.openReader(post)
     }
 
-    /// A banner points at a topic; the id is all the overlay needs.
+    /// An announcement points at a topic; the id is all the overlay needs.
+    /// Anything else goes through the app's link routing (in-app browser).
     private func openAnnouncement(_ announcement: NLHomeAnnouncements.Announcement) {
-        guard let topicID = announcement.topicId else { return }
-        app.openTopic(id: topicID)
+        if let topicID = announcement.topicId, topicID > 0 {
+            app.openTopic(id: topicID)
+        } else if let link = announcement.url, let url = URL(string: link) {
+            openURL(url)
+        }
     }
 
     /// Friendly failure/empty state with a retry, shown when the first load
@@ -379,10 +355,10 @@ struct HomeView: View {
         VStack(spacing: 12) {
             Image(systemName: feed.errorText == nil ? "tray" : "wifi.exclamationmark")
                 .font(.system(size: 30, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.35))
+                .foregroundStyle(Theme.textFaint)
             Text(feed.errorText ?? AppString("暂时没有内容"))
                 .font(Theme.body(14))
-                .foregroundStyle(Theme.muted(0.55))
+                .foregroundStyle(Theme.textMuted)
                 .multilineTextAlignment(.center)
             Button("重试") {
                 Task { await feed.load() }
@@ -400,13 +376,13 @@ struct HomeView: View {
     /// One pulse on the container keeps every row in phase.
     private var feedSkeleton: some View {
         VStack(spacing: 0) {
-            switch readingMode.mode {
+            switch readingMode.homeMode {
             case .card:
                 ForEach(0..<3, id: \.self) { _ in cardSkeleton }
             case .compact:
                 ForEach(0..<10, id: \.self) { _ in compactSkeleton }
             case .expand:
-                ForEach(0..<5, id: \.self) { _ in expandSkeleton }
+                ForEach(0..<6, id: \.self) { _ in FeedTopicRowSkeleton() }
             }
         }
         .skeletonPulsing()
@@ -415,8 +391,8 @@ struct HomeView: View {
     /// Mirrors PostCard: author line, title, media block, action pills.
     private var cardSkeleton: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Circle().fill(Theme.neutral300).frame(width: 26, height: 26)
+            HStack(spacing: 7) {
+                Circle().fill(Theme.neutral300).frame(width: 22, height: 22)
                 SkeletonLine(widthFraction: 0.35)
             }
             SkeletonLine(widthFraction: 0.9, height: 16)
@@ -429,7 +405,7 @@ struct HomeView: View {
                 Capsule().fill(Theme.neutral300).frame(width: 64, height: 30)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Theme.pagePadding)
         .padding(.vertical, 11)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.divider).frame(height: 1)
@@ -452,34 +428,364 @@ struct HomeView: View {
         }
     }
 
-    /// Mirrors NodeTopicRow's expand row: author line, title next to a square
-    /// thumbnail, then the action pills.
-    private var expandSkeleton: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Circle().fill(Theme.neutral300).frame(width: 24, height: 24)
-                SkeletonLine(widthFraction: 0.3)
-            }
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
-                    SkeletonLine(widthFraction: 1, height: 15)
-                    SkeletonLine(widthFraction: 0.7, height: 15)
-                }
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Theme.neutral300)
-                    .frame(width: 78, height: 78)
-            }
-            HStack(spacing: 8) {
-                Capsule().fill(Theme.neutral300).frame(width: 80, height: 28)
-                Capsule().fill(Theme.neutral300).frame(width: 56, height: 28)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
+}
+
+// MARK: - Sort tabs
+
+/// The home feed's sort tabs (design App-iOS-Feed): 热门 / 最新 / 精华 /
+/// 上升中 / 关注 as underlined text, 16pt, 26pt apart, on a 44pt strip with a
+/// hairline under it. Scrolls sideways when a translation runs long.
+struct HomeFeedTabs: View {
+    let selection: HomeFeed
+    /// The copy that sits in the navigation bar while scrolling down the
+    /// feed: smaller, tighter, and without the strip's own background and
+    /// hairline, which would cut a box out of the bar's glass.
+    var inBar = false
+    let onSelect: (HomeFeed) -> Void
+
+    @Namespace private var underline
+
+    /// The web's order (web/pages.go `homeSorts`): 新鲜 sits right after 最新,
+    /// its posting-time twin.
+    static let tabs: [HomeFeed] = [.hot, .latest, .fresh, .top, .rising, .following]
+
+    /// The tab a default-homepage choice lands on. 精选 (the personal mix) has
+    /// no tab of its own and starts on 热门.
+    static func tab(for feed: HomeFeed) -> HomeFeed {
+        switch feed {
+        case .best: .hot
+        default: feed
         }
     }
+
+    static func label(_ feed: HomeFeed) -> String {
+        switch feed {
+        case .hot: AppString("热门")
+        case .latest: AppString("最新")
+        case .top: AppString("精华")
+        case .rising: AppString("上升中")
+        case .fresh: AppString("新鲜")
+        case .following: AppString("关注")
+        default: feed.label
+        }
+    }
+
+    var body: some View {
+        // No 列表样式 button here: the style is chosen in 设置 → 偏好 → 默认列表
+        // 视图 and from the node page's sort bar, and the strip needs the
+        // room for its six tabs.
+        tabs
+        .frame(height: inBar ? 38 : 44)
+        .background(inBar ? Color.clear : Theme.bg)
+        .overlay(alignment: .bottom) {
+            if !inBar {
+                Rectangle().fill(Theme.chip).frame(height: 1)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var tabs: some View {
+        ScrollViewReader { proxy in
+        ScrollView(.horizontal) {
+            HStack(spacing: inBar ? 18 : 22) {
+                ForEach(Self.tabs) { tab in
+                    let isOn = tab == selection
+                    Button { onSelect(tab) } label: {
+                        Text(Self.label(tab))
+                            .font(Theme.body(inBar ? 15 : 16, weight: isOn ? .bold : .medium))
+                            .foregroundStyle(isOn ? Theme.text : Theme.textMuted)
+                            .fixedSize()
+                            .frame(maxHeight: .infinity)
+                            .overlay(alignment: .bottom) {
+                                // In the bar the selected tab is told apart
+                                // by weight and colour alone.
+                                if isOn, !inBar {
+                                    UnevenRoundedRectangle(topLeadingRadius: 2, topTrailingRadius: 2)
+                                        .fill(Theme.text)
+                                        .frame(height: 3)
+                                        .matchedGeometryEffect(id: "underline", in: underline)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(isOn ? [.isSelected] : [])
+                    .id(tab)
+                }
+            }
+            .padding(.horizontal, inBar ? 6 : 16)
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: selection)
+        }
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        // The bar's copy is narrower than the row: keep the current tab in view.
+        .onAppear { if inBar { proxy.scrollTo(selection, anchor: .center) } }
+        .onChange(of: selection) { _, tab in
+            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(tab, anchor: .center) }
+        }
+        }
+    }
+}
+
+// MARK: - Bar ⇄ strip
+
+/// Whether the sort tabs sit in the navigation bar (reading down the feed) or
+/// in their strip under it (at the top, or heading back up).
+///
+/// Kept apart from `HomeView` so the scroll handler — called every frame —
+/// touches only `@ObservationIgnored` bookkeeping. `tabsInBar` is written
+/// only when it flips, and only the two small views below read it.
+@MainActor
+@Observable
+final class HomeChromeState {
+    private(set) var tabsInBar = false
+    /// Bumped when a tab tapped in the bar should take the list to its top.
+    var scrollToTopRequests = 0
+
+    @ObservationIgnored private var lastOffset: CGFloat = 0
+    @ObservationIgnored private var lastRaw: CGFloat = 0
+    /// Distance travelled in the current direction; flips reset it.
+    @ObservationIgnored private var run: CGFloat = 0
+
+    /// How far the reader must keep going one way before the bar changes —
+    /// enough that a finger's wobble or a bounce doesn't flicker it.
+    private let threshold: CGFloat = 28
+    /// Never move the tabs up before the strip itself has scrolled away.
+    private let minimumOffset: CGFloat = 56
+
+    /// Follows the bottom tab bar (`TabBarScrollState.chromeCollapsed`, set
+    /// by the same scroll rules that minimise and expand it): the strip
+    /// collapses after a downward run and comes back only on a fast pull
+    /// back (1000 pt/s while dragging), a fast fling on release, or the top —
+    /// never on a slow reverse drag. `fromTop` keeps the strip down until it
+    /// has scrolled away, and at the top it is always down.
+    ///
+    /// The strip's own height change moves `fromTop` but not the shared
+    /// state, so it can't drive itself (the earlier flip-flop).
+    func track(_ position: HomeScrollPosition) {
+        let top = position.fromTop
+        lastRaw = position.raw
+        lastOffset = top
+        if top <= 8 {
+            set(false)
+            run = 0
+            return
+        }
+        sync()
+    }
+
+    /// Re-reads the shared state — also when it flips without a scroll frame.
+    func sync() {
+        let state = TabBarScrollState.shared
+        let minimized = TabBarScrollState.isActuallyMinimized()
+        // The system opened the bottom bar by itself (a tap on the minimised
+        // bar): open everything with it. Only the open edge is taken from
+        // UIKit — the bar's minimise animation and its reading lag the
+        // finger, and following it made the tabs fold only after the scroll
+        // had stopped.
+        if wasMinimized, !minimized, state.chromeCollapsed {
+            state.expand()
+        }
+        wasMinimized = minimized
+        // Collapse straight from the scroll rules, during the drag: set after
+        // a 30 pt downward run (`noteScrolledDown`), in the same frames the
+        // system starts minimising the bottom bar.
+        if !state.chromeCollapsed {
+            set(false)
+        } else if lastOffset > minimumOffset {
+            set(true)
+        }
+    }
+
+    @ObservationIgnored private var wasMinimized = false
+
+    /// Back to the strip under the bar, at once: for a return to the app or
+    /// the end of a refresh, when the list sits at its top.
+    func settleAtTop() {
+        guard lastOffset <= 8, tabsInBar else { return }
+        tabsInBar = false
+        run = 0
+    }
+
+    private func set(_ value: Bool) {
+        guard tabsInBar != value else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { tabsInBar = value }
+    }
+}
+
+struct HomeScrollPosition: Equatable {
+    let raw: CGFloat
+    let fromTop: CGFloat
+}
+
+/// The bar's centre as a UIKit view holding both the logo and the compact
+/// tabs. Which one shows is set as UIKit alpha by an observation of
+/// `chrome.tabsInBar` that re-arms itself on every change — not by SwiftUI
+/// re-evaluating toolbar content, which the bar didn't reliably do.
+struct HomeBarCenterView: UIViewRepresentable {
+    let chrome: HomeChromeState
+    let selection: HomeFeed
+    let onSelect: (HomeFeed) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(chrome: chrome) }
+
+    func makeUIView(context: Context) -> UIView {
+        let c = context.coordinator
+        let container = UIView()
+        container.backgroundColor = .clear
+        let logo = UIHostingController(rootView: AnyView(
+            Image("NodelocWordmark").resizable().scaledToFit().frame(height: 30).accessibilityLabel("NodeLoc")
+        ))
+        let tabs = UIHostingController(rootView: AnyView(tabsView))
+        for host in [logo, tabs] {
+            host.view.backgroundColor = .clear
+            host.view.frame = container.bounds
+            host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            container.addSubview(host.view)
+        }
+        c.logo = logo
+        c.tabs = tabs
+        c.apply(animated: false)
+        c.observe()
+        return container
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        let c = context.coordinator
+        // The bar keeps this view across a rebuild of the page (a language
+        // change re-keys the root; a new `HomeView` brings a new `chrome`).
+        // Held on to, the old object stayed "expanded" while the strip
+        // followed the new one into "collapsed": the logo in the bar, the
+        // strip folded — no tabs anywhere. Always follow the current one.
+        if c.chrome !== chrome {
+            c.chrome = chrome
+            c.observe()
+        }
+        c.tabs?.rootView = AnyView(tabsView)
+        c.apply(animated: true)
+    }
+
+    private var tabsView: some View {
+        HomeFeedTabs(selection: selection, inBar: true, onSelect: onSelect)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @MainActor
+    final class Coordinator {
+        var chrome: HomeChromeState
+        var logo: UIHostingController<AnyView>?
+        var tabs: UIHostingController<AnyView>?
+        private var shown: Bool?
+
+        init(chrome: HomeChromeState) { self.chrome = chrome }
+
+        /// Bumped on each `observe()`, so a callback armed on an object
+        /// that's since been replaced doesn't re-arm itself.
+        private var generation = 0
+
+        func observe() {
+            generation += 1
+            let mine = generation
+            let watched = chrome
+            withObservationTracking {
+                _ = watched.tabsInBar
+            } onChange: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.generation == mine else { return }
+                    self.apply(animated: true)
+                    self.observe()
+                }
+            }
+        }
+
+        func apply(animated: Bool) {
+            let inBar = chrome.tabsInBar
+            guard inBar != shown, let logo = logo?.view, let tabs = tabs?.view else { return }
+            shown = inBar
+            let change = {
+                logo.alpha = inBar ? 0 : 1
+                tabs.alpha = inBar ? 1 : 0
+            }
+            logo.isUserInteractionEnabled = !inBar
+            tabs.isUserInteractionEnabled = inBar
+            logo.accessibilityElementsHidden = inBar
+            tabs.accessibilityElementsHidden = !inBar
+            if animated { UIView.animate(withDuration: 0.22, animations: change) } else { change() }
+        }
+    }
+}
+
+/// The bar's centre: the wordmark, or the sort tabs once they've moved up.
+struct HomeBarCenter<Wordmark: View>: View {
+    let chrome: HomeChromeState
+    let tabsInBar: Bool
+    let selection: HomeFeed
+    let onSelect: (HomeFeed) -> Void
+    @ViewBuilder var wordmark: Wordmark
+
+    var body: some View {
+        ZStack {
+            wordmark
+                .opacity(tabsInBar ? 0 : 1)
+                .offset(y: tabsInBar ? -8 : 0)
+                .accessibilityHidden(tabsInBar)
+                .allowsHitTesting(!tabsInBar)
+            HomeFeedTabs(selection: selection, inBar: true, onSelect: onSelect)
+                .padding(.horizontal, 6)
+                .frame(height: 44)
+                // The bar's own glass, like the buttons beside it: over the
+                // feed the labels need it to stay readable.
+                .glassSurface(tint: Theme.bg.opacity(0.35))
+                .clipShape(Capsule())
+                .opacity(tabsInBar ? 1 : 0)
+                .offset(y: tabsInBar ? 0 : 8)
+                .accessibilityHidden(!tabsInBar)
+                .allowsHitTesting(tabsInBar)
+        }
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: tabsInBar)
+        // Between the bar's buttons; the tabs scroll sideways inside it.
+        .frame(width: HomeBarCenter.width)
+        .clipped()
+    }
+
+    /// The bar's width less the leading and trailing buttons and their gaps.
+    static var width: CGFloat {
+        let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.width ?? 393
+        // Room for the trailing button's widest form (登录 / Log in) too.
+        return max(160, min(screen, 600) - 2 * (16 + 64 + 8))
+    }
+}
+
+/// The strip under the bar. Collapses (sliding up under the bar) while the
+/// tabs ride in the bar, and comes back when they return.
+struct HomeTabStripSlot<Strip: View>: View {
+    let chrome: HomeChromeState
+    /// iPad's top tab bar owns the bar's centre, so the strip never leaves.
+    var alwaysShown = false
+    @ViewBuilder var strip: Strip
+
+    /// The strip sits this much closer to the bar than its own frame would
+    /// put it — the design has the tabs right under the bar's controls.
+    private let tuck: CGFloat = 6
+
+    var body: some View {
+        let hidden = chrome.tabsInBar && !alwaysShown
+        // Always the same view, never inserted or removed, and never faded:
+        // collapsing only animates the height to zero (clipped), so while the
+        // strip takes any space its labels are drawn in it. The earlier
+        // insert/remove transition could be cut off by the next scroll and
+        // leave the slot holding its height with the labels at zero opacity —
+        // the empty band, with the bar's blur over it.
+        strip
+            .frame(height: stripHeight, alignment: .bottom)
+            .frame(height: hidden ? 0 : stripHeight, alignment: .bottom)
+            .clipped()
+            .allowsHitTesting(!hidden)
+            .accessibilityHidden(hidden)
+    }
+
+    private var stripHeight: CGFloat { 44 - tuck }
 }
 
 // MARK: - Post card
@@ -490,15 +796,7 @@ struct PostCard: View {
     let postTransitionNamespace: Namespace.ID
     /// Opens the author's public profile; nil disables the avatar tap.
     var onOpenAuthor: ((UserProfileTarget) -> Void)? = nil
-    /// The list this card is one of, so the reader can swipe to its
-    /// neighbours. Empty is fine — the swipe then has nowhere to go.
-    var readingQueue: [Post] = []
     @State private var selectedMediaIndex = 0
-    @State private var voteFaces = VoteFaces.shared
-    /// Which arrow's face picker is open on this card, if any.
-    @State private var pickingFaces: VoteDirection?
-    /// Which arrow is under a finger, for the pressed state.
-    @State private var pressingFaces: VoteDirection?
     @State private var showsMoreSheet = false
     /// Media opened straight from the card, without entering the post.
     @State private var viewerImages: [PostImage] = []
@@ -508,26 +806,23 @@ struct PostCard: View {
     @State private var nodeSummary: SidebarNodeSummary?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             postHeader
             postBody
             mediaPreview
             actionRow
+            if let reports = post.reportCount, reports > 0 {
+                FeedModStrip(reportCount: reports, onOpen: openPost)
+                    .padding(.bottom, 12)
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.top, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.bg)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
+            Rectangle().fill(Theme.chip).frame(height: 1)
         }
-        .matchedGeometryEffect(
-            id: postTransitionID(post.id),
-            in: postTransitionNamespace,
-            properties: .frame,
-            anchor: .center,
-            isSource: app.overlay != .post || app.selectedPost.id != post.id
-        )
         .contentShape(Rectangle())
         .onTapGesture(perform: openPost)
         // Media opens over the feed, so closing returns to the same scroll
@@ -548,10 +843,7 @@ struct PostCard: View {
     }
 
     private func openPost() {
-        app.openReader(post, in: readingQueue)
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
+        app.openReader(post)
     }
 
     /// New/unread for the signed-in user, unless opened this session.
@@ -562,89 +854,40 @@ struct PostCard: View {
     /// Opens the tapped media directly rather than the post.
     private func openMedia(at index: Int) {
         if let videoURL = post.videoURL {
-            viewerVideo = PostVideo(src: videoURL.absoluteString, posterSrc: post.imageURL?.absoluteString)
+            viewerVideo = PostVideo(src: videoURL.absoluteString, posterSrc: (post.videoPosterURL ?? post.imageURL)?.absoluteString)
             return
         }
+        // The viewer shows the original; the card drew the card-size thumbnail.
         let images = mediaItems.map {
-            PostImage(src: $0.url.absoluteString, width: $0.width, height: $0.height)
+            PostImage(src: ($0.originalURL ?? $0.url).absoluteString, width: $0.width, height: $0.height)
         }
         guard !images.isEmpty else { return }
         viewerImages = images
         viewerIndex = min(max(index, 0), images.count - 1)
     }
 
+    /// The feed row's node line (design App-iOS-Feed), shared with the
+    /// thumbnail rows so both reading modes start the same way.
     private var postHeader: some View {
-        HStack(spacing: 7) {
-            let avatar = RemoteAvatar(
-                url: post.avatarURL,
-                letter: post.avatarLetter,
-                variant: post.variant,
-                size: 26
-            )
-
-            if let onOpenAuthor, let target = post.authorProfileTarget {
-                Button { onOpenAuthor(target) } label: { avatar }
-                    .buttonStyle(.pressable)
-            } else {
-                avatar
-            }
-
-            if showsUnreadDot {
-                Circle()
-                    .fill(Theme.accent)
-                    .frame(width: 7, height: 7)
-            }
-
-            Text(post.node)
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(1)
-
-            Text("· \(post.time)")
-                .font(Theme.body(11))
-                .foregroundStyle(Theme.muted(0.46))
-                .lineLimit(1)
-
-            if app.isPinned(post) {
-                Label(post.pinnedGlobally ? AppString("全站置顶") : AppString("置顶"), systemImage: "pin.fill")
-                    .labelStyle(CompactLabelStyle())
-                    .font(Theme.body(10, weight: .semibold))
-                    .foregroundStyle(Theme.accent700)
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 7)
-                    .background(Theme.accent.opacity(0.1), in: Capsule())
-            }
-
-            TopicStateBadges(isSolved: post.isSolved, isHidden: post.isHidden, reportCount: post.reportCount)
-
-            Spacer(minLength: 0)
-
-            Button {
-                showsMoreSheet = true
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.4))
-                    .frame(width: 30, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.pressableIcon)
-            .sheet(isPresented: $showsMoreSheet) {
-                TopicMoreSheet(post: post) { startRepost() }
-            }
+        FeedRowHeader(post: post, showsUnreadDot: showsUnreadDot) {
+            showsMoreSheet = true
+        }
+        .sheet(isPresented: $showsMoreSheet) {
+            TopicMoreSheet(post: post) { startRepost() }
         }
     }
 
     private var postBody: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(post.title)
-                .font(Theme.heading(16, weight: .semibold))
+            Text(post.highlightedTitle.map { SearchHighlight.attributed($0, tint: Theme.accent) } ?? AttributedString(post.title))
+                .font(Theme.heading(17, weight: .semibold))
+                .lineSpacing(3)
                 .foregroundStyle(Theme.text)
                 .lineLimit(4)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !post.excerpt.isEmpty {
-                Text(post.excerpt)
+                Text(post.highlightedExcerpt.map { SearchHighlight.attributed($0, tint: Theme.accent) } ?? AttributedString(post.excerpt))
                     .font(Theme.body(13))
                     .lineSpacing(3)
                     .foregroundStyle(Theme.text.opacity(0.72))
@@ -659,7 +902,7 @@ struct PostCard: View {
         // A topic with a video autoplays it in place of the image carousel;
         // the thumbnail is just its poster frame anyway.
         if let videoURL = post.videoURL {
-            FeedVideoTile(url: videoURL, posterURL: post.imageURL) {
+            FeedVideoTile(url: videoURL, posterURL: post.videoPosterURL ?? post.imageURL, duration: post.videoDuration, knownAspect: post.videoAspect) {
                 openMedia(at: 0)
             }
             .padding(.top, 2)
@@ -674,132 +917,6 @@ struct PostCard: View {
                 .frame(height: FeedMediaCarousel.defaultHeight)
                 .padding(.top, 2)
         }
-    }
-
-    /// Up / score / down. Two tap targets in one capsule — the arrows were a
-    /// single button before, so the down arrow was decoration.
-    private var votePill: some View {
-        let score = app.voteScore(for: post)
-        let voteCount = app.voteCount(for: post)
-        let direction = app.voteDirection(for: post)
-        return HStack(spacing: 7) {
-            // Arrow and score share one hit region, as in the reader's control:
-            // the number belongs to the upvote next to it.
-            voteArrow(target: .up, direction: direction, score: score) {
-                HStack(spacing: 7) {
-                    voteGlyph(target: .up, direction: direction, score: score)
-
-                    Text(voteLabel(score: score, voteCount: voteCount))
-                        .font(Theme.body(12, weight: .semibold))
-                        .foregroundStyle(Theme.text.opacity(0.74))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-            }
-
-            Rectangle()
-                .fill(Theme.divider)
-                .frame(width: 1, height: 14)
-
-            voteArrow(target: .down, direction: direction, score: score) {
-                voteGlyph(target: .down, direction: direction, score: score)
-            }
-        }
-        .padding(.vertical, 7)
-        .padding(.horizontal, 10)
-        .background(Theme.neutral300, in: Capsule())
-        .sheet(item: $pickingFaces) { target in
-            VoteFacePicker(direction: target) { face in
-                pickingFaces = nil
-                app.castVote(target, on: post, reaction: face)
-            }
-        }
-    }
-
-    /// Wraps a region that votes in one direction. A plain view with two
-    /// gestures, not a Button: see `VoteControl.votable` — a button swallows the
-    /// long press, and making it simultaneous casts a vote on release as well as
-    /// opening the picker.
-    private func voteArrow<Content: View>(
-        target: VoteDirection,
-        direction: VoteDirection,
-        score: Int?,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        let isAvailable = canUseVoteArrow(target: target, score: score)
-        return content()
-            .padding(7)
-            .contentShape(Rectangle())
-            .padding(-7)
-            .scaleEffect(pressingFaces == target ? 0.88 : 1)
-            .opacity(isAvailable ? (pressingFaces == target ? 0.6 : 1) : 0.4)
-            .animation(.easeOut(duration: 0.12), value: pressingFaces)
-            .accessibilityAddTraits(.isButton)
-            .disabled(!isAvailable)
-            .onTapGesture {
-                guard canUseVoteArrow(target: target, score: score) else { return }
-                if score == nil {
-                    // No vote data: the up arrow is still the like it used to
-                    // be, and the down arrow has nothing sensible to do.
-                    if target == .up { app.toggleLike(post) }
-                } else {
-                    app.castVote(direction.next(target), on: post)
-                }
-            }
-            // Hold for the faces, as in the reader. Only where the plugin drives
-            // the row: with no score there's no vote to flavour.
-            // `onPressingChanged` also drives the pressed state above: these are
-            // gestures, not buttons, so nothing else would answer the touch.
-            .onLongPressGesture(
-                minimumDuration: 0.32,
-                perform: {
-                    guard canUseVoteArrow(target: target, score: score),
-                          score != nil,
-                          !voteFaces.faces(for: target).isEmpty
-                    else { return }
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    pickingFaces = target
-                },
-                onPressingChanged: { isPressing in
-                    guard canUseVoteArrow(target: target, score: score) else {
-                        if pressingFaces == target { pressingFaces = nil }
-                        return
-                    }
-                    pressingFaces = isPressing ? target : nil
-                }
-            )
-    }
-
-    private func voteLabel(score: Int?, voteCount: Int?) -> String {
-        guard let score else { return "\(app.voteCount(post))" }
-        return voteCount == 0 ? AppString("投票") : "\(score)"
-    }
-
-    private func canUseVoteArrow(target: VoteDirection, score: Int?) -> Bool {
-        guard score != nil else { return target == .up }
-        guard post.canVoteUp else { return false }
-        return target != .down || post.canVoteDown
-    }
-
-    private func voteGlyph(target: VoteDirection, direction: VoteDirection, score: Int?) -> some View {
-        let isCast = score == nil
-            ? (target == .up && app.isLiked(post))
-            : direction == target
-        return Image(VoteControl.assetName(for: target, filled: isCast))
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .frame(width: 17, height: 17)
-            .foregroundStyle(tint(target: target, direction: direction, score: score))
-    }
-
-    private func tint(target: VoteDirection, direction: VoteDirection, score: Int?) -> Color {
-        if score == nil {
-            return target == .up && app.isLiked(post) ? Theme.accent : Theme.muted(0.5)
-        }
-        guard direction == target else { return Theme.muted(0.45) }
-        return target == .down ? Theme.accent2 : Theme.accent
     }
 
     /// Opens the composer quoting this topic, the same shape the reader's 转发
@@ -823,28 +940,7 @@ struct PostCard: View {
     }
 
     private var actionRow: some View {
-        HStack(spacing: 8) {
-            // The pill always looked like a vote control; now both arrows are
-            // real. `voteScore` nil means discourse-vote doesn't cover this
-            // category, and the row falls back to the like it always was.
-            votePill
-
-            // Opens the topic, where replies live. The card's own tap does the
-            // same thing, but a count that looks like a button should behave
-            // like one.
-            Button(action: openPost) {
-                FeedActionPill(systemImage: "bubble.left", text: "\(post.comments)")
-            }
-            .buttonStyle(.pressable)
-
-            ShareLink(item: topicURL) {
-                FeedActionPill(systemImage: "arrowshape.turn.up.right", text: AppString("分享"))
-            }
-            .buttonStyle(.pressable)
-
-            Spacer(minLength: 0)
-        }
-        .padding(.top, 2)
+        FeedRowActions(post: post, onComments: openPost, onRepost: startRepost)
     }
 
     private var mediaItems: [PostMedia] {
@@ -856,7 +952,7 @@ struct PostCard: View {
     }
 }
 
-private struct FeedMediaCarousel: View {
+struct FeedMediaCarousel: View {
     let items: [PostMedia]
     @Binding var selection: Int
     /// Opens the current page full screen. Nil falls through to the card.
@@ -884,9 +980,10 @@ private struct FeedMediaCarousel: View {
             }
         }
         .frame(height: previewHeight)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+        // 16pt, as App-iOS-FeedCard's media block.
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
         .background {
@@ -898,53 +995,22 @@ private struct FeedMediaCarousel: View {
                     }
             }
         }
-        .contentShape(RoundedRectangle(cornerRadius: Theme.radiusMd, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
     }
 
+    /// App-iOS-FeedCard's media badge: a photo glyph and the count, bottom
+    /// right on a dark pill. While paging it reads "2/12", so the badge
+    /// doubles as the page indicator; the design has no arrows on iOS — the
+    /// swipe is the control.
     private var carouselControls: some View {
-        ZStack {
-            HStack {
-                pageButton(systemImage: "chevron.left") {
-                    guard selection > 0 else { return }
-                    withAnimation(.quicker) { selection -= 1 }
-                }
-                .opacity(selection > 0 ? 1 : 0)
-
-                Spacer(minLength: 0)
-
-                pageButton(systemImage: "chevron.right") {
-                    guard selection < items.count - 1 else { return }
-                    withAnimation(.quicker) { selection += 1 }
-                }
-                .opacity(selection < items.count - 1 ? 1 : 0)
-            }
-            .padding(.horizontal, 8)
-
-            VStack {
-                HStack {
-                    Spacer(minLength: 0)
-                    Text("\(selection + 1)/\(items.count)")
-                        .font(Theme.body(11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 8)
-                        .background(.black.opacity(0.58), in: Capsule())
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(8)
-        }
-    }
-
-    private func pageButton(systemImage: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(.black.opacity(0.46), in: Circle())
-        }
-        .buttonStyle(.pressable)
+        FeedMediaBadge(
+            systemImage: "photo",
+            text: selection == 0 ? "\(items.count)" : "\(selection + 1)/\(items.count)"
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+        .padding(10)
+        .allowsHitTesting(false)
+        .accessibilityLabel(AppString("第 \(selection + 1) 张，共 \(items.count) 张"))
     }
 
     /// Sized from the first item's real dimensions, Reddit-style: the card
@@ -966,6 +1032,13 @@ private struct FeedMediaPage: View {
     let item: PostMedia
     let width: CGFloat
 
+    /// Far outside the card's 16:9 … 4:5 range (by more than a third).
+    private var fitsWhole: Bool {
+        guard let w = item.width, let h = item.height, w > 0, h > 0 else { return false }
+        let ratio = CGFloat(h) / CGFloat(w)
+        return ratio < Theme.FeedMedia.minAspect / 1.33 || ratio > Theme.FeedMedia.maxAspect * 1.33
+    }
+
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
@@ -973,29 +1046,56 @@ private struct FeedMediaPage: View {
         // card's pixel size. The URL is the variant sized to the card, so the
         // source is neither the blurry mid-size default nor the heavy original.
         CachedRemoteImage(url: item.bestURL(forWidth: width, scale: displayScale)) { image in
-            image
-                .resizable()
-                .scaledToFill()
+            if fitsWhole {
+                // A panorama or a very tall screenshot: cropping it to the
+                // card's clamped shape left a meaningless slice, so it's shown
+                // whole over a blurred copy of itself (the design's carousel).
+                image.resizable().scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        image.resizable().scaledToFill()
+                            .blur(radius: 32)
+                            .saturation(1.25)
+                            .overlay(Color(red: 15 / 255, green: 26 / 255, blue: 28 / 255).opacity(0.16))
+                            .clipped()
+                    }
+            } else {
+                image
+                    .resizable()
+                    .scaledToFill()
+            }
         } placeholder: {
-            StripePattern()
+            // The image's own main colour while it loads (`card_media`), the
+            // hatch when the server doesn't know it.
+            if let hex = item.placeholderHex {
+                nodeAccentColor(hex)
+            } else {
+                StripePattern()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
     }
 }
 
-private struct FeedActionPill: View {
-    let systemImage: String
+/// The dark pill App-iOS-FeedCard puts on a card's media (photo count, and
+/// the same pill for a video's length).
+struct FeedMediaBadge: View {
+    let systemImage: String?
     let text: String
 
     var body: some View {
-        Label(text, systemImage: systemImage)
-            .labelStyle(CompactLabelStyle())
-            .font(Theme.body(12, weight: .semibold))
-            .foregroundStyle(Theme.text.opacity(0.62))
-            .padding(.vertical, 7)
-            .padding(.horizontal, 10)
-            .background(Theme.neutral300, in: Capsule())
+        HStack(spacing: 5) {
+            if let systemImage {
+                Image(systemName: systemImage).font(.system(size: 12, weight: .semibold))
+            }
+            Text(text).font(.system(size: 13, weight: .bold).monospacedDigit())
+        }
+        .foregroundStyle(.white)
+        .padding(.leading, systemImage == nil ? 10 : 8)
+        .padding(.trailing, 10)
+        .frame(height: 26)
+        .background(Color(red: 11 / 255, green: 31 / 255, blue: 24 / 255).opacity(0.78), in: Capsule())
     }
 }
 
@@ -1016,10 +1116,10 @@ struct ImagePlaceholder: View {
             StripePattern()
             Image(systemName: "photo")
                 .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(Theme.muted(0.5))
+                .foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
     }
 }
 

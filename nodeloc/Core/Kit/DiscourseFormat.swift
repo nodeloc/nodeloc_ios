@@ -20,9 +20,39 @@ enum DiscourseFormat {
         return f
     }()
 
+    /// A shared `DateFormatter` per (locale, template or pattern).
+    ///
+    /// Creating one is expensive — it loads ICU data for the locale — and
+    /// call sites built one per formatted value, often per row per render.
+    /// Formatting with a configured `DateFormatter` is thread-safe; they are
+    /// never mutated after being cached.
+    static func cachedFormatter(
+        locale: Locale,
+        template: String? = nil,
+        format: String? = nil,
+        calendar: Calendar? = nil
+    ) -> DateFormatter {
+        let key = "\(locale.identifier)|\(template ?? "")|\(format ?? "")|\(calendar.map { "\($0.identifier)" } ?? "")"
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        if let cached = formatters[key] { return cached }
+        let formatter = DateFormatter()
+        if let calendar { formatter.calendar = calendar }
+        formatter.locale = locale
+        if let template { formatter.setLocalizedDateFormatFromTemplate(template) }
+        if let format { formatter.dateFormat = format }
+        formatters[key] = formatter
+        return formatter
+    }
+
+    private static let formatterLock = NSLock()
+    nonisolated(unsafe) private static var formatters: [String: DateFormatter] = [:]
+
     static func date(_ string: String?) -> Date? {
         guard let string else { return nil }
-        return iso.date(from: string) ?? isoNoFraction.date(from: string)
+        // The hand parser covers every shape the API sends; the formatters
+        // stay as a fallback for anything odd.
+        return NLDate.parse(string) ?? iso.date(from: string) ?? isoNoFraction.date(from: string)
     }
 
     /// Compact relative time like "2h", "3d", "5m".
@@ -49,6 +79,24 @@ enum DiscourseFormat {
 
     static func plainText(_ html: String?) -> String {
         guard let html else { return "" }
+        if html.isEmpty { return "" }
+        // Rows call this from `body`, so every re-render of every visible row
+        // re-ran the regex and the entity passes. The answer only depends on
+        // the input, so keep it.
+        let key = html as NSString
+        if let cached = plainTextCache.object(forKey: key) { return cached as String }
+        let result = uncachedPlainText(html)
+        plainTextCache.setObject(result as NSString, forKey: key)
+        return result
+    }
+
+    nonisolated(unsafe) private static let plainTextCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 2000
+        return cache
+    }()
+
+    private static func uncachedPlainText(_ html: String) -> String {
         var text = html.replacing(htmlTagPattern, with: "")
         // Cooked titles carry the typographic set too — `fancy_title` renders
         // an apostrophe as `&rsquo;`, which used to reach the screen literally.

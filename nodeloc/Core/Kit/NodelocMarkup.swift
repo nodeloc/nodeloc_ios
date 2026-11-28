@@ -54,7 +54,7 @@ nonisolated enum NodelocMarkup {
         // "Log in to see" blocks. Locked: the placeholder span the reader
         // promotes to a locked frame. Unlocked: the content container.
         out = out.replacingOccurrences(
-            of: #"<div class="hidden-block" data-hidden="1" data-kind="[a-z]*" data-amount="[0-9]*">((?s:.*?))</div>"#,
+            of: #"<div class="hidden-block" data-hidden="[0-9]+" data-kind="[a-z]*" data-amount="[0-9]*">((?s:.*?))</div>"#,
             with: #"<span class='permission-login-placeholder'>$1</span>"#,
             options: .regularExpression
         )

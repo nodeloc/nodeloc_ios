@@ -117,6 +117,8 @@ struct TopicListItem: Decodable, Identifiable {
     /// card-mode autoplay". Only serialized on topic *list* items — the single
     /// topic endpoint doesn't carry it.
     let topicVideoUrl: String?
+    /// nodeloc's card media: all the first post's images and its first video.
+    let cardMedia: NLCardMedia?
 }
 
 struct TopicTag: Decodable, Hashable {
@@ -260,6 +262,8 @@ struct CreatePostResponse: Decodable {
     let id: Int?
     let topicId: Int?
     let postNumber: Int?
+    /// Held for review rather than published.
+    let held: Bool?
 }
 
 /// `POST /red-envelopes.json`
@@ -601,18 +605,6 @@ struct ActionSummary: Decodable {
     let acted: Bool?
 }
 
-/// discourse-reward: one reward given to a post. Serialized in `post.rewards`.
-struct PostReward: Decodable, Identifiable {
-    let id: Int
-    let userId: Int?
-    let username: String?
-    let avatarTemplate: String?
-    let amount: Int
-    let note: String?
-    let createdAt: String?
-    let isSystemReward: Bool?
-}
-
 /// One of discourse-reactions' faces, as it appears on a post.
 struct PostReaction: Decodable {
     let id: String?
@@ -750,10 +742,12 @@ struct TopicPost: Decodable, Identifiable {
     let totalDescendantCount: Int?
     /// The author's worn title and flair (the badge icon shown by their name).
     let userTitle: String?
+    /// The title's design (`author_title_style` → `{color, effect}`), when
+    /// the admin gave it one: personal title's style, else the group's.
+    let userTitleColor: String?
+    let userTitleEffect: String?
     let flairName: String?
     let flairUrl: String?
-    /// discourse-reward: rewards this post has received.
-    let rewards: [PostReward]?
     /// The viewer's own permissions on this post, decided server-side. A
     /// category moderator gets `canEdit`/`canDelete` on posts in their node and
     /// not elsewhere, so reading these is what keeps a node moderator's reach
@@ -780,6 +774,13 @@ struct TopicPost: Decodable, Identifiable {
     /// Nested view: written by someone this viewer ignores. Keys are intact but
     /// `cooked` is blanked.
     let ignoredPostPlaceholder: Bool?
+    /// Hidden from everyone but its author and the node's managers.
+    let hidden: Bool?
+    /// `rule`, `spam`, `held`, `staff`… — author and managers only.
+    let hiddenReason: String?
+    let hiddenNote: String?
+    /// Author only: editing re-judges it automatically.
+    let rejudge: Bool?
 
     /// discourse-mobile 小尾巴: the device string the author's app reported when
     /// the post was written, already reduced to the disclosure level they
@@ -791,9 +792,6 @@ struct TopicPost: Decodable, Identifiable {
     var likeCount: Int { actionsSummary?.first { $0.id == 2 }?.count ?? 0 }
     /// Whether the current user has already liked this post.
     var likedByMe: Bool { actionsSummary?.first { $0.id == 2 }?.acted ?? false }
-    /// Total energy this post has been rewarded (excludes system deducts, which
-    /// are negative and shouldn't count as "被打赏").
-    var rewardTotal: Int { (rewards ?? []).filter { $0.amount > 0 }.reduce(0) { $0 + $1.amount } }
 }
 
 /// `GET /n/{slug}/{id}.json?sort=` — Discourse's nested-replies view. The OP is
@@ -895,10 +893,11 @@ struct PollVoteResponse: Decodable {
     let vote: [String]?
 }
 
-// MARK: - Lottery (lottery plugin)
+// MARK: - Lottery
 
-/// Verified against a live nodeloc topic. `maxParticipants` comes back as
-/// 1_000_000 when the creator left it unlimited.
+/// `GET /api/v1/posts/{id}/lottery`, reshaped by `DiscourseShape.lottery`.
+/// `maxParticipants` comes back as 1_000_000 (or 0) when the creator left it
+/// unlimited. Statuses: open · drawn · failed (流拍) · cancelled.
 struct PostLottery: Decodable, Identifiable, Equatable {
     let id: Int
     let title: String?
@@ -906,26 +905,46 @@ struct PostLottery: Decodable, Identifiable, Equatable {
     let postId: Int?
     let minParticipants: Int?
     let maxParticipants: Int?
+    let minTicketsPerUser: Int?
     let maxTicketsPerUser: Int?
     let minTrustLevel: Int?
     let drawAt: String?
+    let drawnAt: String?
     let status: String?
     let levels: [LotteryPrizeLevel]?
     let ticketsCount: Int?
     let participantsCount: Int?
     let userTickets: Int?
     let isParticipating: Bool?
+    /// The viewer started it — the server refuses their tickets.
+    let isOwner: Bool?
+    /// The viewer's trust level, nil for a guest.
+    let viewerTrustLevel: Int?
     let canDraw: Bool?
     let canManage: Bool?
+    /// Admins only: `DELETE /api/v1/lotteries/{id}` (closes and refunds).
     let canClose: Bool?
+    /// The avatar strip, only while open: most tickets first, the viewer first.
     let participants: [LotteryParticipant]?
     let winners: [LotteryWinner]?
 
     var isOpen: Bool { status == "open" }
+    var isDrawn: Bool { status == "drawn" }
+    var isFailed: Bool { status == "failed" }
+    var isCancelled: Bool { status == "cancelled" }
+    var drawDate: Date? { DiscourseFormat.date(drawAt) }
+    /// Open on the server but past its draw time: the draw job hasn't run yet.
+    func isDrawing(now: Date = Date()) -> Bool {
+        guard isOpen, let drawDate else { return false }
+        return now >= drawDate
+    }
     /// The server stores "unlimited" as a sentinel rather than null.
     var hasParticipantCap: Bool {
         guard let maxParticipants else { return false }
         return maxParticipants > 0 && maxParticipants < 1_000_000
+    }
+    var isFull: Bool {
+        hasParticipantCap && (participantsCount ?? 0) >= (maxParticipants ?? 0)
     }
     var totalPrizes: Int {
         levels?.reduce(0) { $0 + max(1, $1.quantity ?? 1) } ?? 0
@@ -938,13 +957,23 @@ struct LotteryPrizeLevel: Decodable, Identifiable, Equatable {
     let name: String?
     let prize: String?
     let quantity: Int?
+    /// Filled once drawn.
+    let winners: [LotteryParticipant]?
 }
 
 struct LotteryParticipant: Decodable, Equatable {
     let username: String?
     let avatarTemplate: String?
     let tickets: Int?
+    let joinedAt: String?
     let isRandom: Bool?
+}
+
+/// `GET /api/v1/lotteries/{id}/participants`.
+struct LotteryParticipantsResponse: Decodable {
+    let participants: [LotteryParticipant]
+    let participantCount: Int?
+    let ticketCount: Int?
 }
 
 struct LotteryWinner: Decodable, Equatable {
@@ -957,6 +986,8 @@ struct LotteryWinner: Decodable, Equatable {
 struct LotteryActionResponse: Decodable {
     let success: Bool?
     let error: String?
+    /// The viewer's ticket total after a purchase.
+    let tickets: Int?
     let lottery: PostLottery?
 }
 
@@ -1015,6 +1046,10 @@ struct TopicResponse: Decodable {
     let redEnvelope: TopicRedEnvelope?
     let closed: Bool?
     let archived: Bool?
+    /// 精华. Set by staff (`topics.curate`) alone.
+    let featured: Bool?
+    /// A 担保交易 hangs off the first post (`GET /api/v1/posts/{id}/trade`).
+    let hasTrade: Bool?
     /// Pinned *for this reader* — false once they clear it, even though the
     /// topic is still featured. Staff actions must read `pinnedAt` instead.
     let pinned: Bool?
@@ -1026,6 +1061,8 @@ struct TopicResponse: Decodable {
     let pinnedUntil: String?
     let pinnedGlobally: Bool?
     let archetype: String?
+    /// The topic's tag names, in the order the author gave them.
+    let tags: [String]?
     let details: TopicDetails?
     /// Best answer, and whether this reader may accept one. `acceptedAnswer`
     /// goes null once that reply is deleted or hidden, while the topic stays
@@ -1055,7 +1092,8 @@ struct TopicRemoval: Decodable {
     let reputationPenalty: Int?
     let refunded: Bool?
     /// Manager actions against this author in 90 days, this one included.
-    let strikes90d: Int?
+    /// `strikes_90d`: the snake-case decoder capitalises the "d" after the digits.
+    let strikes90D: Int?
     let appealable: Bool?
     let appealed: Bool?
     let appealDeadline: String?
@@ -1138,6 +1176,12 @@ struct DiscourseEmoji: Codable, Identifiable, Hashable {
     var id: String { name }
     /// What goes in the message: Discourse cooks `:name:` into the image.
     var shortcode: String { ":\(name):" }
+}
+
+/// One site emoji pack, in the order the server lists packs.
+struct EmojiPack: Codable, Hashable {
+    let name: String
+    let emojis: [DiscourseEmoji]
 }
 
 /// One entry of `site.json`'s `post_action_types` / `topic_flag_types`: the
@@ -1474,7 +1518,10 @@ struct UserProfile: Decodable {
     let avatarTemplate: String?
     let createdAt: String?
     let lastSeenAt: String?
+    /// 头衔: the admin-given personal title (`users.title`), nil when none.
     let title: String?
+    /// 段位 name, absent when they hide their level.
+    let tierName: String?
     let profileBackgroundUploadUrl: String?
     let cardBackgroundUploadUrl: String?
     let location: String?
@@ -1516,6 +1563,10 @@ struct UserProfile: Decodable {
     /// viewer looking at somebody else, so absence means "常规".
     let ignored: Bool?
     let muted: Bool?
+    /// Whether the viewer may chat with this person (their 私信 policy, and
+    /// not blocked either way), and the server's reason when not.
+    var canMessage: Bool? = nil
+    var messageNote: String? = nil
     /// Achievements unlocked — a repeatable one counts once — matching the
     /// "n / N 已解锁" the web's profile and hover card show.
     let achievementCount: Int?
@@ -1688,6 +1739,8 @@ struct DirectoryApp: Decodable, Identifiable, Hashable {
     /// trials and the app's own account excluded. Cached ten minutes server
     /// side, so it moves in steps rather than continuously.
     let activeUsers: Int?
+    /// `game`, `applet` or `bot`.
+    var kind: String? = nil
 
     var isWebview: Bool { surface == "webview" }
 
@@ -1798,6 +1851,11 @@ struct UserActionItem: Decodable, Identifiable {
     let topicId: Int?
     let postNumber: Int?
     let postId: Int?
+    /// Only on topic rows (the 帖子 tab): the first post's score, the reply
+    /// count and a thumbnail. The backend's replies list has none of these.
+    var voteScore: Int? = nil
+    var replyCount: Int? = nil
+    var imageUrl: String? = nil
 
     var id: String { "\(actionType ?? 0)-\(topicId ?? 0)-\(postNumber ?? 0)-\(postId ?? 0)" }
 }
@@ -1910,6 +1968,17 @@ struct NotificationData: Decodable {
     /// The backend writes `data.title` and `data.body` for these rather than
     /// adding new fields; `title` arrives as `topicTitle` above.
     let body: String?
+    /// Set by the adapter for 版务 — queue work, reports, appeals, removals.
+    let moderation: Bool?
+    /// A system or moderation notification's site path (`data.path`): what
+    /// it opens. `/review?item=N`, `/n/<slug>/manage#review`, `/appeal`,
+    /// `/t/<id>/<floor>`, an admin page…
+    let path: String?
+    /// The review item a moderation notification is about.
+    let itemId: Int?
+    /// The node a moderation notification is about.
+    let node: String?
+    let postId: Int?
 }
 
 struct DiscourseNotification: Decodable, Identifiable {

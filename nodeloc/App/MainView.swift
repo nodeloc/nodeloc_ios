@@ -60,7 +60,6 @@ struct MainView: View {
             let sidebarWidth = isPinned ? pinnedSidebarWidth : min(proxy.size.width * 0.86, 330)
             // The drawer is never "open" while pinned — it's simply always there.
             let sidebarOpen = !isPinned && app.overlay == .sidebar
-            let sidebarVisible = isPinned || sidebarOpen
             // Pinned, the content gives up the sidebar's width instead of being
             // pushed off the far edge the way the drawer pushes it.
             let contentWidth = isPinned ? max(proxy.size.width - sidebarWidth, 0) : proxy.size.width
@@ -72,28 +71,36 @@ struct MainView: View {
             ZStack(alignment: .leading) {
                 Theme.bg.ignoresSafeArea()
 
-                if sidebarVisible {
-                    SidebarOverlay(panelWidth: sidebarWidth, isPinned: isPinned)
-                        .gesture(closeSidebarDragGesture, including: drawerGestures)
+                // Pinned, a column beside the content. As a drawer it floats
+                // over the content instead (drawn after it, below).
+                if isPinned {
+                    SidebarOverlay(panelWidth: sidebarWidth, isPinned: true)
                         .zIndex(0)
                 }
 
                 TabView(selection: $app.tab) {
                     SwiftUI.Tab(value: Tab.home) {
                         tabContent(for: .home) {
-                            HomeView(postTransitionNamespace: postTransitionNamespace)
+                            NavigationStack {
+                                HomeView(postTransitionNamespace: postTransitionNamespace)
+                            }
                         }
                     } label: {
-                        Image(systemName: "house")
+                        TabIcon(name: "Home", isSelected: app.tab == .home)
                         Text("Home")
                     }
 
                     SwiftUI.Tab(value: Tab.nodes) {
                         tabContent(for: .nodes) {
-                            BrowseNodesOverlay(showsCloseButton: false)
+                            NavigationStack {
+                                BrowseNodesOverlay(showsCloseButton: false)
+                            }
                         }
                     } label: {
-                        Image(systemName: "square.grid.2x2")
+                        // The nodeloc mark: a mono template when unselected,
+                        // tinted grey like its neighbours; the brand's green
+                        // knot with orange dots, untinted, when selected.
+                        TabIcon(name: "Nodes", isSelected: app.tab == .nodes)
                         Text("节点")
                     }
 
@@ -102,14 +109,16 @@ struct MainView: View {
                             ChatView()
                         }
                     } label: {
-                        Image(systemName: "bubble.left")
-                        Text("Message")
+                        TabIcon(name: "Forum", isSelected: app.tab == .chat)
+                        Text("消息")
                     }
                     .badge(inbox.unreadTotal)
 
                     SwiftUI.Tab(value: Tab.profile) {
                         tabContent(for: .profile) {
-                            ProfileView()
+                            NavigationStack {
+                                ProfileView()
+                            }
                         }
                     } label: {
                         if let tabImage = profileTabAvatar.tabImage {
@@ -118,7 +127,7 @@ struct MainView: View {
                             Image(uiImage: tabImage)
                                 .renderingMode(.original)
                         } else {
-                            Image(systemName: "person.crop.circle")
+                            TabIcon(name: "Profile", isSelected: app.tab == .profile)
                         }
                         Text("Profile")
                     }
@@ -128,9 +137,22 @@ struct MainView: View {
                             NavigationStack {
                                 SearchView(postTransitionNamespace: postTransitionNamespace)
                             }
+                            // On the search tab, not the tab view: every other
+                            // tab has a navigation stack of its own now, and a
+                            // `.searchable` above them all put a search field
+                            // in each of their bars.
+                            .searchFieldIfNeeded(
+                                enabled: !Self.usesTopTabBar,
+                                text: $app.searchQuery,
+                                isPresented: $searchPresented,
+                                prompt: AppString("搜索")
+                            )
+                            .onSubmit(of: .search) {
+                                SearchHistoryStore.shared.record(app.searchQuery)
+                            }
                         }
                     } label: {
-                        Image(systemName: "magnifyingglass")
+                        TabIcon(name: "Search", isSelected: app.tab == .search)
                         Text("Search")
                     }
                 }
@@ -152,34 +174,27 @@ struct MainView: View {
                 // instead.
                 .tabBarMinimizesOnScrollDown()
                 // Telegram-style search: the tab bar itself morphs into the
-                // search field. Selecting the search pill activates search;
-                // cancelling deselects it and restores the previous tab — all
-                // system-managed, so there is no custom close button to fight
-                // the pill for the bottom-right corner.
-                // Phone only — see `searchFieldIfNeeded`.
-                .searchFieldIfNeeded(
-                    enabled: !Self.usesTopTabBar,
-                    text: $app.searchQuery,
-                    isPresented: $searchPresented,
-                    prompt: AppString("搜索")
-                )
+                // search field (`.searchable` sits on the search tab). Selecting
+                // the search pill activates search; cancelling deselects it and
+                // restores the previous tab — all system-managed, so there is
+                // no custom close button to fight the pill for the corner.
                 // No `.searchScopes`: the system row only exists while search
                 // is presented, so it depended on a presentation binding that
                 // the system writes too and kept going missing. `SearchView`
                 // draws its own scope bar in both modes now.
-                .onSubmit(of: .search) {
-                    SearchHistoryStore.shared.record(app.searchQuery)
-                }
                 .searchActivatesOnTabSelection()
                 .frame(width: contentWidth, height: proxy.size.height)
                 .overlay {
                     // Tap-to-dismiss only makes sense for the drawer; pinned,
                     // this would swallow every tap in the content.
                     if sidebarOpen {
-                        Color.clear
+                        // Dims the content under the floating panel.
+                        Color.black.opacity(0.28)
+                            .ignoresSafeArea()
                             .contentShape(Rectangle())
                             .onTapGesture { closeSidebar() }
-                            .gesture(closeSidebarDragGesture)
+                            .gesture(closeSidebarSwipe(isEnabled: true))
+                            .transition(.opacity)
                     }
                 }
                 // Inside the content column, not over the whole window: the
@@ -196,18 +211,26 @@ struct MainView: View {
                         overlayLayer
                     }
                 }
-                .offset(x: sidebarVisible ? sidebarWidth : 0)
-                .shadow(color: sidebarOpen ? .black.opacity(0.12) : .clear, radius: 24, x: -8, y: 0)
-                .simultaneousGesture(
-                    openSidebarDragGesture(containerWidth: proxy.size.width),
-                    including: openDrawerGestures
-                )
+                .offset(x: isPinned ? sidebarWidth : 0)
+                // Tab roots only, and only for a drag that starts sideways
+                // (see `SidebarSwipeRecognizer`).
+                .gesture(openSidebarSwipe(
+                    containerWidth: proxy.size.width,
+                    isEnabled: openDrawerGestures == .all && app.overlay == nil && app.pageStack.isEmpty
+                ))
                 .zIndex(1)
+
+                if sidebarOpen {
+                    SidebarOverlay(panelWidth: sidebarWidth, isPinned: false)
+                        .gesture(closeSidebarSwipe(isEnabled: drawerGestures == .all))
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .zIndex(2)
+                }
             }
             .animation(.spring(response: 0.32, dampingFraction: 0.9), value: sidebarOpen)
             .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
         }
-        // Read by SidebarMenuButton on every root screen, so the button and this
+        // Read by every tab root's toolbar, so the menu button and this
         // layout always agree about whether a drawer exists to open.
         .environment(\.sidebarIsPinned, isSidebarPinned)
         .environment(\.usesTopTabBar, Self.usesTopTabBar)
@@ -290,39 +313,24 @@ struct MainView: View {
         }
     }
 
-    private func openSidebarDragGesture(containerWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .local)
-            .onEnded { value in
-                guard app.overlay == nil else { return }
-                guard isHorizontalSwipe(value, direction: .right, threshold: 72) else { return }
-
-                let edgeWidth = min(96, max(44, containerWidth * 0.18))
-                if value.startLocation.x <= edgeWidth || value.translation.width > 140 {
-                    openSidebar()
-                }
+    /// Was a SwiftUI `DragGesture` judged on its *total* translation at the
+    /// end, so a drag that began as a scroll and then went right opened the
+    /// drawer. The direction is now decided once, at the start.
+    private func openSidebarSwipe(containerWidth: CGFloat, isEnabled: Bool) -> SidebarSwipeRecognizer {
+        SidebarSwipeRecognizer(direction: .opening, isEnabled: isEnabled) { translation, start, _ in
+            guard app.overlay == nil, translation.width > 72 else { return }
+            let edgeWidth = min(96, max(44, containerWidth * 0.18))
+            if start.x <= edgeWidth || translation.width > 140 {
+                openSidebar()
             }
+        }
     }
 
-    private var closeSidebarDragGesture: some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .local)
-            .onEnded { value in
-                guard app.overlay == .sidebar else { return }
-                if isHorizontalSwipe(value, direction: .left, threshold: 64) {
-                    closeSidebar()
-                }
-            }
-    }
-
-    private enum SwipeDirection {
-        case left
-        case right
-    }
-
-    private func isHorizontalSwipe(_ value: DragGesture.Value, direction: SwipeDirection, threshold: CGFloat) -> Bool {
-        let horizontal = value.translation.width
-        let vertical = abs(value.translation.height)
-        let hasDirection = direction == .right ? horizontal > threshold : horizontal < -threshold
-        return hasDirection && abs(horizontal) > vertical * 1.35
+    private func closeSidebarSwipe(isEnabled: Bool) -> SidebarSwipeRecognizer {
+        SidebarSwipeRecognizer(direction: .closing, isEnabled: isEnabled) { translation, _, _ in
+            guard app.overlay == .sidebar, translation.width < -64 else { return }
+            closeSidebar()
+        }
     }
 
     /// Pages routed from a link or the drawer — a node, a profile, a custom
@@ -354,11 +362,7 @@ struct MainView: View {
                         // The in-column reader, unlike the cover's copy of this
                         // page: `app.overlay` draws in this very view, so from
                         // here it is simply the layer above.
-                        onOpenPost: { post in
-                            app.markTopicOpened(id: post.id)
-                            app.selectedPost = post
-                            withAnimation(.overlayPush) { app.overlay = .post }
-                        },
+                        onOpenPost: { post in app.openReader(post) },
                         onOpenNode: { node in
                             app.routedCustomFeed = nil
                             app.openNode(slug: node.slug)
@@ -381,22 +385,15 @@ struct MainView: View {
 
     @ViewBuilder
     private var overlayLayer: some View {
-        if let overlay = app.overlay {
+        // A task overlay opened while a pushed page or cover was on top is
+        // presented by that screen's host, not here underneath it.
+        if let overlay = app.overlay, !overlay.presentsFromTopHost || app.overlayHost == nil {
             switch overlay {
             case .sidebar, .browseNodes:
                 EmptyView()
             case .post:
-                ZStack {
-                    // Fades as the reader shrinks away, so what shows behind
-                    // the closing page is the feed rather than a flat colour.
-                    Theme.bg.ignoresSafeArea()
-                        .opacity(1 - app.readerDismissProgress)
-                    PostDetailOverlay(postTransitionNamespace: postTransitionNamespace)
-                }
-                .environment(\.mediaAutoplayEnabled, true)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
-                .zIndex(100)
+                // The reader is a pushed page on the page stack now.
+                EmptyView()
             case .search:
                 SearchOverlay(
                     postTransitionNamespace: postTransitionNamespace,
@@ -423,9 +420,6 @@ struct MainView: View {
                     case .browseNodes: EmptyView()
                     case .createNode: CreateNodeOverlay()
                     case .notifications: NotificationsOverlay()
-                    case .settings: SettingsOverlay()
-                    case .appsDirectory: AppsDirectoryOverlay()
-                    case .appDetail: AppDetailOverlay()
                     case .auth: EmptyView()
                     }
                 }
@@ -442,8 +436,12 @@ struct MainView: View {
         ZStack {
             content()
 
+            // Over the tab's own stack rather than inside it, so it gets a
+            // stack — and a bar — of its own.
             if app.overlay == .browseNodes {
-                BrowseNodesOverlay()
+                NavigationStack {
+                    BrowseNodesOverlay()
+                }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(10)
@@ -479,13 +477,13 @@ struct MainView: View {
         // which is how a navigation push and its pop move — `.push(from:)`
         // would leave towards the opposite edge, like a carousel advancing
         // rather than a screen being dismissed.
-        case .browseNodes, .appsDirectory, .appDetail:
+        case .browseNodes:
             return .move(edge: .trailing).combined(with: .opacity)
         // Modals: a task with a cancel, which belongs on the bottom edge —
         // 创建节点 included, even though the drawer opens it.
         case .compose, .search, .createNode, .auth:
             return .move(edge: .bottom).combined(with: .opacity)
-        case .notifications, .settings:
+        case .notifications:
             return .opacity
         }
     }
@@ -515,7 +513,7 @@ private extension AnyTransition {
 /// the tab bar's scale-to-fit land the visible circle at an optical size
 /// comparable to the SF Symbol tab icons. `.alwaysOriginal` keeps the photo's
 /// real colors (the tab bar template-tints otherwise).
-private func paddedCircularAvatar(from source: UIImage, scale: CGFloat) -> UIImage {
+nonisolated private func paddedCircularAvatar(from source: UIImage, scale: CGFloat) -> UIImage {
     let side: CGFloat = 40
     let contentFraction: CGFloat = 0.58
     let format = UIGraphicsImageRendererFormat()
@@ -631,9 +629,18 @@ final class ProfileTabAvatarStore {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) { return }
-            guard let source = UIImage(data: data) else { return }
-            let scale = UITraitCollection.current.displayScale
-            tabImage = paddedCircularAvatar(from: source, scale: scale > 0 ? scale : 3)
+            let screenScale = UITraitCollection.current.displayScale
+            let scale = screenScale > 0 ? screenScale : 3
+            // Decoded and drawn off the main thread, at the size it's shown:
+            // `UIImage(data:)` here inflated the full upload (often 1000px+)
+            // on the main thread during the first draw.
+            let rendered = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                let pixels = Int((40 * scale).rounded(.up))
+                guard let source = RemoteImageDiskCache.decode(data, maxPixel: pixels) else { return nil }
+                return paddedCircularAvatar(from: source, scale: scale)
+            }.value
+            guard let rendered else { return }
+            tabImage = rendered
             renderedAvatarURL = url
         } catch {
             // Keep the SF Symbol fallback when the photo can't load.
@@ -700,6 +707,24 @@ private extension View {
             searchable(text: text, isPresented: isPresented, prompt: prompt)
         } else {
             self
+        }
+    }
+}
+
+
+/// A tab's icon from the Nodeloc VI line set (VI 05 · Icons; 节点 is the
+/// knot mark drawn at the same line weight). Unselected it is a mono template
+/// the bar tints grey like any tab; selected it is the original artwork —
+/// green lines and the orange node — which the bar leaves untinted.
+struct TabIcon: View {
+    let name: String
+    let isSelected: Bool
+
+    var body: some View {
+        if isSelected {
+            Image("Tab\(name)Selected").renderingMode(.original)
+        } else {
+            Image("Tab\(name)").renderingMode(.template)
         }
     }
 }

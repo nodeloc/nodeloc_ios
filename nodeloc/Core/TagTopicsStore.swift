@@ -24,7 +24,9 @@ final class TagTopicsStore {
     /// rather than at the next fetch, and reading the blocked set here is what
     /// makes SwiftUI redraw the list the moment it changes (guideline 1.2).
     var visiblePosts: [Post] { BlockedUsersStore.shared.visible(posts) }
-    var isLoading = false
+    /// True until the first load ends, so the sheet opens on the spinner
+    /// rather than flashing "no topics" ahead of the request.
+    var isLoading = true
     var isLoadingMore = false
     var errorText: String?
     /// Another page is available (the list carried a `more_topics_url`).

@@ -34,6 +34,13 @@ enum AuthError: Error, LocalizedError {
     case secondFactorRequired
     case signupFailed(String)
     case signupNeedsActivation(String)
+    /// The password was right but the account is suspended (403
+    /// `suspended`); the message says until when. The login page offers
+    /// 查看处罚和申诉 with the same credentials.
+    case suspended(String)
+    /// 422 `captcha_required` / `captcha_invalid`: show the widget and retry
+    /// with a fresh token. The message is the server's, in the reader's language.
+    case captchaRequired(String)
 
     var errorDescription: String? {
         switch self {
@@ -43,6 +50,8 @@ enum AuthError: Error, LocalizedError {
         case .secondFactorRequired: return AppString("此账号已开启两步验证，请输入验证码。")
         case .signupFailed(let message): return DiscourseFormat.plainTextParagraphs(message)
         case .signupNeedsActivation(let message): return DiscourseFormat.plainTextParagraphs(message)
+        case .suspended(let message): return message
+        case .captchaRequired(let message): return message
         }
     }
 }
@@ -201,7 +210,8 @@ final class DiscourseLogin {
         identifier rawIdentifier: String,
         password rawPassword: String,
         secondFactorToken: String? = nil,
-        secondFactorMethod: Int = 1
+        secondFactorMethod: Int = 1,
+        captcha: String? = nil
     ) async throws {
         let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = rawPassword
@@ -218,6 +228,7 @@ final class DiscourseLogin {
             body["code"] = secondFactorToken.trimmingCharacters(in: .whitespacesAndNewlines)
             body["trust_device"] = true
         }
+        if let captcha, !captcha.isEmpty { body["captcha"] = captcha }
         var headers: [String: String] = [:]
         if let trust = store.get(keychainTrust) { headers["X-Nodeloc-Trust"] = trust }
         do {
@@ -225,6 +236,14 @@ final class DiscourseLogin {
             try await adopt(result.data, response: result.response)
         } catch let error as DiscourseError {
             if error.serverCode == "second_factor_required" { throw AuthError.secondFactorRequired }
+            // Also an `invalid_credentials` that names `fields.captcha`: the
+            // "after N failures" mode saying every later try needs one.
+            if CaptchaFailure.isCaptcha(error) || ServerFieldErrors.last()["captcha"] != nil {
+                throw AuthError.captchaRequired(ServerFieldErrors.last()["captcha"] ?? error.errorDescription ?? AppString("请先完成人机验证"))
+            }
+            if error.serverCode == "suspended" {
+                throw AuthError.suspended(error.errorDescription ?? AppString("账号已被封禁"))
+            }
             throw AuthError.loginFailed(error.errorDescription ?? AppString("登录未完成，请重试。"))
         }
     }
@@ -239,7 +258,10 @@ final class DiscourseLogin {
         email rawEmail: String,
         password: String,
         userFields: [Int: String] = [:],
-        emailCode: String? = nil
+        emailCode: String? = nil,
+        inviteCode: String? = nil,
+        reason: String? = nil,
+        captcha: String? = nil
     ) async throws -> SignupResult {
         let username = rawUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -257,11 +279,17 @@ final class DiscourseLogin {
         ]
         if !name.isEmpty { body["name"] = name }
         if let emailCode, !emailCode.isEmpty { body["email_code"] = emailCode }
+        if let inviteCode = inviteCode?.trimmingCharacters(in: .whitespacesAndNewlines), !inviteCode.isEmpty { body["invite_code"] = inviteCode }
+        if let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty { body["reason"] = reason }
+        if let captcha, !captcha.isEmpty { body["captcha"] = captcha }
 
         let result: (data: Data, response: HTTPURLResponse)
         do {
             result = try await client.http.sendWithResponse("POST", NodelocAuthPaths.register, body: .json(body))
         } catch let error as DiscourseError {
+            if CaptchaFailure.isCaptcha(error) {
+                throw AuthError.captchaRequired(ServerFieldErrors.last()["captcha"] ?? error.errorDescription ?? AppString("请先完成人机验证"))
+            }
             throw AuthError.signupFailed(error.errorDescription ?? AppString("注册失败，请稍后重试。"))
         }
         let registered = try NodelocJSON.decode(NLAuthResponse.self, from: result.data)
@@ -285,8 +313,14 @@ final class DiscourseLogin {
     }
 
     /// Sends the 6-digit registration code to an email address.
-    func requestSignupEmailCode(email: String) async throws {
-        try await client.http.send("POST", NodelocAuthPaths.registerEmailCode, body: .json(["email": email]))
+    func requestSignupEmailCode(email: String, captcha: String? = nil) async throws {
+        var body: [String: Any] = ["email": email]
+        if let captcha, !captcha.isEmpty { body["captcha"] = captcha }
+        do {
+            try await client.http.send("POST", NodelocAuthPaths.registerEmailCode, body: .json(body))
+        } catch let error as DiscourseError where CaptchaFailure.isCaptcha(error) {
+            throw AuthError.captchaRequired(ServerFieldErrors.last()["captcha"] ?? error.errorDescription ?? AppString("请先完成人机验证"))
+        }
     }
 
     // MARK: Social sign-in

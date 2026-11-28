@@ -32,6 +32,96 @@ struct PostPermissionView: View {
     @Environment(AppState.self) private var app
 
     var body: some View {
+        if case .login = block.requirement {
+            loginBlock
+        } else {
+            framedBlock
+        }
+    }
+
+    // MARK: 登录可见 (App-iOS-PostGated*)
+
+    @ViewBuilder
+    private var loginBlock: some View {
+        if block.isUnlocked {
+            // Revealed: a bar down the side and a chip that says why it's
+            // marked, then the section as part of the post.
+            HStack(alignment: .top, spacing: 0) {
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(width: 3)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Label(AppString("登录可见"), systemImage: "lock.open")
+                            .font(Theme.body(13, weight: .bold))
+                            .foregroundStyle(Theme.tierChipText)
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                            .background(Theme.chip, in: Capsule())
+                        Text(AppString("没登录的访客看不到这一段"))
+                            .font(Theme.body(13))
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                    }
+                    ForEach(block.blocks) { inner in
+                        PostBlockView(block: inner, metrics: metrics, onImageTap: onImageTap)
+                    }
+                }
+                .padding(.leading, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .clampedToWidth()
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 14) {
+                    Image(systemName: "lock")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Theme.tierChipText)
+                        .frame(width: 42, height: 42)
+                        .background(Theme.chip, in: Circle())
+                    Text(AppString("这段内容登录后可见"))
+                        .font(Theme.body(16, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                if !app.authed {
+                    HStack(spacing: 10) {
+                        Button { presentAuth(app) } label: {
+                            Text(AppString("登录"))
+                                .font(Theme.body(15, weight: .bold))
+                                .foregroundStyle(Theme.bg)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(Theme.text, in: Capsule())
+                        }
+                        .buttonStyle(.pressable)
+                        Button { presentAuth(app, mode: .signup) } label: {
+                            Text(AppString("注册"))
+                                .font(Theme.body(15, weight: .bold))
+                                .foregroundStyle(Theme.text)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .overlay(Capsule().strokeBorder(Theme.textFaint, lineWidth: 1))
+                        }
+                        .buttonStyle(.pressable)
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Theme.textFaint.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            }
+            .clampedToWidth()
+        }
+    }
+
+    // MARK: Framed (the older kinds)
+
+    private var framedBlock: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
@@ -59,7 +149,7 @@ struct PostPermissionView: View {
     }
 
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
     }
 
     private var header: some View {
@@ -116,7 +206,7 @@ struct PostPermissionView: View {
             // deliberately not offered here — see the note at the top.
             if case .login = block.requirement, !app.authed {
                 Button {
-                    presentAuth(app)
+                    requestLogin(app, .content)
                 } label: {
                     Text("登录后查看")
                         .font(Theme.body(metrics.bodySize - 2, weight: .semibold))

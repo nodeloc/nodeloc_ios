@@ -26,7 +26,9 @@ final class FeedStore {
     /// makes SwiftUI redraw the list the moment it changes (guideline 1.2).
     var visiblePosts: [Post] { BlockedUsersStore.shared.visible(posts) }
     var categoriesByID: [Int: DiscourseCategory] = [:]
-    var isLoading = false
+    // True until the first load ends, so the first frame draws the skeleton
+    // rather than flashing the empty state ahead of the request.
+    var isLoading = true
     var isLoadingMore = false
     var errorText: String?
     /// Another page is available (the list carried a `more_topics_url`).
@@ -34,6 +36,31 @@ final class FeedStore {
 
     /// The list these posts came from, so a preference change can be noticed.
     private(set) var feed = UserPreferencesStore.shared.homeFeed
+
+    /// A list pinned regardless of the home-feed preference — the drawer's
+    /// 热门 page. Nil follows the preference, which is the home tab.
+    private let fixedFeed: HomeFeed?
+
+    init(fixedFeed: HomeFeed? = nil) {
+        self.fixedFeed = fixedFeed
+        if let fixedFeed { feed = fixedFeed }
+    }
+
+    /// The home tab's sort tab, once one has been tapped. Nil follows the
+    /// preference.
+    private(set) var selectedFeed: HomeFeed?
+
+    private var wantedFeed: HomeFeed { fixedFeed ?? selectedFeed ?? UserPreferencesStore.shared.homeFeed }
+
+    /// Switches to another list (the home sort tabs). Drops the old rows at
+    /// once so the skeleton, not the previous tab's topics, shows meanwhile.
+    func select(_ feed: HomeFeed) async {
+        guard feed != wantedFeed || posts.isEmpty else { return }
+        selectedFeed = feed
+        posts = []
+        hasMore = false
+        await load()
+    }
 
     private var page = 0
     /// `best`'s random ordering, as reported by the first page's
@@ -45,22 +72,26 @@ final class FeedStore {
     func loadIfNeeded() async {
         // A stale feed counts as needing a load: the preference can change
         // while this tab sits in the background with its posts intact.
-        if posts.isEmpty || feed != UserPreferencesStore.shared.homeFeed {
+        if posts.isEmpty || feed != wantedFeed {
             await load()
         }
     }
 
     func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
         isLoading = true
         errorText = nil
         page = 0
         seed = nil
-        feed = UserPreferencesStore.shared.homeFeed
+        feed = wantedFeed
         do {
             async let listCall = client.topicList(feed: feed)
             async let siteCall: SiteResponse? = await SiteResources.shared.siteResponse()
             let list = try await listCall
             let site = await siteCall
+            // A newer load (another tab tapped meanwhile) owns the list now.
+            guard generation == loadGeneration else { return }
 
             categoriesByID = Dictionary(
                 (site?.categories ?? []).map { ($0.id, $0) },
@@ -74,11 +105,15 @@ final class FeedStore {
             hasMore = list.topicList.moreTopicsUrl != nil
             seed = Self.seed(from: list.topicList.moreTopicsUrl)
         } catch {
+            guard generation == loadGeneration else { return }
             errorText = (error as? DiscourseError)?.errorDescription ?? error.localizedDescription
             hasMore = false
         }
         isLoading = false
     }
+
+    /// Bumped by every `load()`, so a slower, older response is dropped.
+    private var loadGeneration = 0
 
     /// Appends the next page. Safe to call repeatedly — no-op while a page is
     /// in flight or when there's nothing more.
@@ -86,8 +121,10 @@ final class FeedStore {
         guard hasMore, !isLoadingMore, !isLoading else { return }
         isLoadingMore = true
         defer { isLoadingMore = false }
+        let generation = loadGeneration
         do {
             let list = try await client.topicList(feed: feed, page: page + 1, seed: seed)
+            guard generation == loadGeneration else { return }
             page += 1
             for user in list.users ?? [] { usersByID[user.id] = user }
             let existingIDs = Set(posts.map(\.id))
@@ -134,7 +171,8 @@ enum FeedMapper {
         let author = topic.posters?.compactMap { poster in
             poster.userId.flatMap { usersByID[$0] }
         }.first
-        let media = DiscourseFormat.mediaItems(for: topic)
+        let card = CardMediaMapping(topic.cardMedia)
+        let media = card?.images ?? DiscourseFormat.mediaItems(for: topic)
         let node = category.map { "n/\($0.slug)" } ?? "n/nodeloc"
         let letter = String((author?.username ?? category?.name ?? "N").prefix(1)).uppercased()
         // New topic, or read progress trailing the latest post.
@@ -179,16 +217,69 @@ enum FeedMapper {
             pinned: topic.pinned ?? false,
             pinnedGlobally: topic.pinnedGlobally ?? false,
             isUnread: isUnread,
+            isRead: (topic.lastReadPostNumber ?? 0) > 0,
             reportCount: topic.reportCount,
+            reviewItemID: topic.reviewItemId,
             isSolved: topic.solved ?? false,
             isHidden: topic.topicHidden ?? false,
-            imageURL: media.first?.url,
+            imageURL: media.first?.url ?? card?.posterURL,
             avatarURL: author?.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 80) },
             authorUsername: author?.username,
             authorName: author?.name,
             media: media,
             tags: (topic.tags ?? []).compactMap(\.name),
-            videoURL: topic.topicVideoUrl.flatMap { NodeSummaryFactory.resolvedURL($0) }
+            videoURL: card.map { $0.videoURL } ?? topic.topicVideoUrl.flatMap { NodeSummaryFactory.resolvedURL($0) },
+            videoPosterURL: card?.posterURL,
+            videoDuration: card?.duration,
+            videoAspect: card?.aspect
         )
+    }
+}
+
+/// `card_media` (2026-11-27) as the card draws it: every image as a page of
+/// the carousel, and an uploaded video as the inline player.
+///
+/// A video that can't play inline — still transcoding (`url` null), or a
+/// YouTube / bilibili page — becomes its poster as an image, so the card shows
+/// a picture and a tap opens the topic rather than a dead player.
+struct CardMediaMapping {
+    let images: [PostMedia]
+    let videoURL: URL?
+    let posterURL: URL?
+    let duration: Double?
+    let aspect: CGFloat?
+
+    init?(_ media: NLCardMedia?) {
+        guard let media else { return nil }
+        var images = (media.images ?? []).compactMap { image -> PostMedia? in
+            guard let url = Self.url(image.url) else { return nil }
+            return PostMedia(
+                url: url, width: image.w, height: image.h,
+                originalURL: image.originalUrl.flatMap(Self.url),
+                placeholderHex: image.color
+            )
+        }
+        let video = media.video
+        let poster = video?.poster.flatMap(Self.url)
+        let playable = video?.provider == "upload" ? video?.url.flatMap(Self.url) : nil
+        videoURL = playable
+        posterURL = poster
+        duration = playable == nil ? nil : video?.duration
+        if let w = video?.w, let h = video?.h, w > 0, h > 0 {
+            aspect = CGFloat(w) / CGFloat(h)
+        } else {
+            aspect = video?.provider == "youtube" ? 16.0 / 9.0 : nil
+        }
+        if playable == nil, let poster, images.isEmpty {
+            // YouTube's poster is 4:3 with the 16:9 picture letterboxed inside:
+            // sized 16:9 so the card crops the bars off (mobile-api.md).
+            let isYouTube = video?.provider == "youtube"
+            images = [PostMedia(url: poster, width: isYouTube ? 1600 : video?.w, height: isYouTube ? 900 : video?.h)]
+        }
+        self.images = images
+    }
+
+    private static func url(_ raw: String) -> URL? {
+        NodeSummaryFactory.resolvedURL(raw)
     }
 }

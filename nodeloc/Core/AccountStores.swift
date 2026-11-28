@@ -22,60 +22,129 @@ final class ProfileEditStore {
     var bio = ""
     var website = ""
     var location = ""
-    var title: String?
+    /// The admin-given personal 头衔 (`users.title`). Read-only here: only an
+    /// admin sets it (`PUT /admin/users/{id}/title`), and it outranks the
+    /// group title chosen below.
+    private(set) var title: String?
     private(set) var avatarURL: URL?
     private(set) var cardBackgroundURL: URL?
 
-    // Title options come from the user's badges.
-    private(set) var badges: [BadgeDefinition] = []
+    /// The groups you're in (`GET /api/v1/me/groups`) and the one you wear
+    /// (`primary_group_id`, 0 = none). The worn group's 头衔 shows by your
+    /// name whenever you have no personal title.
+    private(set) var groups: [NLMyGroups.Group] = []
+    private(set) var primaryGroupID = 0
 
-    // 资质 (flair): chosen from the user's groups that carry a flair.
-    // `allGroups` is kept too so the current flair still displays even if that
-    // group no longer offers flair (an admin-set flair can be like this).
-    private(set) var flairGroups: [UserGroupFlair] = []
-    private(set) var allGroups: [UserGroupFlair] = []
-    private(set) var flairGroupID: Int?
-
-    /// The group currently supplying the flair, resolved from the full list.
-    var currentFlairGroup: UserGroupFlair? {
-        allGroups.first { $0.id == flairGroupID }
-    }
-
-    /// What the picker offers: flair-capable groups, plus the current one if it
-    /// isn't already among them, so the active choice is always shown.
-    var flairOptions: [UserGroupFlair] {
-        var options = flairGroups
-        if let current = currentFlairGroup, !options.contains(where: { $0.id == current.id }) {
-            options.insert(current, at: 0)
-        }
-        return options
+    /// What the 头衔 picker offers: groups that grant a title, plus the worn
+    /// one if it grants none, so the current choice is always listed.
+    var titleGroups: [NLMyGroups.Group] {
+        groups.filter { $0.title?.isEmpty == false || $0.id == primaryGroupID }
     }
 
     private(set) var isLoading = false
     private(set) var isSaving = false
     var errorText: String?
+    /// A 422's messages by field (`name`, `bio`, `website`, `location`,
+    /// `signature`), shown under the matching input.
+    var fieldErrors: [String: String] = [:]
 
-    private var loaded = false
+    /// The personal signature (`GET/PUT /api/v1/me/settings` → `signature`),
+    /// shown under the first post of your topics.
+    private(set) var signature = ""
+
+    /// The server's limits (account/rules.go, admin.go, settings.go).
+    static let nameLimit = 50
+    static let bioLimit = 3000
+    static let websiteLimit = 300
+    static let locationLimit = 100
+    static let signatureLimit = 300
+
+    /// Something typed differs from what the server holds.
+    var isDirty: Bool { isLoaded && [name, bio, website, location] != savedText }
+
+    /// What the server would refuse, said before asking it.
+    var localErrors: [String: String] {
+        var errors: [String: String] = [:]
+        if name.count > Self.nameLimit { errors["name"] = AppString("昵称最多 \(Self.nameLimit) 个字") }
+        if bio.count > Self.bioLimit { errors["bio"] = AppString("自我介绍最多 \(Self.bioLimit) 个字") }
+        let site = website.trimmingCharacters(in: .whitespaces)
+        if !site.isEmpty, !(site.lowercased().hasPrefix("http://") || site.lowercased().hasPrefix("https://")) {
+            errors["website"] = AppString("网址需以 http:// 或 https:// 开头")
+        } else if site.count > Self.websiteLimit {
+            errors["website"] = AppString("网址过长")
+        }
+        if location.count > Self.locationLimit { errors["location"] = AppString("所在地最多 \(Self.locationLimit) 个字") }
+        return errors
+    }
+
+    /// Whose profile the fields hold. A Bool here survived a sign-out, so the
+    /// next account opened the page on the previous one's fields — and closing
+    /// it saved them into the new account.
+    private var loadedUsername: String?
 
     private var username: String? { DiscourseAuth.shared.username }
 
-    /// Titles the user may pick: the display names of badges that allow a title.
-    var titleOptions: [String] {
-        badges.filter { $0.allowTitle == true }.map(\.name)
-    }
-
     func load(force: Bool = false) async {
-        guard let username, force || !loaded, !isLoading else { return }
+        guard let username, force || loadedUsername != username, !isLoading else { return }
+        if loadedUsername != username { reset() }
         isLoading = true
         defer { isLoading = false }
 
-        if let response = try? await client.user(username) {
+        do {
+            let response = try await client.user(username)
             apply(response.user)
-            loaded = true
+            loadedUsername = username
+        } catch {
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
-        if let badges = try? await client.userBadges(username: username) {
-            self.badges = badges.badges ?? []
+        await loadGroups()
+        await loadSignature()
+    }
+
+    private struct SettingsEnvelope: Decodable {
+        struct Settings: Decodable { let signature: String? }
+        let settings: Settings?
+    }
+
+    private func loadSignature() async {
+        guard let data = try? await client.http.send("GET", "api/v1/me/settings"),
+              let envelope = try? NodelocJSON.decode(SettingsEnvelope.self, from: data) else { return }
+        signature = envelope.settings?.signature ?? ""
+    }
+
+    /// `PUT /api/v1/me/settings {"signature"}`. A refusal's message lands in
+    /// `fieldErrors["signature"]`.
+    func saveSignature(_ text: String) async -> Bool {
+        isSaving = true
+        defer { isSaving = false }
+        fieldErrors["signature"] = nil
+        do {
+            try await client.http.send("PUT", "api/v1/me/settings", body: .json(["signature": text]))
+            signature = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return true
+        } catch {
+            let fields = ServerFieldErrors.last()
+            fieldErrors["signature"] = fields["signature"]
+                ?? (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return false
         }
+    }
+
+    private func loadGroups() async {
+        guard let mine = try? await client.myGroups() else { return }
+        groups = mine.groups
+        primaryGroupID = mine.primaryGroupId ?? mine.groups.first { $0.primary == true }?.id ?? 0
+    }
+
+    /// Whether the fields hold the signed-in account's profile. Saving
+    /// before that would overwrite it with blanks.
+    var isLoaded: Bool { loadedUsername != nil && loadedUsername == username }
+
+    private func reset() {
+        name = ""; bio = ""; website = ""; location = ""; title = nil; signature = ""; fieldErrors = [:]
+        avatarURL = nil; cardBackgroundURL = nil
+        groups = []; primaryGroupID = 0
+        loadedUsername = nil
     }
 
     private func apply(_ profile: UserProfile) {
@@ -83,20 +152,26 @@ final class ProfileEditStore {
         bio = profile.bioRaw ?? ""
         website = profile.website ?? profile.websiteName ?? ""
         location = profile.location ?? ""
-        title = profile.title
+        savedText = [name, bio, website, location]
+        title = profile.title.flatMap { $0.isEmpty ? nil : $0 }
         avatarURL = profile.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 240) }
         cardBackgroundURL = NodeSummaryFactory.resolvedURL(profile.cardBackgroundUploadUrl)
-        flairGroupID = profile.flairGroupId
-        allGroups = profile.groups ?? []
-        // Only groups with a flair can supply one.
-        flairGroups = allGroups.filter { $0.flairUrl?.isEmpty == false }
     }
 
-    /// Sets 资质 to a group's flair, or clears it. An empty value clears
-    /// `flair_group_id` server-side.
-    func setFlairGroup(_ id: Int?) async {
-        flairGroupID = id
-        await saveFields([("flair_group_id", id.map(String.init) ?? "")])
+    /// Wears a group's 头衔 (`PUT /api/v1/me/primary-group`), or none with 0.
+    /// Rolls back and reports the server's message if it refuses.
+    func setPrimaryGroup(_ id: Int) async {
+        let previous = primaryGroupID
+        guard id != previous else { return }
+        primaryGroupID = id
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.setPrimaryGroup(id)
+        } catch {
+            primaryGroupID = previous
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 
     // MARK: Saving
@@ -113,24 +188,35 @@ final class ProfileEditStore {
             try await client.updateProfile(username: username, items: items)
             return true
         } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            let fields = ServerFieldErrors.last()
+            if fields.isEmpty {
+                errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            } else {
+                fieldErrors = fields
+            }
             return false
         }
     }
 
-    func saveTextFields() async {
-        await saveFields([
+    /// The text fields as last read from or written to the server.
+    private var savedText: [String] = []
+
+    /// Saves the text fields, when they hold this account's profile and
+    /// something changed.
+    @discardableResult
+    func saveTextFields() async -> Bool {
+        let current = [name, bio, website, location]
+        guard isLoaded, current != savedText else { return true }
+        guard localErrors.isEmpty else { return false }
+        fieldErrors = [:]
+        guard await saveFields([
             ("name", name),
             ("bio_raw", bio),
             ("website", website),
             ("location", location),
-        ])
-    }
-
-    /// Empty string clears the title server-side.
-    func setTitle(_ newTitle: String?) async {
-        title = newTitle
-        await saveFields([("title", newTitle ?? "")])
+        ]) else { return false }
+        savedText = current
+        return true
     }
 
     // MARK: Avatar + background
@@ -228,6 +314,7 @@ final class SecurityStore {
     ///
     /// Returns false when the endpoint isn't deployed, so the caller can fall
     /// back to the web preferences page.
+    /// Failures land in `errorText`, which the page shows as a toast.
     func linkApple(_ credential: AppleSignInCredential) async -> Bool {
         errorText = nil
         do {
@@ -240,7 +327,6 @@ final class SecurityStore {
             // that, so confirm against the reloaded list instead.
             guard hasAppleAccount else {
                 errorText = AppString("服务端没有返回绑定结果，请稍后重试。")
-                ToastCenter.shared.show(errorText!)
                 return true
             }
 
@@ -256,12 +342,43 @@ final class SecurityStore {
             } else {
                 errorText = error.errorDescription
             }
-            ToastCenter.shared.show(errorText ?? AppString("绑定失败"))
             return true
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            ToastCenter.shared.show(errorText ?? AppString("绑定失败"))
             return true
+        }
+    }
+
+    /// 关联账户 (App-iOS-Linked): every provider the site offers, bound or
+    /// not (`GET /api/v1/me/identities`), whether the account has a password,
+    /// and its e-mail for the 邮箱和密码 row.
+    private(set) var identities: [NLIdentities.Identity] = []
+    private(set) var hasPassword: Bool?
+    private(set) var email: String?
+    private(set) var identitiesLoaded = false
+
+    func loadIdentities() async {
+        if let list: NLIdentities = try? await client.get("api/v1/me/identities") {
+            identities = list.identities
+            hasPassword = list.hasPassword
+        }
+        if let me: NLUserEnvelope = try? await client.get("api/v1/me") {
+            email = me.user.email
+        }
+        identitiesLoaded = true
+    }
+
+    /// `DELETE /api/v1/me/identities/{provider}`. The server refuses the
+    /// last way in (409 `last_login_method`); its message is shown as is.
+    func unlink(_ identity: NLIdentities.Identity) async {
+        guard let username else { return }
+        do {
+            try await client.revokeAssociatedAccount(username: username, provider: identity.provider)
+            await loadIdentities()
+            associatedAccounts.removeAll { $0.name == identity.provider }
+            ToastCenter.shared.show(AppString("已断开 \(identity.label ?? identity.provider)"))
+        } catch {
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
@@ -279,13 +396,21 @@ final class SecurityStore {
 
     // MARK: Password
 
-    func requestPasswordReset() async {
-        guard let login = username else { return }
+    /// `PUT /api/v1/me/password`. The old path mailed a reset link to the
+    /// *username*, which the backend refuses (it wants an e-mail address) —
+    /// while the page announced the mail as sent regardless.
+    func changePassword(current: String, new: String) async -> Bool {
+        errorText = nil
         do {
-            try await client.requestPasswordReset(login: login)
-            infoText = AppString("重置密码的邮件已发送，请查收。")
+            try await client.http.send(
+                "PUT", "api/v1/me/password",
+                body: .json(["current_password": current, "new_password": new])
+            )
+            infoText = AppString("密码已修改")
+            return true
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return false
         }
     }
 
@@ -322,7 +447,11 @@ final class SecurityStore {
     }
 
     func confirm(password: String) async -> Bool {
-        guard let result = try? await client.confirmSession(password: password) else { return false }
+        errorText = nil
+        guard let result = try? await client.confirmSession(password: password) else {
+            errorText = AppString("验证失败，请稍后重试。")
+            return false
+        }
         if !result.isTrusted {
             errorText = AppString("密码不正确。")
         }
@@ -339,27 +468,47 @@ final class SecurityStore {
         }
     }
 
-    func enableTOTP(token: String, name: String) async -> Bool {
+    private struct BackupCodesEnvelope: Decodable {
+        var backupCodes: [String]?
+    }
+
+    /// Turns the authenticator on. The backend answers with the backup codes
+    /// in the same response (there is no separate call without a code), so
+    /// they come back from here; nil means it failed.
+    func enableTOTP(token: String, name: String) async -> [String]? {
+        errorText = nil
         do {
-            try await client.enableTOTP(token: token, name: name)
+            let data = try await client.enableTOTP(token: token, name: name)
             totpEnabled = true
+            return (try? NodelocJSON.decode(BackupCodesEnvelope.self, from: data))?.backupCodes ?? []
+        } catch {
+            errorText = (error as? LocalizedError)?.errorDescription ?? AppString("验证码无效，请重试。")
+            return nil
+        }
+    }
+
+    /// Turning 2FA off needs a current code (or a backup code).
+    func disableTOTP(code: String) async -> Bool {
+        errorText = nil
+        do {
+            try await client.disableSecondFactor(code: code)
+            totpEnabled = false
+            infoText = AppString("两步验证已关闭")
             return true
         } catch {
-            errorText = AppString("验证码无效，请重试。")
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             return false
         }
     }
 
-    func disableTOTP() async {
+    /// New backup codes, which also needs a current code.
+    func generateBackupCodes(code: String) async -> [String]? {
+        errorText = nil
         do {
-            try await client.disableSecondFactor()
-            totpEnabled = false
+            return try await client.generateBackupCodes(code: code).backupCodes ?? []
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return nil
         }
-    }
-
-    func generateBackupCodes() async -> [String] {
-        (try? await client.generateBackupCodes())?.backupCodes ?? []
     }
 }

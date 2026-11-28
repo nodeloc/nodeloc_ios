@@ -11,7 +11,9 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:www.nodeloc.com</string>
+		<string>applinks:nodeloc.com</string>
 		<string>webcredentials:www.nodeloc.com</string>
+		<string>webcredentials:nodeloc.com</string>
 	</array>
 </dict>
 </plist>

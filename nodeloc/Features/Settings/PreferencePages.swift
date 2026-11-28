@@ -2,8 +2,9 @@
 //  PreferencePages.swift
 //  nodeloc
 //
-//  One page per group of Discourse account preferences. Between them these
-//  cover every field in `UserUpdater::OPTION_ATTR`.
+//  One page per group of preferences. 界面 is this device's own; the rest are
+//  the account's settings on the backend (`/api/v1/me/settings`) — the same
+//  fields the web settings page and the Android app write.
 //
 
 import SwiftUI
@@ -13,10 +14,7 @@ enum PreferenceGroup: String, CaseIterable, Identifiable {
     case interface
     case notifications
     case emails
-    case tracking
     case privacy
-    case other
-    case webOnly
 
     var id: String { rawValue }
 
@@ -25,10 +23,7 @@ enum PreferenceGroup: String, CaseIterable, Identifiable {
         case .interface: return AppString("界面")
         case .notifications: return AppString("通知")
         case .emails: return AppString("电子邮件")
-        case .tracking: return AppString("跟踪")
         case .privacy: return AppString("隐私")
-        case .other: return AppString("其他")
-        case .webOnly: return AppString("网页端设置")
         }
     }
 
@@ -37,12 +32,12 @@ enum PreferenceGroup: String, CaseIterable, Identifiable {
         case .interface: return "paintbrush"
         case .notifications: return "bell"
         case .emails: return "envelope"
-        case .tracking: return "eye"
         case .privacy: return "lock"
-        case .other: return "slider.horizontal.3"
-        case .webOnly: return "globe"
         }
     }
+
+    /// 界面 is stored on the device, so a guest can use it too.
+    var needsAccount: Bool { self != .interface }
 }
 
 /// The page for one group.
@@ -51,6 +46,7 @@ struct PreferencePage: View {
     let onClose: () -> Void
 
     private var prefs = UserPreferencesStore.shared
+    private var account = AccountSettingsStore.shared
 
     init(group: PreferenceGroup, onClose: @escaping () -> Void) {
         self.group = group
@@ -61,47 +57,68 @@ struct PreferencePage: View {
         VStack(spacing: 0) {
             header
 
-            ScrollView {
-                VStack(spacing: 0) {
-                    switch group {
-                    case .interface: interfaceSection
-                    case .notifications: notificationsSection
-                    case .emails: emailSection
-                    case .tracking: trackingSection
-                    case .privacy: privacySection
-                    case .other: otherSection
-                    case .webOnly: webOnlySection
+            Form {
+                Group {
+                    if !group.needsAccount {
+                        interfaceSection
+                    } else if account.settings == nil {
+                        loadingOrFailed
+                    } else {
+                        switch group {
+                        case .interface: EmptyView()
+                        case .notifications: notificationsSection
+                        case .emails: emailSection
+                        case .privacy: privacySection
+                        }
                     }
                 }
-                .padding(.bottom, 32)
             }
             .scrollIndicators(.hidden)
+            .refreshable {
+                if group.needsAccount { await account.load(force: true) }
+            }
         }
         .background(Theme.bg.ignoresSafeArea())
-        .task { await prefs.load() }
+        .task {
+            if group.needsAccount { await account.load() }
+        }
+        // A save the server refused is rolled back; say why rather than let
+        // the switch silently flip back.
+        .onChange(of: account.errorText) { _, text in
+            guard let text else { return }
+            ToastCenter.shared.show(text)
+            account.errorText = nil
+        }
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-
-            Text(group.title).font(Theme.body(15, weight: .medium))
-
-            Spacer()
-
-            if prefs.isSaving {
+        SettingsBar(title: group.title, onClose: onClose) {
+            if account.isSaving {
                 ProgressView().controlSize(.small).tint(Theme.accent)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var loadingOrFailed: some View {
+        Section {
+            if account.loadFailed && !account.isLoading {
+                VStack(spacing: 14) {
+                    EmptyStateView(icon: "exclamationmark.triangle", message: AppString("加载失败"))
+                    Button(AppString("重试")) {
+                        Task { await account.load(force: true) }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+            }
+        }
+        .listRowBackground(Color.clear)
     }
 
     // MARK: Interface
@@ -123,64 +140,85 @@ struct PreferencePage: View {
             )
         }
 
+        languageSection
+
         SettingsSection(title: AppString("浏览")) {
             // Local, and only the lists the home card list can render — see
-            // `HomeFeed`. Deliberately does not write `homepage_id`, so the
-            // website's own default homepage is left as the person set it.
+            // `HomeFeed`.
             SettingsPickerRow(
                 title: AppString("默认首页"),
                 options: HomeFeed.allCases,
                 label: \.label,
                 selection: prefs.homeFeedBinding
             )
-            SettingsToggleRow(
-                title: AppString("自动翻译"),
-                detail: AppString("自动翻译以其他语言发布的话题和帖子"),
-                isOn: prefs.toggle(\.automaticallyTranslate, "automatically_translate", default: true)
+            // The home feed's and node pages' 列表样式, the same choice the
+            // sheet behind the tab strip's icon makes.
+            SettingsPickerRow(
+                title: AppString("默认列表视图"),
+                options: NodeReadingMode.allCases,
+                label: \.label,
+                selection: Binding(
+                    get: { NodeReadingModeStore.shared.mode },
+                    set: { NodeReadingModeStore.shared.select($0) }
+                )
             )
         }
+    }
+
+    // MARK: Language
+
+    private var languageSection: some View {
+        Section {
+            Picker(AppString("语言"), selection: Binding(
+                get: { ServerLanguage.choice?.code ?? "" },
+                set: { code in
+                    let chosen = ServerLanguage.all.first { $0.code == code }
+                    Task {
+                        if let error = await AppLocaleStore.shared.chooseServerLanguage(chosen) {
+                            ToastCenter.shared.show(error)
+                        }
+                    }
+                }
+            )) {
+                Text(AppString("跟随系统")).tag("")
+                ForEach(ServerLanguage.all) { language in
+                    Text(verbatim: language.name).tag(language.code)
+                }
+            }
+            .pickerStyle(.navigationLink)
+        } header: {
+            Text(AppString("语言"))
+        } footer: {
+            Text(languageFooter)
+        }
+    }
+
+    /// Says when the app's own words can't follow the choice.
+    private var languageFooter: String {
+        guard let choice = ServerLanguage.choice, !choice.appHasStrings else {
+            return AppString("帖子、通知和提示会用所选的语言。")
+        }
+        return AppString("帖子、通知和提示会用 \(choice.name)；App 自己的文字暂时只有简体中文和 English，现在用 \(choice.appLanguage.endonym)。")
     }
 
     // MARK: Notifications
 
     @ViewBuilder
     private var notificationsSection: some View {
-        SettingsSection(title: AppString("推送通知")) {
-            SettingsPickerRow(
-                title: AppString("推送通知"),
-                options: PushNotificationLevel.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.pushNotificationLevel, "push_notification_level",
-                    default: PushNotificationLevel.all
-                )
-            )
+        ForEach(NotifyKind.groups, id: \.title) { group in
+            SettingsSection(title: group.title) {
+                ForEach(group.kinds) { kind in
+                    SettingsToggleRow(
+                        title: kind.title,
+                        detail: kind.detail,
+                        isOn: account.notify(kind.key)
+                    )
+                }
+            }
         }
 
-        SettingsSection(title: AppString("提醒我")) {
-            SettingsPickerRow(
-                title: AppString("被赞时通知"),
-                options: LikeNotificationFrequency.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.likeNotificationFrequency, "like_notification_frequency",
-                    default: LikeNotificationFrequency.firstTimeAndDaily
-                )
-            )
-            SettingsToggleRow(
-                title: AppString("链接提醒"),
-                detail: AppString("当有人分享我的帖子链接时通知我"),
-                isOn: prefs.toggle(\.notifyOnLinkedPosts, "notify_on_linked_posts", default: true)
-            )
-            SettingsToggleRow(
-                title: AppString("即将推出的更改"),
-                detail: AppString("当即将推出的更改可供预览时通知我"),
-                isOn: prefs.toggle(
-                    \.enableUpcomingChangeAvailableNotifications,
-                    "enable_upcoming_change_available_notifications",
-                    default: true
-                )
-            )
+        Section {} footer: {
+            Text(AppString("密码、两步验证和登录方式的变更总会通知你，无法关闭。"))
         }
     }
 
@@ -188,105 +226,34 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var emailSection: some View {
-        SettingsSection(title: AppString("电子邮件")) {
-            SettingsPickerRow(
-                title: AppString("活动邮件"),
-                detail: AppString("当我被引用、回复、被提及，或我关注的内容有新活动时"),
-                options: EmailLevel.allCases,
-                label: \.label,
-                selection: prefs.choice(\.emailLevel, "email_level", default: EmailLevel.onlyWhenAway)
-            )
-            SettingsPickerRow(
-                title: AppString("私信邮件"),
-                detail: AppString("当我收到个人消息时"),
-                options: EmailLevel.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.emailMessagesLevel, "email_messages_level",
-                    default: EmailLevel.always
-                )
-            )
-            SettingsPickerRow(
-                title: AppString("包含以前的回复"),
-                detail: AppString("在电子邮件底部"),
-                options: PreviousRepliesLevel.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.emailPreviousReplies, "email_previous_replies",
-                    default: PreviousRepliesLevel.never
-                )
-            )
+        SettingsSection(
+            title: AppString("邮件通知"),
+            footer: AppString("关闭后只会收到安全提醒邮件。")
+        ) {
             SettingsToggleRow(
-                title: AppString("包含回复节选"),
-                detail: AppString("在电子邮件中包含帖子回复节选"),
-                isOn: prefs.toggle(\.emailInReplyTo, "email_in_reply_to", default: true)
+                title: AppString("通过邮件接收通知"),
+                isOn: account.notify("email")
             )
+        }
+
+        if account.notify("email").wrappedValue {
+            SettingsSection(title: AppString("通过邮件通知我")) {
+                ForEach(NotifyKind.groups.flatMap(\.kinds)) { kind in
+                    SettingsToggleRow(
+                        title: kind.title,
+                        isOn: account.notify(kind.key + ".mail")
+                    )
+                }
+            }
         }
 
         SettingsSection(title: AppString("活动总结")) {
-            SettingsToggleRow(
-                title: AppString("发送总结邮件"),
-                detail: AppString("当我不访问这里时，向我发送热门话题和回复的电子邮件总结"),
-                isOn: prefs.toggle(\.emailDigests, "email_digests", default: true)
-            )
-            SettingsToggleRow(
-                title: AppString("包含新用户内容"),
-                detail: AppString("在总结电子邮件中包含来自新用户的内容"),
-                isOn: prefs.toggle(\.includeTl0InDigests, "include_tl0_in_digests")
-            )
-        }
-
-        SettingsSection(
-            title: AppString("邮寄名单模式"),
-            footer: AppString("开启后，每个新帖子都会发一封邮件。")
-        ) {
-            SettingsToggleRow(
-                title: AppString("启用邮寄名单模式"),
-                isOn: prefs.toggle(\.mailingListMode, "mailing_list_mode")
-            )
-        }
-    }
-
-    // MARK: Tracking
-
-    @ViewBuilder
-    private var trackingSection: some View {
-        SettingsSection(title: AppString("话题")) {
             SettingsPickerRow(
-                title: AppString("何时视为新话题"),
-                options: NewTopicDuration.ordered,
+                title: AppString("邮件精选摘要"),
+                detail: AppString("这段时间最受欢迎的帖子和你没看的通知"),
+                options: DigestFrequency.allCases,
                 label: \.label,
-                selection: prefs.choice(
-                    \.newTopicDurationMinutes, "new_topic_duration_minutes",
-                    default: NewTopicDuration.afterTwoWeeks
-                )
-            )
-            SettingsPickerRow(
-                title: AppString("自动跟踪我进入的话题"),
-                options: AutoTrackDuration.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.autoTrackTopicsAfterMsecs, "auto_track_topics_after_msecs",
-                    default: AutoTrackDuration.after4Minutes
-                )
-            )
-            SettingsPickerRow(
-                title: AppString("发帖时"),
-                options: ReplyNotificationLevel.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.notificationLevelWhenReplying, "notification_level_when_replying",
-                    default: ReplyNotificationLevel.watchTopic
-                )
-            )
-            SettingsToggleRow(
-                title: AppString("话题关闭时视为未读"),
-                isOn: prefs.toggle(\.topicsUnreadWhenClosed, "topics_unread_when_closed", default: true)
-            )
-            SettingsToggleRow(
-                title: AppString("关注优先于免打扰"),
-                detail: AppString("如果我正在关注的类别或标签中有我已设为免打扰的话题，请通知我"),
-                isOn: prefs.toggle(\.watchedPrecedenceOverMuted, "watched_precedence_over_muted")
+                selection: account.digestBinding
             )
         }
     }
@@ -295,125 +262,56 @@ struct PreferencePage: View {
 
     @ViewBuilder
     private var privacySection: some View {
-        SettingsSection(title: AppString("个人资料")) {
+        SettingsSection(title: AppString("互动")) {
             SettingsToggleRow(
-                title: AppString("隐藏我的公开个人资料"),
-                isOn: prefs.toggle(\.hideProfile, "hide_profile")
+                title: AppString("允许他人关注我"),
+                detail: AppString("关闭后别人不能再关注你，已经关注你的人不受影响"),
+                isOn: account.flag(\.allowFollow, "allow_follow", default: true)
             )
-            SettingsToggleRow(
-                title: AppString("隐藏在线状态"),
-                isOn: prefs.toggle(\.hidePresence, "hide_presence")
+            SettingsPickerRow(
+                title: AppString("谁可以私信我"),
+                detail: AppString("管理人员不受这项限制"),
+                options: ContactPolicy.allCases,
+                label: \.label,
+                selection: account.policy(\.messagePolicy, "message_policy")
+            )
+            SettingsPickerRow(
+                title: AppString("谁可以 @ 我"),
+                detail: AppString("不允许的人 @ 你时不会通知你，帖子照常发出"),
+                options: ContactPolicy.allCases,
+                label: \.label,
+                selection: account.policy(\.mentionPolicy, "mention_policy")
             )
         }
 
-        SettingsSection(title: AppString("个人消息")) {
+        SettingsSection(title: AppString("主页展示")) {
             SettingsToggleRow(
-                title: AppString("允许其他用户向我发送个人消息"),
-                isOn: prefs.toggle(\.allowPrivateMessages, "allow_private_messages", default: true)
+                title: AppString("显示我加入的节点"),
+                detail: AppString("在主页上列出你加入的公开节点"),
+                isOn: account.flag(\.showJoinedNodes, "show_joined_nodes", default: true)
             )
             SettingsToggleRow(
-                title: AppString("仅允许指定用户发送消息"),
-                isOn: prefs.toggle(\.enableAllowedPmUsers, "enable_allowed_pm_users")
+                title: AppString("显示在线状态"),
+                detail: AppString("关闭后你也看不到别人的在线状态"),
+                isOn: account.flag(\.showOnline, "show_online", default: true)
+            )
+            SettingsToggleRow(
+                title: AppString("显示等级与声望"),
+                detail: AppString("关闭后其他人看不到你的段位和声望"),
+                isOn: account.flag(\.showLevel, "show_level", default: true)
             )
         }
-    }
 
-    // MARK: Other
-
-    @ViewBuilder
-    private var otherSection: some View {
-        SettingsSection(title: AppString("常规")) {
-            SettingsTextRow(
-                title: AppString("时区"),
-                placeholder: TimeZone.current.identifier,
-                text: prefs.timezoneBinding
-            )
-            SettingsPickerRow(
-                title: AppString("默认日历"),
-                options: DefaultCalendar.allCases,
-                label: \.label,
-                selection: prefs.nameChoice(
-                    \.defaultCalendar, "default_calendar",
-                    default: DefaultCalendar.noneSelected,
-                    name: \.wireName,
-                    from: DefaultCalendar.init(wireName:)
-                )
-            )
-            SettingsPickerRow(
-                title: AppString("编辑器模式"),
-                options: CompositionMode.allCases,
-                label: \.label,
-                selection: prefs.choice(
-                    \.compositionMode, "composition_mode",
-                    default: CompositionMode.rich
-                )
+        SettingsSection(title: AppString("可见性")) {
+            SettingsToggleRow(
+                title: AppString("允许搜索引擎收录我的主页"),
+                detail: AppString("关闭后主页会要求搜索引擎不要收录"),
+                isOn: account.flag(\.searchIndex, "search_index", default: true)
             )
             SettingsToggleRow(
-                title: AppString("跳过新用户入门提示"),
-                isOn: prefs.toggle(\.skipNewUserTips, "skip_new_user_tips")
-            )
-            SettingsToggleRow(
-                title: AppString("到达底部时自动取消置顶话题"),
-                isOn: prefs.toggle(\.automaticallyUnpinTopics, "automatically_unpin_topics", default: true)
-            )
-        }
-    }
-
-    // MARK: Web-only
-
-    @ViewBuilder
-    private var webOnlySection: some View {
-        SettingsSection(
-            title: AppString("网页端设置"),
-            footer: AppString("这些设置会保存到你的账号并在网页端生效，但对本 app 没有影响。")
-        ) {
-            SettingsToggleRow(
-                title: AppString("在新标签页中打开外部链接"),
-                isOn: prefs.toggle(\.externalLinksInNewTab, "external_links_in_new_tab")
-            )
-            SettingsToggleRow(
-                title: AppString("在浏览器图标上显示数量"),
-                isOn: prefs.toggle(\.dynamicFavicon, "dynamic_favicon")
-            )
-            SettingsToggleRow(
-                title: AppString("为高亮显示的文字启用引用回复"),
-                isOn: prefs.toggle(\.enableQuoting, "enable_quoting", default: true)
-            )
-            SettingsToggleRow(
-                title: AppString("在编辑器中启用智能列表"),
-                isOn: prefs.toggle(\.enableSmartLists, "enable_smart_lists", default: true)
-            )
-            SettingsToggleRow(
-                title: AppString("Markdown 模式使用等宽字体"),
-                isOn: prefs.toggle(
-                    \.enableMarkdownMonospaceFont, "enable_markdown_monospace_font",
-                    default: true
-                )
-            )
-            SettingsPickerRow(
-                title: AppString("页面标题显示数量"),
-                options: TitleCountMode.allCases,
-                label: \.label,
-                selection: prefs.titleCountModeBinding
-            )
-            SettingsPickerRow(
-                title: AppString("聊天编辑器发送方式"),
-                options: SendShortcut.allCases,
-                label: \.label,
-                selection: prefs.nameChoice(
-                    \.sendShortcut, "send_shortcut",
-                    default: SendShortcut.enter,
-                    name: \.wireName,
-                    from: SendShortcut.init(wireName:)
-                )
-            )
-            SettingsToggleRow(
-                title: AppString("侧边栏链接到筛选列表"),
-                isOn: prefs.toggle(\.sidebarLinkToFilteredList, "sidebar_link_to_filtered_list")
-            )
-            SettingsToggleRow(
-                title: AppString("侧边栏显示新内容数量"),
-                isOn: prefs.toggle(\.sidebarShowCountOfNewItems, "sidebar_show_count_of_new_items")
+                title: AppString("公开我赞同过的内容"),
+                detail: AppString("打开后别人在你的主页上能看到「赞同过」"),
+                isOn: account.flag(\.showUpvotes, "show_upvotes", default: false)
             )
         }
     }

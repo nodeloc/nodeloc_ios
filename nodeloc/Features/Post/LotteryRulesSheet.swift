@@ -63,14 +63,14 @@ struct LotteryRulesSheet: View {
                             .foregroundStyle(Theme.text)
                         Text("Apple 不是本活动的赞助方，也未以任何方式参与本活动。")
                             .font(Theme.body(13))
-                            .foregroundStyle(Theme.muted(0.7))
+                            .foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                             .strokeBorder(Theme.divider, lineWidth: 1)
                     }
                 }

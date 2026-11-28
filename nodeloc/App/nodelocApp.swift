@@ -17,16 +17,17 @@ struct nodelocApp: App {
         // BGTaskScheduler requires its tasks to be registered before the app
         // finishes launching, so push wiring happens here rather than in a view.
         PushNotificationService.shared.configure()
-        // Account-bound caches go with the account; the interface language
-        // follows the device again.
+        // Account-bound caches go with the account. The language chosen on
+        // this device stays (a guest keeps it); only the record of what the
+        // account held goes, so the next account's `user.locale` applies.
         DiscourseLogin.onSignOut = {
             Task { await PushNotificationService.shared.unregisterFromServer() }
             ProfileSnapshot.clearAll()
-            AppLanguage.accountChoice = nil
+            ServerLanguage.lastSynced = nil
             Task { try? await ChatStorage.shared.clearAll() }
         }
         DiscourseLogin.onSignIn = {
-            AppLanguage.accountChoice = nil
+            ServerLanguage.lastSynced = nil
             // The token may already be in hand from before the sign-in.
             Task { await PushNotificationService.shared.syncRegistration() }
         }

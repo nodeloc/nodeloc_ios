@@ -19,104 +19,247 @@ import SwiftUI
 
 struct RemovalPanel: View {
     let removal: TopicRemoval
+    /// The reader wrote the topic: the full card (App-iOS-PostRemoved).
+    /// Everyone else gets the short one (App-iOS-PostRemovedOther).
+    var isAuthor = false
+    var nodeSlug: String?
+    var authorName: String?
     let onAppeal: () -> Void
+    var onRules: (() -> Void)?
+    var onReputation: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 7) {
-                Image(systemName: removal.kind == "hide" ? "eye.slash.fill" : "trash.fill")
-                    .font(.system(size: 12, weight: .semibold))
+        if isAuthor {
+            authorCard
+        } else {
+            publicCard
+        }
+    }
+
+    // MARK: Author
+
+    private var authorCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "nosign")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(AdminTone.orange.text, in: Circle())
                 Text(headline)
-                    .font(Theme.body(13, weight: .semibold))
-                Spacer(minLength: 0)
+                    .font(Theme.body(16, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 6)
+                if let penalty = penaltyText {
+                    Text(penalty)
+                        .font(Theme.body(14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(height: 30)
+                        .background(removal.refunded == true ? Theme.success : AdminTone.orange.text, in: Capsule())
+                }
             }
-            .foregroundStyle(Theme.danger)
 
             if let reason = removal.reason, !reason.isEmpty {
-                Text(AppString("原因：\(reason)"))
-                    .font(Theme.body(13))
-                    .foregroundStyle(Theme.text.opacity(0.85))
+                (Text(AppString("原因：")).bold() + Text(reason))
+                    .font(Theme.body(15))
+                    .foregroundStyle(Theme.text)
+                    .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Public, by design: a passer-by sees what it cost.
-            if let penalty = removal.reputationPenalty, penalty > 0 {
-                HStack(spacing: 6) {
-                    Text(removal.refunded == true
-                         ? AppString("已返还 \(penalty) 声望")
-                         : AppString("扣除 \(penalty) 声望"))
-                        .font(Theme.body(12, weight: .semibold))
-                        .foregroundStyle(removal.refunded == true ? Theme.success : Theme.danger)
-                    // Author and managers only.
-                    if let before = removal.reputationBefore, let after = removal.reputationAfter {
-                        Text("\(before) → \(after)")
-                            .font(Theme.body(11))
-                            .foregroundStyle(Theme.muted(0.45))
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                if let before = removal.reputationBefore, let after = removal.reputationAfter {
+                    tile(
+                        AppString("声望"),
+                        value: "\(before.formatted()) → \(after.formatted())",
+                        note: removal.refunded == true
+                            ? AppString("已返还 \(removal.reputationPenalty ?? 0)")
+                            : AppString("本次扣除 \(removal.reputationPenalty ?? 0)")
+                    )
+                }
+                if let by = removal.by, !by.isEmpty {
+                    tile(AppString("处理人"), value: by, note: handlerNote)
+                }
+                if let strikes = removal.strikes90D, strikes > 0 {
+                    tile(AppString("违规记录"), value: AppString("近 90 天第 \(strikes) 次"), note: nil)
+                }
+                if removal.appealable == true || removal.appealDeadline != nil {
+                    tile(AppString("申诉期限"), value: deadlineValue, note: deadlineNote)
+                }
+            }
+
+            Label {
+                Text(AppString("这篇帖子现在只有你和版主能看到，不会出现在节点和首页里。已有的回复会保留，但帖子不再产生声望。"))
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "eye.slash")
+            }
+            .font(Theme.body(14))
+            .foregroundStyle(Theme.textMuted)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    if removal.canAppeal == true, removal.appealed != true {
+                        pill(AppString("我要申诉"), filled: true, action: onAppeal)
+                    } else if removal.appealed == true {
+                        Text(AppString("已申诉，等待处理"))
+                            .font(Theme.body(14, weight: .semibold))
+                            .foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 4)
+                    }
+                    if let onRules {
+                        pill(AppString("查看社区规则"), filled: false, action: onRules)
+                    }
+                    if let onReputation {
+                        pill(AppString("声望记录"), filled: false, action: onReputation)
                     }
                 }
             }
-
-            HStack(spacing: 8) {
-                if let by = removal.by, !by.isEmpty {
-                    Text(removal.byStaff == true ? AppString("站务 \(by)") : AppString("版主 \(by)"))
-                }
-                if let at = removal.at {
-                    Text("· \(DiscourseFormat.relative(at))")
-                }
-                // Repeat offences, as the design shows them.
-                if let strikes = removal.strikes90d, strikes > 1 {
-                    Text(AppString("· 90 天内第 \(strikes) 次"))
-                }
-            }
-            .font(Theme.body(11))
-            .foregroundStyle(Theme.muted(0.45))
-
-            appealLine
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.danger.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(AdminTone.orange.fill.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Theme.danger.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(AdminTone.orange.text.opacity(0.22), lineWidth: 1)
         )
     }
 
-    private var headline: String {
-        switch removal.kind {
-        case "hide": AppString("这个主题已被管理人员隐藏")
-        case "topic": AppString("这个主题已被管理人员删除")
-        default: AppString("这个帖子已被管理人员删除")
-        }
-    }
-
-    /// Only the author ever gets `canAppeal`, so this whole line is invisible
-    /// to everyone else.
-    @ViewBuilder
-    private var appealLine: some View {
-        if removal.appealed == true {
-            Text(AppString("你已经申诉过，等待管理人员处理"))
-                .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.5))
-        } else if removal.canAppeal == true {
-            VStack(alignment: .leading, spacing: 6) {
-                Button(action: onAppeal) {
-                    Text(AppString("我要申诉"))
-                        .font(Theme.body(13, weight: .semibold))
-                        .foregroundStyle(Theme.accent700)
-                        .padding(.vertical, 7)
-                        .padding(.horizontal, 14)
-                        .background(Theme.accent.opacity(0.12), in: Capsule())
-                }
-                .buttonStyle(.pressable)
-
-                if let deadline = removal.appealDeadline {
-                    Text(AppString("申诉截止 \(DiscourseFormat.relative(deadline))"))
-                        .font(Theme.body(11))
-                        .foregroundStyle(Theme.muted(0.4))
-                }
+    private func tile(_ title: String, value: String, note: String?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.textMuted)
+            Text(value)
+                .font(Theme.body(16, weight: .bold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            if let note {
+                Text(note)
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineLimit(1)
             }
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(AdminTone.orange.text.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private func pill(_ title: String, filled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(Theme.body(14, weight: .bold))
+                .foregroundStyle(filled ? Theme.bg : Theme.text)
+                .padding(.horizontal, 16)
+                .frame(height: 40)
+                .background(filled ? Theme.text : Theme.surface, in: Capsule())
+                .overlay(Capsule().strokeBorder(filled ? Color.clear : Theme.divider, lineWidth: 1))
+        }
+        .buttonStyle(.pressable)
+    }
+
+    // MARK: Everyone else
+
+    private var publicCard: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "nosign")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 36, height: 36)
+                .background(Theme.divider.opacity(0.6), in: Circle())
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(headline)
+                        .font(Theme.body(15, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                    if let penalty = removal.reputationPenalty, penalty > 0, removal.refunded != true {
+                        Text(AppString("作者 −\(penalty) 声望"))
+                            .font(Theme.body(12, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9)
+                            .frame(height: 24)
+                            .background(AdminTone.orange.text, in: Capsule())
+                    }
+                }
+                Text(publicSentence)
+                    .font(Theme.body(13))
+                    .foregroundStyle(Theme.textMuted)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Theme.divider, lineWidth: 1)
+        )
+    }
+
+    /// 原因：重复发帖 · 版主 夏至未至 · 今天 10:24。作者 u/林见川 因此被扣除 20 声望。正文不再显示，已有的回复仍然可以看。
+    private var publicSentence: String {
+        var head: [String] = []
+        if let reason = removal.reason?.trimmingCharacters(in: CharacterSet(charactersIn: "。. ")), !reason.isEmpty {
+            head.append(AppString("原因：\(reason)"))
+        }
+        if let by = removal.by, !by.isEmpty {
+            head.append(removal.byStaff == true ? AppString("站务 \(by)") : AppString("版主 \(by)"))
+        }
+        if let at = removal.at { head.append(DiscourseFormat.relative(at)) }
+        var text = head.joined(separator: " · ")
+        if !text.isEmpty { text += AppString("。") }
+        if let penalty = removal.reputationPenalty, penalty > 0, removal.refunded != true, let authorName, !authorName.isEmpty {
+            text += AppString("作者 u/\(authorName) 因此被扣除 \(penalty) 声望。")
+        }
+        text += AppString("正文不再显示，已有的回复仍然可以看。")
+        return text
+    }
+
+    // MARK: Wording
+
+    private var headline: String {
+        removal.byStaff == true ? AppString("这篇帖子已被站务移除") : AppString("这篇帖子已被版主移除")
+    }
+
+    private var penaltyText: String? {
+        guard let penalty = removal.reputationPenalty, penalty > 0 else { return nil }
+        return removal.refunded == true ? AppString("已返还 \(penalty) 声望") : AppString("−\(penalty) 声望")
+    }
+
+    /// n/indie 版主 · 今天 10:24
+    private var handlerNote: String? {
+        var parts: [String] = []
+        if removal.byStaff == true {
+            parts.append(AppString("站务"))
+        } else if let nodeSlug {
+            parts.append(AppString("n/\(nodeSlug) 版主"))
+        }
+        if let at = removal.at { parts.append(DiscourseFormat.relative(at)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var deadlineValue: String {
+        if removal.appealed == true { return AppString("已申诉") }
+        guard let deadline = DiscourseFormat.date(removal.appealDeadline) else { return AppString("可以申诉") }
+        let left = deadline.timeIntervalSinceNow
+        guard left > 0 else { return AppString("已过期") }
+        let days = Int(left / 86_400)
+        let hours = Int(left.truncatingRemainder(dividingBy: 86_400) / 3_600)
+        return days > 0 ? AppString("还剩 \(days) 天 \(hours) 小时") : AppString("还剩 \(max(hours, 1)) 小时")
+    }
+
+    private var deadlineNote: String? {
+        removal.appealed == true ? AppString("等待管理人员处理") : AppString("逾期不再受理")
     }
 }
 
@@ -153,7 +296,7 @@ struct AppealSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(note)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
+                    .foregroundStyle(Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if !reasons.isEmpty {
@@ -165,7 +308,7 @@ struct AppealSheet: View {
                             } label: {
                                 Text(option.title)
                                     .font(Theme.body(12, weight: reason == option ? .semibold : .regular))
-                                    .foregroundStyle(reason == option ? Theme.accent700 : Theme.muted(0.5))
+                                    .foregroundStyle(reason == option ? Theme.accent700 : Theme.textMuted)
                                     .padding(.vertical, 6)
                                     .padding(.horizontal, 12)
                                     .background(
@@ -184,11 +327,11 @@ struct AppealSheet: View {
                     .scrollContentBackground(.hidden)
                     .padding(10)
                     .frame(minHeight: 160)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
 
                 Text("\(text.count) / \(limit)")
                     .font(Theme.body(11))
-                    .foregroundStyle(isValid || text.isEmpty ? Theme.muted(0.4) : Theme.danger)
+                    .foregroundStyle(isValid || text.isEmpty ? Theme.textFaint : Theme.danger)
                     .frame(maxWidth: .infinity, alignment: .trailing)
 
                 Spacer(minLength: 0)

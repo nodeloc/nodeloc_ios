@@ -167,6 +167,13 @@ final class BlockedUsersStore {
     func loadFromServer() async -> Bool {
         guard let username = DiscourseAuth.shared.username else { return false }
         guard let response = try? await client.user(username) else { return false }
+        // The profile loads even when the block list behind it didn't (the
+        // adapter fetches `/me/blocks` separately and drops a failure). Taking
+        // that as "the server has no blocks" turned every real block into a
+        // local-only one, which `unblock` then never sent to the server.
+        guard response.user.ignoredUsernames != nil || response.user.mutedUsernames != nil else {
+            return false
+        }
 
         let server = Set(
             ((response.user.ignoredUsernames ?? []) + (response.user.mutedUsernames ?? []))

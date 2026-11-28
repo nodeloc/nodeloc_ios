@@ -28,14 +28,18 @@ final class NetworkReachability {
 
     /// Optimistic until told otherwise — see the note above.
     private(set) var isOnline = true
+    /// Low Data Mode is on for the current path: no autoplaying video.
+    private(set) var isConstrained = false
 
     private let monitor = NWPathMonitor()
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
+            let constrained = path.isConstrained
             Task { @MainActor [weak self] in
                 self?.apply(isOnline: satisfied)
+                if self?.isConstrained != constrained { self?.isConstrained = constrained }
             }
         }
         // Not the main queue: path updates arrive during launch and while

@@ -54,19 +54,32 @@ struct ReplyComposer: View {
     @Binding var text: String
     let isSubmitting: Bool
     let isAuthenticated: Bool
+    /// A guest tapping the bar: the shared login prompt (`LoginPromptSheet`).
+    var onRequestLogin: (() -> Void)? = nil
     /// The username being replied to; shows a "回复xxx" header when set.
     var replyingTo: String? = nil
     /// Called when the user dismisses the reply target chip.
     var onClearReplyTarget: (() -> Void)? = nil
     let onSubmit: () -> Void
+    /// Opens straight into the editor — when it replaces another bar (the
+    /// lottery's) at the reader's request.
+    var expandsOnAppear = false
+    /// Bumped by every 加入讨论 entry outside the bar (an empty reply list,
+    /// the red envelope's 回帖后领取…): opens the panel, focused.
+    var focusRequest = 0
+    /// Bumped by a tap on the dimmed page behind: folds the panel.
+    var collapseRequest = 0
+    /// Told when the panel opens or folds, so the page behind can dim.
+    var onExpandedChange: ((Bool) -> Void)? = nil
+    /// Told when the editor folds back into the bar.
+    var onCollapse: (() -> Void)? = nil
 
     // Rich text is the source of truth while composing.
     @State private var rich = AttributedString()
-    /// The rich editor's selection, boxed because its type is iOS 26 only.
-    @State private var selectionBox = RichSelectionBox()
-    /// The plain editor's selection. `TextSelection` is iOS 18, so this one
-    /// needs no box.
-    @State private var plainSelection: TextSelection?
+    /// The selection, as character offsets into `rich`.
+    @State private var selection: Range<Int> = 0..<0
+    /// The editor's caret styling, and a way to insert into it.
+    @State private var editorProxy = ComposerEditorProxy()
     /// `@user` / `#node` completion for this field.
     @State private var mentions = MentionAutocompleteStore()
     /// Editable images (tap to open the editor), like the topic composer.
@@ -75,9 +88,11 @@ struct ReplyComposer: View {
     /// Non-editable GIFs from Klipy.
     @State private var gifAttachments: [GifAttachment] = []
 
-    @FocusState private var focused: Bool
+    @State private var focused = false
     @State private var mode: Mode = .plain
     @State private var showGiphy = false
+    /// The emoji panel in the keyboard's place.
+    @State private var showsEmojiPanel = false
     @State private var expanded = false
 
     // Height / drag.
@@ -108,30 +123,13 @@ struct ReplyComposer: View {
 
     private var plainText: String { String(rich.characters) }
 
-    /// The caret as a character offset into `plainText`, from whichever
-    /// editor is running.
-    private var caretOffset: Int? {
-        if #available(iOS 26.0, *) {
-            return selectionBox.caretOffset(in: rich)
-        }
-        return plainSelection?.caretOffset(in: plainText)
-    }
+    /// The caret as a character offset into `plainText`.
+    private var caretOffset: Int? { selection.upperBound }
 
-    /// Puts the caret at a character offset, in whichever editor is running.
+    /// Puts the caret at a character offset.
     private func setCaret(to offset: Int) {
-        if #available(iOS 26.0, *) {
-            let characters = rich.characters
-            let caret = min(offset, characters.count)
-            selectionBox.selection = AttributedTextSelection(
-                insertionPoint: characters.index(characters.startIndex, offsetBy: caret)
-            )
-        } else {
-            let plain = plainText
-            let caret = min(offset, plain.count)
-            plainSelection = TextSelection(
-                insertionPoint: plain.index(plain.startIndex, offsetBy: caret)
-            )
-        }
+        let caret = min(max(offset, 0), rich.characters.count)
+        selection = caret..<caret
     }
 
     private func refreshMentions() {
@@ -150,9 +148,19 @@ struct ReplyComposer: View {
         let lower = characters.index(characters.startIndex, offsetBy: insertion.range.lowerBound)
         let upper = characters.index(characters.startIndex, offsetBy: insertion.range.upperBound)
         rich.replaceSubrange(lower..<upper, with: AttributedString(insertion.replacement))
-        text = plainText
+        text = ComposerEmojiCodec.plain(rich)
         setCaret(to: insertion.caretOffset)
     }
+
+    /// Swaps the keyboard for the emoji panel, or back. Focus stays, so the
+    /// caret does too; from the collapsed bar it opens straight on the panel.
+    private func toggleEmojiPanel() {
+        showGiphy = false
+        if !expanded { withAnimation(.quicker) { expanded = true } }
+        showsEmojiPanel.toggle()
+        focused = true
+    }
+
     private var hasImage: Bool { !imageAttachments.isEmpty }
     private var hasAttachments: Bool { !imageAttachments.isEmpty || !gifAttachments.isEmpty }
 
@@ -176,7 +184,16 @@ struct ReplyComposer: View {
             if expanded {
                 // Opaque: it's a full editor with a toolbar under it.
                 expandedComposer
-                    .background(Theme.bg)
+                    .background(
+                        Theme.bg,
+                        in: UnevenRoundedRectangle(topLeadingRadius: 22, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 22, style: .continuous)
+                    )
+                    .background(alignment: .bottom) {
+                        // Down through the home-indicator strip, so the page
+                        // doesn't show under the panel.
+                        Theme.bg.frame(height: 80).offset(y: 70)
+                    }
+                    .shadow(color: .black.opacity(0.12), radius: 16, x: 0, y: -4)
             } else {
                 // Deliberately no background — the capsule floats, and an
                 // opaque strip behind it would undo that.
@@ -184,25 +201,50 @@ struct ReplyComposer: View {
             }
         }
         .onChange(of: expanded) { _, isExpanded in
-            focused = isExpanded
+            // Opened by the bar's emoji button too: the editor focuses either
+            // way, and the panel flag decides what comes up under it.
+            // Once the editor exists: set in the same turn that inserts it,
+            // the focus has nothing to land on and the keyboard never comes
+            // up — and setting it to the value it already has is no change.
+            focused = false
+            if isExpanded {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { focused = true }
+            }
+            onExpandedChange?(isExpanded)
+            if !isExpanded { showsEmojiPanel = false }
             if !isExpanded {
                 showGiphy = false
                 mode = .plain
                 tall = false
+                onCollapse?()
             }
+        }
+        .onAppear {
+            if expandsOnAppear && isAuthenticated { withAnimation(.quicker) { expanded = true } }
+        }
+        .onChange(of: collapseRequest) { _, _ in
+            withAnimation(.quicker) { expanded = false }
+        }
+        .onChange(of: focusRequest) { _, _ in
+            guard isAuthenticated else { return }
+            if expanded { focused = true } else { withAnimation(.quicker) { expanded = true } }
         }
         .onChange(of: replyingTo) { _, target in
             // Tapping "回复" on a post opens the composer aimed at that user.
             if target != nil { withAnimation(.quicker) { expanded = true } }
         }
         .onChange(of: text) { _, newValue in
+            // Set from outside (a 草稿箱 reply draft): shown with site emoji as images.
+            if !newValue.isEmpty, newValue != ComposerEmojiCodec.plain(rich) {
+                rich = ComposerEmojiCodec.inflate(AttributedString(newValue))
+                return
+            }
             // Parent cleared the draft after a successful send → reset + close.
             if newValue.isEmpty {
                 rich = AttributedString()
                 imageAttachments = []
                 gifAttachments = []
-                selectionBox.clear()
-                plainSelection = nil
+                selection = 0..<0
                 withAnimation(.quicker) { expanded = false }
             }
         }
@@ -224,30 +266,53 @@ struct ReplyComposer: View {
     /// content stays visible behind it. Tapping still just expands.
     private var collapsedBar: some View {
         Button {
-            if isAuthenticated { withAnimation(.quicker) { expanded = true } }
+            if isAuthenticated {
+                withAnimation(.quicker) { expanded = true }
+            } else {
+                onRequestLogin?()
+            }
         } label: {
             HStack(spacing: 10) {
                 // Leading glyph, as on the reference: it says "add something"
                 // before the placeholder has to.
                 Image(systemName: "plus")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.55))
+                    .foregroundStyle(Theme.textMuted)
 
                 Text(collapsedText)
                     .font(Theme.body(15))
-                    .foregroundStyle(plainText.isEmpty ? Theme.muted(0.5) : Theme.text)
+                    .foregroundStyle(plainText.isEmpty ? Theme.textMuted : Theme.text)
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
             }
             .padding(.leading, 16)
-            .padding(.trailing, 18)
+            .padding(.trailing, 52)
             .frame(height: FloatingHeader.controlHeight)
             .padding(.vertical, 7)
             .contentShape(Capsule())
         }
         .buttonStyle(.pressable)
-        .disabled(!isAuthenticated)
+        // Guests can tap it too: it asks them to sign in.
+        // Straight to the emoji panel from the bar, as on Android: a reply
+        // that is only an emoji shouldn't need the keyboard first.
+        .overlay(alignment: .trailing) {
+            Button {
+                showsEmojiPanel = true
+                withAnimation(.quicker) { expanded = true }
+                focused = true
+            } label: {
+                Image(systemName: "face.smiling")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 44, height: FloatingHeader.controlHeight + 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.pressable)
+            .disabled(!isAuthenticated)
+            .padding(.trailing, 6)
+            .accessibilityLabel(AppString("表情"))
+        }
         // `.interactive()` is what gives the glass its press response, the same
         // as the header capsules.
         .glassSurface(tint: FloatingHeader.glassTint, interactive: true)
@@ -261,20 +326,18 @@ struct ReplyComposer: View {
     }
 
     private var collapsedText: String {
-        if !plainText.isEmpty { return plainText }
+        if !plainText.isEmpty { return ComposerEmojiCodec.plain(rich) }
         let count = imageAttachments.count + gifAttachments.count
         if count > 0 { return AppString("已添加 \(count) 个附件") }
-        return isAuthenticated ? AppString("加入对话") : AppString("登录后参与讨论")
+        return isAuthenticated ? AppString("加入讨论") : AppString("登录后参与讨论")
     }
 
     // MARK: Expanded composer
 
     private var expandedComposer: some View {
         VStack(spacing: 0) {
-            Rectangle().fill(Theme.divider).frame(height: 1)
             dragHandle
-            if let replyingTo { replyTargetHeader(replyingTo) }
-            hintLine
+            panelHeader
             if !mentions.suggestions.isEmpty {
                 MentionSuggestionBar(suggestions: mentions.suggestions) { pick($0) }
             }
@@ -288,6 +351,12 @@ struct ReplyComposer: View {
                 )
             }
             if !gifAttachments.isEmpty { gifAttachmentRow }
+            // Replies with AFF links need #AFF too (no tag).
+            if OffsiteLinkDetector.hasOffsiteLink(plainText) {
+                AffLinkHint()
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
             toolbar
             if showGiphy {
                 giphyPanel
@@ -311,12 +380,72 @@ struct ReplyComposer: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 15))
-                    .foregroundStyle(Theme.muted(0.4))
+                    .foregroundStyle(Theme.textFaint)
             }
             .buttonStyle(.pressable)
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+
+    /// 评论这条帖子, or who the reply goes to, and a way to fold the panel.
+    private var panelHeader: some View {
+        HStack(spacing: 8) {
+            Text(replyingTo.map { AppString("回复 \($0)") } ?? AppString("评论这条帖子"))
+                .font(Theme.body(16, weight: .bold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            if replyingTo != nil {
+                Button {
+                    onClearReplyTarget?()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.textFaint)
+                }
+                .buttonStyle(.pressable)
+                .accessibilityLabel(AppString("改为评论帖子"))
+            }
+            Spacer(minLength: 0)
+            Button {
+                withAnimation(.quicker) { expanded = false }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel(AppString("收起"))
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+    }
+
+    /// Types the trigger for a mention (@), a tag (#) or a node ($) at the
+    /// caret, so the completion takes over from there.
+    private func insertTrigger(_ trigger: String) {
+        let characters = rich.characters
+        let count = characters.count
+        let lower = characters.index(characters.startIndex, offsetBy: min(selection.lowerBound, count))
+        let upper = characters.index(characters.startIndex, offsetBy: min(selection.upperBound, count))
+        rich.replaceSubrange(lower..<upper, with: AttributedString(trigger))
+        text = ComposerEmojiCodec.plain(rich)
+        setCaret(to: min(selection.lowerBound, count) + trigger.count)
+        showsEmojiPanel = false
+        focused = true
+    }
+
+    private func triggerTool(_ symbol: String, label: String) -> some View {
+        Button { insertTrigger(symbol) } label: {
+            Text(symbol)
+                .font(Theme.body(19, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .frame(width: 34, height: 34)
+        }
+        .buttonStyle(.pressable)
+        .disabled(!isAuthenticated)
+        .accessibilityLabel(label)
     }
 
     private var hintLine: some View {
@@ -328,7 +457,7 @@ struct ReplyComposer: View {
         // "请在评论时遵守 社区规则 评论时。".
         Text("请在评论时遵守社区规则。")
             .font(Theme.body(12))
-        .foregroundStyle(Theme.muted(0.5))
+        .foregroundStyle(Theme.textMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.top, 10)
@@ -371,41 +500,29 @@ struct ReplyComposer: View {
             )
     }
 
-    /// Rich where the system has it, plain where it doesn't.
-    @ViewBuilder
     private var bodyEditor: some View {
-        if #available(iOS 26.0, *) {
-            TextEditor(text: $rich, selection: selectionBox.binding)
-        } else {
-            // Writes back through the same `rich` storage the rest of the view
-            // reads, so nothing else here has to know which editor is running.
-            // Flattening loses no attributes: below 26 none can be applied.
-            TextEditor(
-                text: Binding(
-                    get: { plainText },
-                    set: { rich = AttributedString($0) }
-                ),
-                selection: $plainSelection
-            )
-        }
+        ComposerTextEditor(
+            text: $rich,
+            selection: $selection,
+            isFocused: $focused,
+            showsEmojiPanel: $showsEmojiPanel,
+            style: .reply(),
+            isEditable: isAuthenticated,
+            proxy: editorProxy
+        )
     }
 
     private var editor: some View {
         ZStack(alignment: .topLeading) {
             if plainText.isEmpty {
-                Text(isAuthenticated ? AppString("加入对话") : AppString("登录后参与讨论"))
+                Text(isAuthenticated ? AppString("友善交流，对事不对人") : AppString("登录后参与讨论"))
                     .font(Theme.body(15))
-                    .foregroundStyle(Theme.muted(0.4))
+                    .foregroundStyle(Theme.textFaint)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 8)
                     .allowsHitTesting(false)
             }
             bodyEditor
-                .font(Theme.body(15))
-                .tint(Theme.accent)
-                .scrollContentBackground(.hidden)
-                .focused($focused)
-                .disabled(!isAuthenticated)
                 // Both, because a token depends on the caret as much as on the
                 // text: moving into an existing `@name` should offer it again.
                 .onChange(of: rich) { _, _ in refreshMentions() }
@@ -414,7 +531,8 @@ struct ReplyComposer: View {
         .frame(height: currentHeight)
         .padding(.horizontal, 12)
         .background {
-            Text(plainText.isEmpty ? " " : plainText)
+            // Each emoji measured as one wide glyph, which is what it draws as.
+            Text(plainText.isEmpty ? " " : plainText.replacingOccurrences(of: "\u{FFFC}", with: "国"))
                 .font(Theme.body(15))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 8)
@@ -448,9 +566,9 @@ struct ReplyComposer: View {
                             Rectangle().fill(Theme.neutral300)
                         }
                         .frame(width: 96, height: 96)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                                 .strokeBorder(Theme.divider, lineWidth: 1)
                         }
 
@@ -485,7 +603,7 @@ struct ReplyComposer: View {
             switch mode {
             case .plain: plainTools
             case .formatting:
-                if #available(iOS 26.0, *) { formattingTools }
+                formattingTools
             }
             Spacer(minLength: 8)
             submitButton
@@ -495,41 +613,9 @@ struct ReplyComposer: View {
     }
 
     private var plainTools: some View {
-        HStack(spacing: 4) {
-            Button {
-                withAnimation(.quicker) {
-                    showGiphy.toggle()
-                    if showGiphy { focused = false }
-                }
-            } label: {
-                Text("GIF")
-                    .font(Theme.body(13, weight: .heavy))
-                    .foregroundStyle(showGiphy ? Theme.accent : Theme.text)
-                    .frame(height: 34)
-                    .padding(.horizontal, 8)
-            }
-            .buttonStyle(.pressable)
-            .disabled(!isAuthenticated || DiscourseConfig.klipyAPIKey.isEmpty)
-
-            PhotosPicker(selection: $pickerItem, matching: .images) {
-                Group {
-                    if isUploadingImage {
-                        ProgressView().tint(Theme.accent)
-                    } else {
-                        Image(systemName: "photo")
-                            .font(.system(size: 17, weight: .medium))
-                    }
-                }
-                .foregroundStyle(hasImage ? Theme.muted(0.35) : Theme.text)
-                .frame(width: 34, height: 34)
-            }
-            .disabled(!isAuthenticated || isUploadingImage || hasImage)
-
-            toolDivider
-
-            // Live emphasis needs the rich editor, so the way into it is only
-            // offered where that exists.
-            if ComposerFormatting.isAvailable {
+        HStack(spacing: 2) {
+            // The editor draws emphasis on every system now.
+            do {
                 Button {
                     withAnimation(.quicker) { mode = .formatting }
                 } label: {
@@ -541,10 +627,54 @@ struct ReplyComposer: View {
                 .buttonStyle(.pressable)
                 .disabled(!isAuthenticated)
             }
+            triggerTool("@", label: AppString("提到用户"))
+            triggerTool("#", label: AppString("标签"))
+            triggerTool("$", label: AppString("节点"))
+            // Swaps with the keyboard: shows the keyboard glyph while the
+            // panel is up.
+            Button { toggleEmojiPanel() } label: {
+                Image(systemName: showsEmojiPanel && focused ? "keyboard" : "face.smiling")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.pressable)
+            .disabled(!isAuthenticated)
+            .accessibilityLabel(showsEmojiPanel && focused ? AppString("键盘") : AppString("表情"))
+
+            PhotosPicker(selection: $pickerItem, matching: .images) {
+                Group {
+                    if isUploadingImage {
+                        ProgressView().tint(Theme.accent)
+                    } else {
+                        Image(systemName: "photo")
+                            .font(.system(size: 17, weight: .medium))
+                    }
+                }
+                .foregroundStyle(hasImage ? Theme.textFaint : Theme.text)
+                .frame(width: 34, height: 34)
+            }
+            .disabled(!isAuthenticated || isUploadingImage || hasImage)
+
+            Button {
+                withAnimation(.quicker) {
+                    showGiphy.toggle()
+                    if showGiphy { focused = false; showsEmojiPanel = false }
+                }
+            } label: {
+                Text("GIF")
+                    .font(Theme.body(13, weight: .heavy))
+                    .foregroundStyle(showGiphy ? Theme.accent : Theme.text)
+                    .fixedSize()
+                    .frame(height: 34)
+                    .padding(.horizontal, 8)
+            }
+            .buttonStyle(.pressable)
+            .disabled(!isAuthenticated || DiscourseConfig.klipyAPIKey.isEmpty)
+
         }
     }
 
-    @available(iOS 26.0, *)
     private var formattingTools: some View {
         let active = currentEmphasis
         return HStack(spacing: 2) {
@@ -564,13 +694,13 @@ struct ReplyComposer: View {
                 if isSubmitting {
                     ProgressView().tint(Theme.accent)
                 } else {
-                    Text("回复").font(Theme.body(14, weight: .semibold))
+                    Text(AppString("发送")).font(Theme.body(14, weight: .semibold))
                 }
             }
-            .foregroundStyle(canSubmit ? Theme.bg : Theme.muted(0.5))
+            .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
             .padding(.horizontal, 16)
             .frame(height: 34)
-            .background(canSubmit ? Theme.accent : Theme.surface, in: Capsule())
+            .background(canSubmit ? Theme.accentFill : Theme.surface, in: Capsule())
         }
         .buttonStyle(.pressable)
         .disabled(!canSubmit)
@@ -582,7 +712,7 @@ struct ReplyComposer: View {
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(isActive ? Theme.accent : Theme.text)
                 .frame(width: 38, height: 34)
-                .background(isActive ? Theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(isActive ? Theme.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         }
         .buttonStyle(.pressable)
     }
@@ -596,35 +726,38 @@ struct ReplyComposer: View {
 
     // MARK: Rich-text formatting
 
-    @available(iOS 26.0, *)
-    private var currentEmphasis: Int {
-        selectionBox.selection.typingAttributes(in: rich).emphasis ?? 0
-    }
+    private var currentEmphasis: Int { editorProxy.activeEmphasis }
 
-    @available(iOS 26.0, *)
     private func toggleEmphasis(_ flag: Int) {
         let active = (currentEmphasis & flag) != 0
-        var selection = selectionBox.selection
-        rich.transformAttributes(in: &selection) { container in
-            var mask = container.emphasis ?? 0
-            mask = active ? (mask & ~flag) : (mask | flag)
-            container.emphasis = mask == 0 ? nil : mask
-
-            var font = Font.system(size: 15)
-            if mask & Emphasis.bold != 0 { font = font.bold() }
-            if mask & Emphasis.italic != 0 { font = font.italic() }
-            container.font = font
-            container.strikethroughStyle = (mask & Emphasis.strike != 0) ? Text.LineStyle.single : nil
+        guard !selection.isEmpty else {
+            // Caret only: what gets typed next.
+            let mask = active ? (currentEmphasis & ~flag) : (currentEmphasis | flag)
+            editorProxy.setTypingEmphasis(mask)
+            focused = true
+            return
         }
-        selectionBox.selection = selection
+        let characters = rich.characters
+        let count = characters.count
+        let lower = characters.index(characters.startIndex, offsetBy: min(selection.lowerBound, count))
+        let upper = characters.index(characters.startIndex, offsetBy: min(selection.upperBound, count))
+        var updated = rich
+        for run in updated[lower..<upper].runs {
+            guard run[ComposerEmojiAttribute.self] == nil else { continue }
+            var mask = run.emphasis ?? 0
+            mask = active ? (mask & ~flag) : (mask | flag)
+            updated[run.range].emphasis = mask == 0 ? nil : mask
+        }
+        rich = updated
         focused = true
     }
 
     /// Serialises the rich text (plus attachments) to Discourse markdown.
     private func exportMarkdown() -> String {
         var out = ""
-        for run in rich.runs {
-            let piece = String(rich[run.range].characters)
+        let flat = ComposerEmojiCodec.flatten(rich)
+        for run in flat.runs {
+            let piece = String(flat[run.range].characters)
             guard !piece.isEmpty else { continue }
             out += wrapEmphasis(piece, mask: run.emphasis ?? 0)
         }
@@ -661,7 +794,7 @@ struct ReplyComposer: View {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.5))
+                    .foregroundStyle(Theme.textMuted)
                 TextField("搜索 GIF…", text: $gifQuery)
                     .font(Theme.body(15))
                     .tint(Theme.accent)
@@ -673,7 +806,7 @@ struct ReplyComposer: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .buttonStyle(.pressable)
             }
@@ -692,7 +825,7 @@ struct ReplyComposer: View {
                                 Rectangle().fill(Theme.neutral300)
                             }
                             .frame(width: 130, height: 130)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
                         }
                         .buttonStyle(.pressable)
                     }
@@ -705,7 +838,7 @@ struct ReplyComposer: View {
             if gifs.isEmpty, !isSearchingGifs {
                 Text(gifQuery.count < 2 ? AppString("输入关键词搜索 GIF") : AppString("没有找到 GIF"))
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.5))
+                    .foregroundStyle(Theme.textMuted)
                     .frame(maxWidth: .infinity)
                     .frame(height: 138)
             }

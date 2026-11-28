@@ -2,7 +2,9 @@
 //  BrowseNodesOverlay.swift
 //  nodeloc
 //
-//  The node directory, searchable and grouped.
+//  节点广场: the node directory — a title, search, section chips, and the
+//  headed groups of node cards (为你推荐 / 最受欢迎 / 新节点), a section's
+//  nodes, or search results.
 //
 
 import SwiftUI
@@ -13,115 +15,107 @@ struct BrowseNodesOverlay: View {
     @Environment(AppState.self) private var app
     @Environment(\.sidebarIsPinned) private var sidebarIsPinned
     @Environment(\.usesTopTabBar) private var usesTopTabBar
-    @Environment(\.openURL) private var openURL
     @State private var store = NodeBrowseStore()
     @State private var query = ""
-    @State private var showsSearch = false
-    @State private var showsGroupList = false
-    @State private var selectedNode: SidebarNodeSummary?
+    /// The chip that's on: nil is 全部, otherwise a section's id.
+    @State private var sectionID: Int?
+    /// How many cards each list shows so far, keyed by list (显示更多 adds more).
+    @State private var shownCounts: [String: Int] = [:]
     /// Only so the toolbar's mark can send the directory back to the top.
     @State private var browseScroll = ScrollPosition()
+    /// The joined node whose 退出 is waiting on the confirmation.
+    @State private var leaveCandidate: SidebarNodeSummary?
+    @State private var collapsedOnce = false
     let showsCloseButton: Bool
-    private let headerIconFrame: CGFloat = 34
-    private let headerContentHeight: CGFloat = 56
 
     init(showsCloseButton: Bool = true) {
         self.showsCloseButton = showsCloseButton
     }
 
+    /// Cards a group shows before 显示更多, and how many each tap adds; a
+    /// section or search list pages by 12 (the design's numbers).
+    private let groupStep = 3
+    private let listStep = 12
+
     var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .top) {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        Color.clear
-                            .frame(maxWidth: .infinity)
-                            .frame(height: usesTabBarRow ? 0 : headerContentHeight)
-
-                        if showsGroupList {
-                            groupListContent
-                        } else if !store.hasContent && store.isLoading {
-                            nodeSkeleton
-                                .padding(.top, 18)
-                                .padding(.bottom, 110)
-                        } else {
-                            VStack(alignment: .leading, spacing: 28) {
-                                topicChipsSection
-
-                                categoryPreviewSections
-
-                                if let errorText = store.errorText {
-                                    Text(errorText)
-                                        .font(Theme.body(13, weight: .medium))
-                                        .foregroundStyle(Theme.danger)
-                                        .padding(.horizontal, 16)
-                                }
-                            }
-                            .padding(.top, 18)
-                            .padding(.bottom, 110)
-                        }
-                    }
-                }
-                .scrollIndicators(.hidden)
-                .scrollPosition($browseScroll)
-                .onChange(of: app.scrollToTopRequests) { _, _ in
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        browseScroll.scrollTo(edge: .top)
-                    }
-                }
-
-                if !usesTabBarRow {
-                    browseHeader()
-                        .zIndex(1)
-                }
-
-                if let selectedNode {
-                    NodeDetailOverlay(node: selectedNode) {
-                        withAnimation(.overlayPush) {
-                            self.selectedNode = nil
-                        }
-                    }
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                    .zIndex(20)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                sectionChips
+                content
+            }
+            .padding(.bottom, 110)
+        }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.immediately)
+        // The system search field, hidden until the directory is pulled down.
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: AppString("搜索节点名称或简介"))
+        .refreshable {
+            await store.load(force: true)
+            collapseSearchDrawer()
+        }
+        .tabBarFollowsScrollDirection()
+        .scrollPosition($browseScroll)
+        .onChange(of: app.scrollToTopRequests) { _, _ in
+            withAnimation(.easeOut(duration: 0.3)) {
+                browseScroll.scrollTo(edge: .top)
+            }
+        }
+        .background(Theme.bg.ignoresSafeArea())
+        .toolbar {
+            // 节点广场 in the bar's centre, like the other tabs' centre content.
+            if !usesTopTabBar {
+                ToolbarItem(placement: .principal) {
+                    Text(AppString("节点广场"))
+                        .font(Theme.body(17, weight: .semibold))
+                        .foregroundStyle(Theme.text)
                 }
             }
-            .background(Theme.bg.ignoresSafeArea())
+            if showsCloseButton {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { closeOverlay(app) } label: {
+                        Image(systemName: "chevron.left")
+                            .foregroundStyle(Theme.text)
+                    }
+                    .accessibilityLabel(AppString("返回"))
+                }
+            } else {
+                // Root of the nodes tab: no back destination, so the slot
+                // holds the sidebar toggle like the home feed does.
+                SidebarToolbarItem(sidebarIsPinned: sidebarIsPinned)
+            }
+            // 新建 (or 登录); search is the pull-down field.
+            ToolbarItem(placement: .topBarTrailing) {
+                browseTrailingAction
+            }
         }
-        // A node page opened from this tab is drawn *inside* the tab's
-        // navigation stack, so — unlike a post, which comes from `app.overlay`
-        // and covers the whole column — it cannot cover the tab bar's row. The
-        // row stayed put above it, putting this screen's mark and tools beside
-        // the node page's own header. A full-screen page has no use for them.
-        .toolbar(usesTabBarRow && selectedNode != nil ? .hidden : .automatic, for: .navigationBar)
-        .tabBarHeader(isPinned: usesTabBarRow) {
-            browseLeadingItems
-        } trailing: {
-            browseTrailingAction
+        .tabRootNavigationBar()
+        // A tab's root view gets the search drawer open at rest, where a
+        // pushed page (草稿箱, 我的收藏) gets it collapsed; no modifier here
+        // is the cause. Scrolling the directory by a point collapses it, the
+        // same thing UIKit apps do to start with a hidden search bar.
+        .onAppear {
+            guard !collapsedOnce else { return }
+            collapsedOnce = true
+            collapseSearchDrawer()
+        }
+        .onChange(of: query) { old, new in
+            if !old.isEmpty, new.isEmpty { collapseSearchDrawer() }
         }
         .task { await store.load() }
-    }
-
-    /// True only for the nodes tab on iPad. Presented as a modal this screen
-    /// sits over another one, so there is no tab bar row for it to join.
-    /// The tab bar's row is only available to a screen shown *as a tab*.
-    /// Opened as an overlay (with a close button) it draws its own header.
-    private var usesTabBarRow: Bool { usesTopTabBar && !showsCloseButton }
-
-    private var browseTitle: some View {
-        Text(headerTitle)
-            .font(Theme.heading(20, weight: .semibold))
-            .foregroundStyle(Theme.text)
-    }
-
-    @ViewBuilder
-    private var browseBackButton: some View {
-        Button { handleBack() } label: {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Theme.text)
-                .frame(width: headerIconFrame, height: headerIconFrame)
+        // Before the whole directory is in, a search asks the server.
+        .task(id: searchTerm) {
+            let term = searchTerm
+            guard !term.isEmpty, !store.isComplete else { return }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await store.searchRemote(term)
         }
-        .headerControlGlass(tint: Theme.bg.opacity(0.34), shadow: .black.opacity(0.08))
+        // A join or leave on the node page (or another directory) shows here
+        // too; this store's own announcements land as no-ops.
+        .onReceive(NotificationCenter.default.publisher(for: NodeMembership.didChange)) { note in
+            guard let id = note.userInfo?["id"] as? Int, let joined = note.userInfo?["joined"] as? Bool else { return }
+            store.apply(id: id, joined: joined)
+        }
     }
 
     /// Guests get 登录 where 新建 would be — creating a node needs an account.
@@ -130,616 +124,434 @@ struct BrowseNodesOverlay: View {
         if app.isGuest {
             GuestLoginButton()
         } else {
-            Button {
-                withAnimation(.overlayPush) {
-                    app.overlay = .createNode
-                }
-            } label: {
+            Button { createNode() } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Theme.text)
-                    .frame(width: headerIconFrame, height: headerIconFrame)
             }
-            .headerControlGlass(tint: Theme.bg.opacity(0.34), shadow: .black.opacity(0.08))
+            .accessibilityLabel(AppString("创建节点"))
         }
     }
 
-    /// Only ever rendered in the tab bar's row — `tabBarHeader` drops it
-    /// otherwise, and the floating header draws its own controls.
-    ///
-    /// Nothing but the back button, and *nothing at all* when there is no back
-    /// destination: a toolbar groups its leading items into one container, so
-    /// an empty `HStack` here was enough to stretch the shared mark's circle
-    /// into a rounded rectangle. The title used to live here too and truncated
-    /// to "N…" — the tab capsule leaves this corner no room, and the tab
-    /// already says which screen this is.
-    @ViewBuilder
-    private var browseLeadingItems: some View {
-        if showsGroupList {
-            browseBackButton
+    private func collapseSearchDrawer() {
+        Task { @MainActor in
+            // After the layout pass that put the drawer there.
+            try? await Task.sleep(for: .milliseconds(50))
+            browseScroll.scrollTo(y: 1)
         }
     }
 
-    private func browseHeader() -> some View {
-        ZStack {
-            browseTitle
+    // MARK: Chips
 
-            HStack {
-                if showsCloseButton || showsGroupList {
-                    browseBackButton
-                } else {
-                    // Root of the nodes tab: no back destination, so the slot
-                    // holds the sidebar toggle like the home feed does.
-                    SidebarMenuButton()
-                }
-
-                Spacer()
-
-                browseTrailingAction
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .frame(maxWidth: .infinity)
-        .background {
-            Rectangle()
-                .fill(Theme.bg.opacity(0.3))
-                .ignoresSafeArea(edges: .top)
-        }
-    }
-
-    private var headerTitle: String {
-        showsGroupList ? (store.selectedGroup?.name ?? AppString("节点")) : AppString("节点")
-    }
-
-    private func handleBack() {
-        if showsGroupList {
-            withAnimation(.quick) {
-                showsGroupList = false
-            }
-        } else {
-            closeOverlay(app)
-        }
-    }
-
-    private var topicChipsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("按主题浏览节点")
-                .font(Theme.heading(17, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 16)
-
-            ScrollView(.horizontal) {
-                LazyHGrid(
-                    rows: Array(repeating: GridItem(.fixed(36), spacing: 11), count: 3),
-                    alignment: .top,
-                    spacing: 10
-                ) {
-                    if store.groups.isEmpty {
-                        ForEach(fallbackTopicLabels, id: \.self) { label in
-                            topicChip(title: label, isSelected: false) {}
-                                .disabled(true)
-                        }
-                    } else {
-                        ForEach(store.groups) { group in
-                            topicChip(title: group.name, isSelected: store.selectedGroup?.id == group.id) {
-                                openGroup(group)
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .scrollIndicators(.hidden)
-            .frame(height: 130)
-        }
-    }
-
-    private var groupListContent: some View {
-        VStack(spacing: 10) {
-            if store.isLoadingGroup {
-                loadingRow(AppString("正在加载 \(store.selectedGroup?.name ?? "节点")"))
-            }
-
-            ForEach(Array(store.groupNodes.enumerated()), id: \.element.id) { index, node in
-                rankedCommunityCard(node, rank: index + 1)
-            }
-
-            if !store.isLoadingGroup && store.groupNodes.isEmpty {
-                emptyRow(AppString("这里还没有可浏览的节点"), icon: "tray")
-                    .padding(.horizontal, 16)
-            }
-
-            if let errorText = store.errorText {
-                Text(errorText)
-                    .font(Theme.body(13, weight: .medium))
-                    .foregroundStyle(Theme.danger)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-            }
-        }
-        .padding(.top, 18)
-        .padding(.bottom, 110)
-    }
-
-    @ViewBuilder
-    private var categoryPreviewSections: some View {
-        if previewGroups.isEmpty {
-            recommendedSection
-        } else {
-            VStack(alignment: .leading, spacing: 28) {
-                ForEach(previewGroups) { group in
-                    categoryPreviewSection(group)
+    private var sectionChips: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                chip(AppString("全部"), isOn: sectionID == nil && !isSearching) { pick(nil) }
+                ForEach(store.sections) { section in
+                    chip(section.name, isOn: sectionID == section.id && !isSearching) { pick(section.id) }
                 }
             }
+            .padding(.horizontal, 16)
+        }
+        .scrollIndicators(.hidden)
+        .padding(.top, 12)
+        .padding(.bottom, 12)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
         }
     }
 
-    private var previewGroups: [NodeGroupSummary] {
-        Array(store.groups.prefix(6))
-    }
-
-    private func categoryPreviewSection(_ group: NodeGroupSummary) -> some View {
-        let nodes = store.previewNodes(for: group)
-
-        return VStack(alignment: .leading, spacing: 14) {
-            Button {
-                openGroup(group)
-            } label: {
-                HStack {
-                    Text(group.name)
-                        .font(Theme.heading(20, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Spacer()
-                    Text("更多")
-                        .font(Theme.body(13, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.58))
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(Theme.text)
-                }
-                .padding(.horizontal, 16)
-            }
-            .buttonStyle(.pressable)
-
-            if nodes.isEmpty, store.isLoading {
-                loadingRow(AppString("正在加载 \(group.name)"))
-            } else if nodes.isEmpty {
-                emptyRow(AppString("暂无节点"), icon: "tray")
-                    .padding(.horizontal, 16)
-            } else {
-                horizontalCommunityCards(nodes: nodes)
-            }
-        }
-    }
-
-    private var recommendedSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("为你推荐")
-                .font(Theme.heading(17, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 16)
-
-            horizontalCommunityCards(nodes: Array(store.recommended.prefix(8)))
-        }
-    }
-
-    @ViewBuilder
-    private var relatedSection: some View {
-        let nodes = relatedNodes
-        if !nodes.isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text(relatedTitle)
-                        .font(Theme.heading(20, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(Theme.text)
-                }
-                .padding(.horizontal, 16)
-
-                horizontalCommunityCards(nodes: nodes)
-            }
-        }
-    }
-
-    private var searchResultsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("搜索结果")
-                .font(Theme.heading(20, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 16)
-
-            VStack(spacing: 10) {
-                ForEach(searchResults) { node in
-                    wideCommunityCard(node)
-                }
-                if searchResults.isEmpty {
-                    emptyRow(AppString("没有匹配的节点"), icon: "magnifyingglass")
-                        .padding(.horizontal, 16)
-                }
-            }
-        }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.56))
-            TextField("搜索节点", text: $query)
-                .font(Theme.body(16))
-                .foregroundStyle(Theme.text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            if !query.isEmpty {
-                Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.4))
-                }
-                .buttonStyle(.pressable)
-            }
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 44)
-        .glassBackground(in: Capsule(), tint: Theme.bg.opacity(0.36))
-        .padding(.horizontal, 16)
-    }
-
-    private var isSearching: Bool {
-        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var searchResults: [SidebarNodeSummary] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return [] }
-        let previewNodes = store.groupPreviews.values.flatMap { $0 }
-        let allNodes = store.recommended + store.groupNodes + previewNodes
-        var seen = Set<Int>()
-        return allNodes.filter { node in
-            guard seen.insert(node.id).inserted else { return false }
-            return node.name.localizedCaseInsensitiveContains(term)
-                || node.slug.localizedCaseInsensitiveContains(term)
-                || node.description.localizedCaseInsensitiveContains(term)
-        }
-    }
-
-    private var relatedNodes: [SidebarNodeSummary] {
-        if !store.groupNodes.isEmpty { return Array(store.groupNodes.prefix(8)) }
-        return Array(store.recommended.dropFirst(2).prefix(6))
-    }
-
-    private var relatedTitle: String {
-        if let selectedGroup = store.selectedGroup {
-            return AppString("更多 \(selectedGroup.name) 类似内容")
-        }
-        return AppString("更多类似内容")
-    }
-
-    private func openGroup(_ group: NodeGroupSummary) {
-        withAnimation(.quick) {
-            showsGroupList = true
-        }
-        Task { await store.loadGroup(group) }
-    }
-
-    private var fallbackTopicLabels: [String] {
-        [
-            AppString("互联网文化"), AppString("游戏"), AppString("问答与故事"), AppString("影视"), AppString("科技"), AppString("食物"),
-            AppString("胜地与旅行"), AppString("流行文化"), AppString("体育"), AppString("商业与金融"), AppString("人文与艺术"),
-            AppString("教育与职业"), AppString("时尚与美容"), AppString("新闻与政治"), AppString("交通工具")
-        ]
-    }
-
-    private func topicChip(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    /// Selected: ink fill, background-coloured text; otherwise an outline.
+    private func chip(_ title: String, isOn: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(Theme.body(13, weight: .medium))
-                .foregroundStyle(isSelected ? Theme.bg : Theme.text)
+                .font(Theme.body(13, weight: .bold))
                 .lineLimit(1)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(isSelected ? Theme.text : Theme.bg, in: Capsule())
+                .foregroundStyle(isOn ? Theme.bg : Theme.text)
+                .padding(.horizontal, 14)
+                .frame(height: 36)
+                .background(isOn ? Theme.text : Theme.bg, in: Capsule())
                 .overlay {
-                    Capsule()
-                        .strokeBorder(isSelected ? Theme.text.opacity(0.18) : Theme.divider, lineWidth: 1.2)
+                    Capsule().strokeBorder(isOn ? Theme.text : Theme.hairline, lineWidth: 1)
                 }
         }
         .buttonStyle(.pressable)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
-    private func horizontalCommunityCards(nodes: [SidebarNodeSummary]) -> some View {
-        GeometryReader { proxy in
-            let cardWidth = max(286, min(360, proxy.size.width - 70))
-
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 14) {
-                    ForEach(nodePairs(from: nodes)) { pair in
-                        communityCard(pair, width: cardWidth)
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .scrollIndicators(.hidden)
+    /// A chip clears the search, as on the web square.
+    private func pick(_ id: Int?) {
+        guard id != sectionID || isSearching else { return }
+        withAnimation(.quick) {
+            sectionID = id
+            query = ""
+            shownCounts = [:]
         }
-        .frame(height: 272)
     }
 
-    private func nodePairs(from nodes: [SidebarNodeSummary]) -> [NodeCardPair] {
-        stride(from: 0, to: nodes.count, by: 2).map { index in
-            NodeCardPair(
-                first: nodes[index],
-                second: index + 1 < nodes.count ? nodes[index + 1] : nil
+    // MARK: Content
+
+    private var searchTerm: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearching: Bool { !searchTerm.isEmpty }
+
+    @ViewBuilder
+    private var content: some View {
+        if !store.hasContent && store.isLoading {
+            skeleton
+        } else if !store.hasContent, let errorText = store.errorText {
+            errorState(errorText)
+        } else if isSearching {
+            searchContent
+        } else if let sectionID, let section = store.sections.first(where: { $0.id == sectionID }) {
+            let list = store.entries(in: section)
+            cardList(
+                key: "section-\(section.id)", title: section.name,
+                note: AppString("\(list.count) 个节点"), entries: list, step: listStep, isFirst: true
+            )
+        } else {
+            ForEach(Array(store.groups(signedIn: !app.isGuest).enumerated()), id: \.element.id) { index, group in
+                cardList(
+                    key: group.id, title: group.title, note: group.note,
+                    entries: group.entries, step: groupStep, isFirst: index == 0
+                )
+            }
+        }
+
+        if store.hasContent, let errorText = store.errorText, !store.isComplete {
+            errorRow(errorText)
+                .padding(.top, 20)
+        }
+    }
+
+    @ViewBuilder
+    private var searchContent: some View {
+        let term = searchTerm
+        let usesServer = !store.isComplete
+        let results = usesServer ? (store.remoteTerm == term ? store.remoteResults : []) : store.localResults(for: term)
+        let pending = usesServer && (store.remoteTerm != term || store.isSearchingRemote)
+        if pending && results.isEmpty {
+            skeleton
+        } else if results.isEmpty {
+            noMatch(term)
+        } else {
+            cardList(
+                key: "search", title: AppString("搜索结果"),
+                note: AppString("\(results.count) 个节点"), entries: results, step: listStep, isFirst: true
             )
         }
     }
 
-    private func communityCard(_ pair: NodeCardPair, width: CGFloat) -> some View {
-        VStack(spacing: 14) {
-            compactCommunityCard(pair.first, width: width)
-            if let second = pair.second {
-                compactCommunityCard(second, width: width)
-            } else {
-                Spacer(minLength: 0)
-                    .frame(height: 120)
-            }
-        }
-        .frame(width: width, height: 254, alignment: .top)
-    }
-
-    private func compactCommunityCard(_ node: SidebarNodeSummary, width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                NodeSummaryIcon(node: node, size: 44, cornerRadius: 22)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(displayName(for: node))
-                        .font(Theme.heading(15, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Text(memberText(for: node))
-                        .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.62))
+    /// A heading, its cards, and 显示更多 while some are still hidden.
+    private func cardList(key: String, title: String, note: String, entries: [NodeBrowseStore.Entry], step: Int, isFirst: Bool) -> some View {
+        let shown = shownCounts[key] ?? step
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(title)
+                    .font(Theme.body(18, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if !note.isEmpty {
+                    Text(note)
+                        .font(Theme.body(13))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
 
-                Spacer(minLength: 8)
-
-                joinButton(for: node)
+            ForEach(entries.prefix(shown)) { entry in
+                nodeCard(entry)
             }
 
-            Text(node.description)
-                .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.62))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(14)
-        .frame(width: width, height: 120, alignment: .top)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Theme.divider, lineWidth: 1.2)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .onTapGesture { openNode(node) }
-    }
-
-    private func wideCommunityCard(_ node: SidebarNodeSummary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                NodeSummaryIcon(node: node, size: 44, cornerRadius: 22)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(displayName(for: node))
-                        .font(Theme.heading(15, weight: .semibold))
+            if entries.count > shown {
+                Button {
+                    withAnimation(.quick) { shownCounts[key] = shown + step }
+                } label: {
+                    Text("显示更多")
+                        .font(Theme.body(13, weight: .bold))
                         .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                    Text(memberText(for: node))
-                        .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.62))
-                        .lineLimit(1)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background(Theme.chip, in: Capsule())
                 }
-
-                Spacer(minLength: 8)
-                joinButton(for: node)
+                .buttonStyle(.pressable)
+                .frame(maxWidth: .infinity)
             }
-
-            Text(node.description)
-                .font(Theme.body(12))
-                .foregroundStyle(Theme.muted(0.62))
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Theme.divider, lineWidth: 1.2)
         }
         .padding(.horizontal, 16)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .onTapGesture { openNode(node) }
+        .padding(.top, isFirst ? 20 : 28)
     }
 
-    private func rankedCommunityCard(_ node: SidebarNodeSummary, rank: Int) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text("\(rank)")
-                .font(Theme.body(15, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.62))
-                .monospacedDigit()
-                .frame(width: 34, height: 44, alignment: .center)
+    // MARK: Card
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 12) {
-                    NodeSummaryIcon(node: node, size: 44, cornerRadius: 22)
+    private var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
+    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(displayName(for: node))
-                            .font(Theme.heading(15, weight: .semibold))
-                            .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                        Text(memberText(for: node))
-                            .font(Theme.body(12, weight: .medium))
-                            .foregroundStyle(Theme.muted(0.62))
-                            .lineLimit(1)
-                    }
+    private func nodeCard(_ entry: NodeBrowseStore.Entry) -> some View {
+        let node = entry.node
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                NodeLetterAvatar(node: node, size: 40)
 
-                    Spacer(minLength: 8)
-
-                    joinButton(for: node)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(displayName(for: node))
+                        .font(Theme.body(15, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                    Text(AppString("n/\(node.slug) · \(memberCount(entry.members)) 成员"))
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .monospacedDigit()
+                        .lineLimit(1)
                 }
 
-                Text(node.description)
-                    .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.62))
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
+
+                joinButton(for: node)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Two lines' room either way, so the cards keep one height.
+            Text(description(for: node))
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.textMuted)
+                .lineSpacing(2)
+                .lineLimit(2, reservesSpace: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Theme.divider, lineWidth: 1.2)
-        }
-        .padding(.horizontal, 16)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.bg, in: cardShape)
+        .overlay { cardShape.strokeBorder(Theme.hairline, lineWidth: 1) }
+        .contentShape(cardShape)
         .onTapGesture { openNode(node) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: AppString("打开节点")) { openNode(node) }
     }
 
-    /// 加入 is a filled call to action; 已加入 is a quiet outline. Same shape,
-    /// different weight — the joined state is a status, not an invitation to
-    /// tap again.
+    /// 加入 is the grey fill; 已加入 the outlined chip. 加入 joins on the
+    /// spot (guests get the sign-in sheet); 已加入 asks before leaving. A
+    /// node's owner can't leave it, so their chip just opens the node.
     private func joinButton(for node: SidebarNodeSummary) -> some View {
-        Button {
-            openNode(node)
+        let joined = !app.isGuest && store.isJoined(node)
+        let busy = store.togglingJoin.contains(node.id)
+        return Button {
+            guard DiscourseAuth.shared.isAuthenticated, !app.isGuest else {
+                requestLogin(app, .joinNode(name: "n/\(node.slug)", slug: node.slug))
+                return
+            }
+            if joined {
+                if node.isCreator { openNode(node) } else { leaveCandidate = node }
+            } else {
+                Task { await store.toggleJoin(node) }
+            }
         } label: {
-            Text(node.isJoined ? AppString("已加入") : AppString("加入"))
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(node.isJoined ? Theme.muted(0.62) : Theme.bg)
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .background(node.isJoined ? Theme.surface : Theme.text, in: Capsule())
-                .overlay {
-                    if node.isJoined {
-                        Capsule().strokeBorder(Theme.divider, lineWidth: 1)
-                    }
+            ZStack {
+                Text(joined ? AppString("已加入") : AppString("加入"))
+                    .opacity(busy ? 0 : 1)
+                if busy {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(Theme.text)
                 }
+            }
+            .font(Theme.body(13, weight: .bold))
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(minWidth: 64, minHeight: 32)
+            .background(joined ? Theme.bg : Theme.chip, in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(joined ? Theme.textFaint : .clear, lineWidth: 1)
+            }
         }
         .buttonStyle(.pressable)
+        .disabled(busy)
+        .accessibilityLabel(joined ? AppString("退出 \(displayName(for: node))") : AppString("加入 \(displayName(for: node))"))
+        // On the button, not the page: iOS 26 anchors the dialog to its
+        // source, and hung off the whole scroll view it never appeared but
+        // still swallowed the next taps.
+        .alert(
+            AppString("退出节点？"),
+            isPresented: Binding(
+                get: { leaveCandidate?.id == node.id },
+                set: { if !$0 { leaveCandidate = nil } }
+            )
+        ) {
+            Button(AppString("退出"), role: .destructive) {
+                leaveCandidate = nil
+                Task { await store.toggleJoin(node) }
+            }
+            Button(AppString("取消"), role: .cancel) { leaveCandidate = nil }
+        } message: {
+            Text(AppString("将退出 \(displayName(for: node))，之后可以随时重新加入。"))
+        }
     }
 
-    private func memberText(for node: SidebarNodeSummary) -> String {
-        node.memberCount.isEmpty ? AppString("成员") : AppString("\(node.memberCount) 成员")
+    /// 33,400 → "3.3万" / "33K", in the app's language.
+    private func memberCount(_ value: Int) -> String {
+        value.formatted(.number.notation(.compactName).locale(AppLanguage.resolved.locale))
     }
 
     private func displayName(for node: SidebarNodeSummary) -> String {
         node.name.isEmpty ? node.slug : node.name
     }
 
-    // MARK: Skeleton
-
-    /// Placeholder blocks shown only on a cold first load (no cache yet).
-    private var nodeSkeleton: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            // Topic chips row.
-            ScrollView(.horizontal) {
-                HStack(spacing: 10) {
-                    ForEach(0..<6, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Theme.neutral300)
-                            .frame(width: 96, height: 32)
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .scrollIndicators(.hidden)
-            .disabled(true)
-
-            ForEach(0..<3, id: \.self) { _ in
-                VStack(alignment: .leading, spacing: 14) {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Theme.neutral300)
-                        .frame(width: 150, height: 22)
-                        .padding(.horizontal, 16)
-
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 14) {
-                            ForEach(0..<3, id: \.self) { _ in skeletonCard }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                    .scrollIndicators(.hidden)
-                    .disabled(true)
-                }
-            }
-        }
-        .skeletonPulsing()
+    /// The summary falls back to "n/slug" for a node with no description,
+    /// which the meta line already shows.
+    private func description(for node: SidebarNodeSummary) -> String {
+        node.description == "n/\(node.slug)" ? "" : node.description
     }
 
-    private var skeletonCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Circle().fill(Theme.neutral300).frame(width: 44, height: 44)
-                VStack(alignment: .leading, spacing: 6) {
-                    RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 120, height: 14)
-                    RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 74, height: 12)
-                }
-                Spacer(minLength: 0)
-            }
-            RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(height: 12)
-            RoundedRectangle(cornerRadius: 4).fill(Theme.neutral300).frame(width: 190, height: 12)
-        }
-        .padding(14)
-        .frame(width: 300, height: 120, alignment: .top)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Theme.divider, lineWidth: 1.2)
-        }
-    }
+    // MARK: States
 
-    private func loadingRow(_ text: String) -> some View {
-        HStack(spacing: 10) {
-            ProgressView()
-                .tint(Theme.accent)
-            Text(text)
-                .font(Theme.body(15, weight: .medium))
-                .foregroundStyle(Theme.muted(0.58))
-            Spacer()
+    /// Placeholder cards shown only on a cold first load (no cache yet).
+    private var skeleton: some View {
+        VStack(spacing: 12) {
+            ForEach(0..<4, id: \.self) { _ in
+                cardShape
+                    .fill(Theme.surface)
+                    .frame(height: 116)
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.top, 20)
+        .skeletonPulsing()
+        .accessibilityHidden(true)
     }
 
-    private func emptyRow(_ text: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
+    private func noMatch(_ term: String) -> some View {
+        VStack(spacing: 4) {
+            Text(AppString("没有找到“\(term)”"))
+                .font(Theme.body(16, weight: .bold))
+                .foregroundStyle(Theme.text)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 0) {
+                Text("换个关键词，或者")
+                Button { createNode() } label: {
+                    Text("自己创建一个节点")
+                        .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+                Text("。")
+            }
+            .font(Theme.body(13))
+            .foregroundStyle(Theme.textMuted)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 48)
+    }
+
+    /// Nothing to show and the load failed: the reason and 重试.
+    private func errorState(_ text: String) -> some View {
+        VStack(spacing: 12) {
+            Text("节点加载失败")
+                .font(Theme.body(16, weight: .bold))
+                .foregroundStyle(Theme.text)
             Text(text)
                 .font(Theme.body(13))
-            Spacer()
+                .foregroundStyle(Theme.textMuted)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+            Button { Task { await store.load(force: true) } } label: {
+                Text(AppString("重试"))
+                    .font(Theme.body(13, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 16)
+                    .frame(height: 36)
+                    .background(Theme.chip, in: Capsule())
+            }
+            .buttonStyle(.pressable)
         }
-        .foregroundStyle(Theme.muted(0.54))
-        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 48)
     }
 
-    private func openNode(_ node: SidebarNodeSummary) {
-        withAnimation(.panelSlide) {
-            selectedNode = node
+    /// The full list failed after the first page drew the screen.
+    private func errorRow(_ text: String) -> some View {
+        HStack(spacing: 10) {
+            Text(text)
+                .font(Theme.body(13, weight: .medium))
+                .foregroundStyle(Theme.danger)
+                .lineLimit(3)
+            Spacer(minLength: 8)
+            Button { Task { await store.load(force: true) } } label: {
+                Text(AppString("重试"))
+                    .font(Theme.body(13, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 14)
+                    .frame(height: 32)
+                    .background(Theme.chip, in: Capsule())
+            }
+            .buttonStyle(.pressable)
         }
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: Actions
+
+    /// Creating a node needs an account; a guest gets the sign-in sheet.
+    private func createNode() {
+        guard !app.isGuest else {
+            requestLogin(app)
+            return
+        }
+        withAnimation(.overlayPush) {
+            app.overlay = .createNode
+        }
+    }
+
+    /// Through the app's one node route (`AppState.openNode`), the same as
+    /// the sidebar, feed labels and post chips, so a node looks and behaves
+    /// the same wherever it was opened from.
+    private func openNode(_ node: SidebarNodeSummary) {
+        app.openNode(slug: node.slug)
+    }
+}
+
+// MARK: - Node avatar (design letter circle)
+
+/// The design's node mark: the node's logo in a circle, else its first letter
+/// in white on a solid circle of the node's colour (节点广场 cards, the node
+/// page's header and its compact bar pill).
+struct NodeLetterAvatar: View {
+    let node: SidebarNodeSummary
+    var size: CGFloat = 40
+
+    var body: some View {
+        Group {
+            if let logoURL = node.logoURL {
+                CachedRemoteImage(url: logoURL) { image in
+                    image.resizable().scaledToFill()
+                } placeholder: {
+                    letter
+                }
+            } else {
+                letter
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .accessibilityHidden(true)
+    }
+
+    private var letter: some View {
+        Text(Self.initial(for: node))
+            .font(Theme.body(size * 0.42, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(nodeAccentColor(node.colorHex), in: Circle())
+    }
+
+    /// The name's first character ("独立开发" → 独, "AI" → A), else the slug's.
+    static func initial(for node: SidebarNodeSummary) -> String {
+        let source = node.name.trimmingCharacters(in: .whitespaces).isEmpty ? node.slug : node.name
+        return source.first.map { String($0).uppercased() } ?? "#"
     }
 }

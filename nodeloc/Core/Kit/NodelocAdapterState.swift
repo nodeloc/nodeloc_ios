@@ -33,6 +33,9 @@ final class NodelocAdapterState {
         return Date().timeIntervalSince(nodesFetchedAt) < 300
     }
 
+    /// The directory download in flight, shared by concurrent callers.
+    static var nodesFetch: Task<[NLNode], Error>?
+
     func store(nodes: [NLNode]) {
         nodesByID = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         nodesBySlug = Dictionary(nodes.map { ($0.slug, $0) }, uniquingKeysWith: { _, last in last })
@@ -48,6 +51,35 @@ final class NodelocAdapterState {
     }
 
     func invalidateNodes() { nodesFetchedAt = nil }
+
+    /// Records a join or leave in the cached directory at once. The list is
+    /// refreshed behind a stale copy, so without this a node just left still
+    /// read `joined: true` (and stayed in the drawer) until that refresh.
+    func setJoined(slug: String, joined: Bool) {
+        guard let node = nodesBySlug[slug], (node.joined ?? false) != joined else { return }
+        let count = node.memberCount.map { max(0, $0 + (joined ? 1 : -1)) }
+        let updated = NLNode(
+            id: node.id, parentId: node.parentId, slug: node.slug, name: node.name,
+            description: node.description, color: node.color, logoUrl: node.logoUrl, icon: node.icon,
+            visibility: node.visibility, topicPolicy: node.topicPolicy, official: node.official,
+            inHomeFeed: node.inHomeFeed, topicCount: node.topicCount, postCount: node.postCount,
+            memberCount: count, ownerId: node.ownerId, createdAt: node.createdAt, joined: joined,
+            favorite: node.favorite, notificationLevel: node.notificationLevel
+        )
+        nodesByID[node.id] = updated
+        nodesBySlug[node.slug] = updated
+    }
+
+    /// A background refresh of the node directory is in flight.
+    var isRefreshingNodes = false
+
+    /// Seeds the directory from a previous launch without marking it fresh,
+    /// so the next read still triggers a refresh.
+    func seed(nodes: [NLNode]) {
+        guard nodeOrder.isEmpty else { return }
+        store(nodes: nodes)
+        nodesFetchedAt = nil
+    }
 
     var allNodes: [NLNode] { nodeOrder.compactMap { nodesByID[$0] } }
 

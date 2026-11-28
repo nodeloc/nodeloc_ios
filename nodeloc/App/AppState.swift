@@ -43,9 +43,17 @@ struct Post: Identifiable {
     var pinnedGlobally: Bool = false
     /// New or has-unread-posts for the signed-in user — shows the read dot.
     var isUnread: Bool = false
+    /// The reader has opened it before (`last_read_post_number` > 0).
+    var isRead: Bool = false
+    /// Search results: the title and excerpt with the matched words marked
+    /// (`SearchHighlight`). Nil everywhere else.
+    var highlightedTitle: String? = nil
+    var highlightedExcerpt: String? = nil
     /// Pending reports on this topic, for a reader who can manage its node.
     /// Nil means they can't — not that there are none.
     var reportCount: Int? = nil
+    /// The newest review item behind `reportCount`, for 去处理.
+    var reviewItemID: Int? = nil
     /// The topic accepted a best answer, so the row carries a "solved" badge.
     var isSolved: Bool = false
     /// The first post is hidden. Only a moderator, one of the node's managers,
@@ -65,6 +73,11 @@ struct Post: Identifiable {
     var tags: [String] = []
     /// First post's video, when the topic has one. Card mode autoplays it.
     var videoURL: URL? = nil
+    /// The video's poster, length (seconds) and shape, from `card_media`.
+    var videoPosterURL: URL? = nil
+    var videoDuration: Double? = nil
+    /// Width ÷ height, when the server measured it.
+    var videoAspect: CGFloat? = nil
 
     /// The topic this row points at. The id-only form redirects to the
     /// canonical slug URL, which is all a repost or a report needs.
@@ -90,6 +103,10 @@ struct PostMedia: Identifiable, Hashable {
     /// only one URL. Lets each display site fetch a size that matches how big
     /// it draws, instead of upscaling one middling image everywhere.
     var variants: [ImageVariant] = []
+    /// The full-size image, for the viewer; `url` is the card-size one.
+    var originalURL: URL? = nil
+    /// `#rrggbb` drawn under the image until it loads.
+    var placeholderHex: String? = nil
 
     var id: URL { url }
 
@@ -158,8 +175,6 @@ struct PostComment: Identifiable {
     var voteDirection: VoteDirection
     var canVoteUp: Bool
     var canVoteDown: Bool
-    /// discourse-reward rewards this reply has received.
-    let rewards: [PostReward]
     /// The 小尾巴 the author's app reported at posting time, e.g. "iPhone" —
     /// decoration only, since a client asserts its own hardware.
     let mobileSource: String?
@@ -188,6 +203,9 @@ struct PostComment: Identifiable {
     let isMine: Bool
     /// This reply is the topic's accepted best answer.
     let isAcceptedAnswer: Bool
+    /// Hidden from everyone but its author and the node's managers, and why
+    /// (when this reader may know). Nil for a post everyone sees.
+    var hidden: PostHiddenState?
     /// Pending reports against this reply, for a manager of the node.
     let reportCount: Int?
     /// Times it was edited since publishing (`version - 1`). Above zero, the
@@ -223,7 +241,6 @@ struct PostComment: Identifiable {
         voteDirection: VoteDirection = .none,
         canVoteUp: Bool = true,
         canVoteDown: Bool = true,
-        rewards: [PostReward] = [],
         mobileSource: String? = nil,
         isPinned: Bool = false,
         isDeletedPlaceholder: Bool = false,
@@ -237,8 +254,10 @@ struct PostComment: Identifiable {
         isMine: Bool = false,
         isAcceptedAnswer: Bool = false,
         reportCount: Int? = nil,
-        editCount: Int = 0
+        editCount: Int = 0,
+        hidden: PostHiddenState? = nil
     ) {
+        self.hidden = hidden
         self.id = id
         self.author = author
         self.time = time
@@ -267,7 +286,6 @@ struct PostComment: Identifiable {
         self.voteDirection = voteDirection
         self.canVoteUp = canVoteUp
         self.canVoteDown = canVoteDown
-        self.rewards = rewards
         self.mobileSource = mobileSource
         self.isPinned = isPinned
         self.isDeletedPlaceholder = isDeletedPlaceholder
@@ -494,6 +512,8 @@ struct AppNotification: Identifiable {
     /// open natively and badge/group/chat notifications open in the in-app
     /// browser. `nil` means the row isn't tappable.
     var url: URL? = nil
+    /// 版务: about moderating, not about the reader's own social activity.
+    var isModeration = false
 }
 
 struct PMConversation: Identifiable {
@@ -585,8 +605,18 @@ struct ProfileRole: Identifiable, Hashable {
 // MARK: - Navigation
 
 enum Tab: Hashable { case home, nodes, search, chat, profile }
-enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, settings, appsDirectory, appDetail, auth
+enum Overlay: Identifiable { case sidebar, post, compose, search, browseNodes, createNode, notifications, auth
     var id: Int { hashValue }
+
+    /// Tasks opened on top of whatever is showing — they must appear over a
+    /// pushed page or cover, not in `MainView` underneath it. The rest
+    /// (drawer, node square) belong to the root tabs.
+    var presentsFromTopHost: Bool {
+        switch self {
+        case .compose, .search, .createNode, .notifications, .auth: true
+        case .sidebar, .post, .browseNodes: false
+        }
+    }
 }
 enum AuthMode { case login, signup }
 
@@ -605,19 +635,25 @@ final class AppState {
 
     // Main
     var tab: Tab = .home
-    var overlay: Overlay?
+    /// The app-level overlay. Task overlays (`Overlay.presentsFromTopHost`)
+    /// present from whichever screen is on top when they are opened — see
+    /// `overlayHost` — so opening the composer from a pushed page shows it over
+    /// that page rather than under it.
+    var overlay: Overlay? {
+        didSet {
+            guard let overlay, overlay.presentsFromTopHost, overlay != oldValue else { return }
+            overlayHost = BrowserState.shared.topOverlayHost
+        }
+    }
+    /// Which presentation host owns the current task overlay; nil is the root
+    /// (`MainView`). Decided once, when the overlay opens, so a sheet or cover
+    /// that registers above it later doesn't move it.
+    private(set) var overlayHost: ObjectIdentifier?
     /// Blank placeholder until a real post is opened — never sample content.
     var selectedPost = Post(
         id: 0, node: "", avatarLetter: "N", variant: 0, time: "",
         title: "", excerpt: "", baseVotes: 0, comments: 0, hasImage: false
     )
-    /// How far the reader's dismiss-shrink has travelled, 0…1.
-    ///
-    /// Published because the backdrop that fades with it is not the reader's:
-    /// `MainView` draws an opaque `Theme.bg` *behind* the reader, and a page
-    /// shrinking away over a flat colour looks like it is closing into nothing
-    /// rather than back onto the list it came from.
-    var readerDismissProgress: CGFloat = 0
     /// Local readers drawn inside content pages own horizontal drags while they
     /// are on screen, so the outer drawer's right-swipe must stay quiet.
     private var sidebarSwipeSuppressors: Set<UUID> = []
@@ -631,60 +667,39 @@ final class AppState {
         }
     }
 
-    /// The rows of whichever list opened the reader, so a sideways swipe there
-    /// can move to the neighbouring post.
-    ///
-    /// Set by the opener next to `selectedPost`, because only it knows what the
-    /// reader was one of. Empty is the honest answer for a post reached from a
-    /// link, a notification or a reference sheet: there is no "next" then, and
-    /// the reader says so by doing nothing.
-    var readingQueue: [Post] = []
-
-    /// The post the current reading session started on.
-    ///
-    /// Swiping forwards can run to the end of the list, but swiping *back*
-    /// stops here: the reader opened this post, so going further back would
-    /// take them somewhere they never chose to be. At this post a back-swipe
-    /// leaves instead.
-    private(set) var readerEntryPostID: Int?
-
-    /// Opens `post` in the reader as one of `queue`.
-    ///
-    /// Every list that can open a post goes through here, so none of them can
-    /// forget the queue and leave the swipe silently dead on that screen.
-    func openReader(_ post: Post, in queue: [Post] = []) {
+    /// Opens `post` in the reader, at reply `postNumber` when given. Every
+    /// list that can open a post goes through here.
+    func openReader(_ post: Post, postNumber: Int? = nil) {
+        // A result tapped while the search field still has focus must not
+        // leave the keyboard up under the reader.
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         markTopicOpened(id: post.id)
         selectedPost = post
-        readingQueue = queue
-        readerEntryPostID = post.id
+        pendingReplyPostNumber = postNumber
+        // The reader is an ordinary pushed page on the page stack, with the
+        // system navigation bar — the same as nodes and profiles.
+        openPostPage(post)
     }
 
-    /// Moves the reader along its queue, which `openReader` would not: this
-    /// leaves the entry point alone, and the entry point is what bounds how
-    /// far back the reader can swipe.
-    func pageReader(to post: Post) {
-        markTopicOpened(id: post.id)
-        selectedPost = post
-    }
-
-    /// The post before or after the one on screen, or nil at either end — where
-    /// the near end is the post this session opened, not the top of the list.
-    func postAdjacent(to post: Post, offset: Int) -> Post? {
-        if offset < 0, post.id == readerEntryPostID { return nil }
-        guard let index = readingQueue.firstIndex(where: { $0.id == post.id }) else { return nil }
-        let target = index + offset
-        guard readingQueue.indices.contains(target) else { return nil }
-        return readingQueue[target]
-    }
-
-    /// App chosen from the directory, shown by the app detail overlay.
-    var selectedApp: DirectoryApp?
     var likedPosts: Set<Int> = []
     var navCollapsed = false
     /// Node the composer should open with already selected, set by whoever
     /// opens it (the node page). Cleared by the composer once read, so a later
     /// compose started elsewhere doesn't inherit it.
+    /// The guest prompt (`LoginPromptSheet`) waiting to be shown.
+    var loginPrompt: LoginPromptContext?
+    /// The app page for this slug starts the game as soon as it can, as 开始
+    /// would (the sidebar's 最近玩过 rows).
+    var autoStartAppSlug: String?
+    /// A password-reset link opened the app: the set-new-password page.
+    var resetPasswordToken: ResetPasswordToken?
     var composePreselectedNode: SidebarNodeSummary?
+    /// The 草稿箱 draft the composer is continuing (`new_topic:…`).
+    var composeDraftKey: String?
+    /// A continued draft's tags, read by the composer once.
+    var composePrefillTags: [String]?
+    /// A reply draft from 草稿箱: the reader puts it back in its reply panel.
+    var pendingReplyDraft: (text: String, replyTo: Int?, replyToUser: String?)?
     /// Title the composer opens pre-filled with, set when reposting a topic.
     /// Cleared by the composer once read.
     var composePrefillTitle: String?
@@ -707,6 +722,9 @@ final class AppState {
         /// The post as it renders now, shown read-only above the editor: while
         /// editing source there is nothing else to compare against.
         let rendered: PostContent?
+        /// The first post is hidden for breaking the rules and this edit
+        /// sends it back to the AI (`rejudge`).
+        var rejudge = false
 
         var id: Int { topicID }
     }
@@ -851,6 +869,8 @@ final class AppState {
     /// when a notification (or a deep link with a post anchor) opens a topic.
     /// The post detail consumes it; unset means "open at the top."
     var pendingReplyPostNumber: Int?
+    /// Set by a list row's comment button: the reader opens its reply panel.
+    var pendingReplyFocus = false
 
     /// Opens a nodeloc topic natively. Only the id is known from the URL, so
     /// the post detail fills in the rest when it loads the topic. `postNumber`,
@@ -867,35 +887,25 @@ final class AppState {
     /// which is the universal link guideline 4.7.4 requires for each mini app.
     /// The directory opens first so there is something on screen while the
     /// payload loads.
+    ///
+    /// Pushed on the routed page stack, so it opens over whatever is showing —
+    /// a pushed topic included. The page loads the app itself.
     func openApp(slug: String) {
-        overlay = .appsDirectory
-        Task {
-            guard let fetched = try? await DiscourseClient().app(slug: slug).directoryApp else { return }
-            selectedApp = fetched
-            overlay = .appDetail
-        }
+        pushPage(.app(slug: slug, preloaded: nil))
+    }
+
+    /// An app the caller already has (a directory tile, a search result).
+    func openApp(_ item: DirectoryApp) {
+        pushPage(.app(slug: item.slug, preloaded: item))
+    }
+
+    /// The apps directory, as a page on the routed stack.
+    func openAppsDirectory() {
+        pushPage(.appsDirectory)
     }
 
     func openTopic(id: Int, postNumber: Int? = nil) {
-        markTopicOpened(id: id)
-        pendingReplyPostNumber = postNumber
-        // Already open — nothing to do, and rebuilding would lose scroll.
-        guard !(overlay == .post && selectedPost.id == id) else { return }
-        selectedPost = Post(
-            id: id,
-            node: "",
-            avatarLetter: "N",
-            variant: id % 2,
-            time: "",
-            title: "",
-            excerpt: "",
-            baseVotes: 0,
-            comments: 0,
-            hasImage: false
-        )
-        withAnimation(.expandCollapse) {
-            overlay = .post
-        }
+        openTopicPage(id: id, postNumber: postNumber)
     }
 
     /// Opens the composer prefilled to quote a topic — the 转发 every surface
@@ -925,8 +935,99 @@ final class AppState {
     /// When the caller already has a name and avatar, so the page draws its
     /// header before the request lands.
     func openProfile(_ target: UserProfileTarget) {
-        routedPageInColumn = prefersColumnPresentation
-        routedProfile = target
+        // Pinned-sidebar column presentation is unchanged (iPad). Everywhere
+        // else a routed page goes onto the one page stack — see `pageStack`.
+        if prefersColumnPresentation && pageStack.isEmpty {
+            routedPageInColumn = true
+            routedProfile = target
+            return
+        }
+        pushPage(.profile(target))
+    }
+
+    // MARK: Page stack
+
+    /// The routed pages — profiles, nodes and posts opened from anywhere —
+    /// as one navigation stack in one full-screen cover (`RoutedPageStack`).
+    ///
+    /// They used to be separate covers plus the post overlay in `MainView`,
+    /// which can't stack: a post opened from a profile had to *close* the
+    /// profile first, and closing that cover over the search tab handed first
+    /// responder back to the tab bar's search field — the keyboard came up
+    /// under the reader with no way to dismiss it. Here each page pushes on top
+    /// of the last and ‹ goes back exactly one step.
+    var pageStack: [RoutedPage] = []
+
+    func pushPage(_ kind: RoutedPage.Kind) {
+        // Whatever had focus underneath (the search field) must not get it
+        // back when this cover goes away.
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        // A second tap while the first push is still on its way would stack
+        // the same post twice.
+        if case .post(let incoming) = kind, case .post(let top)? = pageStack.last?.kind, top.id == incoming.id {
+            return
+        }
+        guard pageStack.isEmpty else {
+            pageStack.append(RoutedPage(kind: kind))
+            return
+        }
+        // Nothing up yet: put up the stack's clear base without animation —
+        // the cover is transparent, so nothing visibly changes — and push the
+        // page onto it on the next turn, so it arrives with the system push
+        // rather than the cover sliding up from the bottom.
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { pageStack = [RoutedPage(kind: .base)] }
+        DispatchQueue.main.async { [self] in
+            guard pageStack.count == 1, case .base = pageStack[0].kind else { return }
+            pageStack.append(RoutedPage(kind: kind))
+        }
+    }
+
+    /// A tag a node page should pick once it shows: set by a tag under a
+    /// post's title, taken by the node page with that slug.
+    struct NodeTagRequest: Equatable {
+        let slug: String
+        let tag: String
+    }
+    var pendingNodeTag: NodeTagRequest?
+
+    /// The node's page, from the n/slug in a post's bar: back to it when it
+    /// is the page directly underneath, a fresh page otherwise. With a tag,
+    /// the page opens filtered by it.
+    func openNodeFromReader(slug: String, tag: String? = nil) {
+        pendingNodeTag = tag.map { NodeTagRequest(slug: slug, tag: $0) }
+        if pageStack.count >= 2, case .node(let node) = pageStack[pageStack.count - 2].kind, node.slug == slug {
+            popPage()
+        } else if pageStack.count == 2, case .base = pageStack[0].kind, routedNode?.slug == slug {
+            // The reader sits over a node page shown as its own cover.
+            popPage()
+        } else {
+            openNode(slug: slug)
+        }
+    }
+
+    func popPage() {
+        guard !pageStack.isEmpty else { return }
+        pageStack.removeLast()
+    }
+
+    /// A topic opened from inside a routed page: pushed onto the stack when
+    /// one is up, the usual reader overlay otherwise.
+    func openTopicPage(id: Int, postNumber: Int? = nil, nodeSlug: String? = nil) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        markTopicOpened(id: id)
+        pendingReplyPostNumber = postNumber
+        pushPage(.post(Post(
+            id: id, node: nodeSlug.map { "n/\($0)" } ?? "", avatarLetter: "N", variant: id % 2, time: "",
+            title: "", excerpt: "", baseVotes: 0, comments: 0, hasImage: false
+        )))
+    }
+
+    /// A post the caller already has (a list row), pushed onto the stack.
+    func openPostPage(_ post: Post) {
+        markTopicOpened(id: post.id)
+        pushPage(.post(post))
     }
 
     /// Node requested by a `/n/<slug>` or `/c/<slug>/<id>` link. The slug is
@@ -941,7 +1042,7 @@ final class AppState {
     var routedNode: SidebarNodeSummary?
 
     func openNode(slug: String) {
-        routedPageInColumn = prefersColumnPresentation
+        routedPageInColumn = prefersColumnPresentation && pageStack.isEmpty
         routedNodeSlug = slug
     }
 
@@ -964,9 +1065,8 @@ final class AppState {
         sidebarIsPinned && !UIApplication.isPresentingContext
     }
 
-    /// A custom feed requested by an `/f/<username>/<slug>` link, by the
-    /// drawer, or from someone's profile. Presented natively — the whole point
-    /// is not to fall out to the web page.
+    /// A custom feed drawn in `MainView`'s content column beside the pinned
+    /// sidebar. Everywhere else `openCustomFeed` pushes it on the page stack.
     var routedCustomFeed: CustomFeedTarget?
 
     /// - Parameter inColumn: Overrides where the page is drawn, for a caller
@@ -981,8 +1081,16 @@ final class AppState {
         name: String? = nil,
         inColumn: Bool? = nil
     ) {
-        routedPageInColumn = inColumn ?? prefersColumnPresentation
-        routedCustomFeed = CustomFeedTarget(username: username, slug: slug, name: name)
+        let target = CustomFeedTarget(username: username, slug: slug, name: name)
+        // Beside the pinned sidebar when nothing is presented; everywhere else
+        // onto the page stack, so it opens over a pushed page as well and the
+        // pages it opens push on top of it.
+        if inColumn ?? prefersColumnPresentation, pageStack.isEmpty {
+            routedPageInColumn = true
+            routedCustomFeed = target
+            return
+        }
+        pushPage(.customFeed(target))
     }
 
     /// A group whose PM inbox a notification asked to open. The inbox watches
@@ -1001,10 +1109,10 @@ final class AppState {
         chatRequestedUsername = username
     }
 
+    /// A group's PM inbox, pushed on the routed page stack so it opens from
+    /// anywhere — switching the tab underneath a cover showed nothing.
     func openGroupInbox(group: String) {
-        overlay = nil
-        tab = .chat
-        inboxRequestedGroup = group
+        pushPage(.groupInbox(group: group))
     }
 
     // Auth copy
@@ -1084,4 +1192,85 @@ enum SampleData {
     static let userKarma = "2,481"
     static let userPosts = "64"
     static let userComments = "312"
+}
+
+
+/// One page on the routed page stack.
+struct RoutedPage: Identifiable, Hashable {
+    enum Kind {
+        /// The stack's transparent bottom: what the first real page is pushed
+        /// onto, so it arrives with the system push. Never shown by itself.
+        case base
+        case profile(UserProfileTarget)
+        case node(SidebarNodeSummary)
+        case post(Post)
+        /// `/f/<username>/<slug>`, or a feed from the drawer or a profile.
+        case customFeed(CustomFeedTarget)
+        /// The apps directory grid.
+        case appsDirectory
+        /// One app's page. `preloaded` when the opener already has it (a
+        /// directory tile); otherwise the page fetches it by slug.
+        case app(slug: String, preloaded: DirectoryApp?)
+        /// A group's PM inbox (`/u/<name>/messages/group/<group>`).
+        case groupInbox(group: String)
+        /// A home-feed list on its own page — the drawer's 热门.
+        case feed(HomeFeed)
+        /// 声望与成就 — the reader's own tier, tasks and achievements.
+        case reputation
+        /// 升级进度 — tier card, tasks and what each tier can do.
+        case upgrade
+        /// 财富排行榜 (`/rank`).
+        case leaderboard
+        /// 能量明细, the reader's own ledger (`/points`).
+        case energy
+        /// 邀请好友 (`/invites`).
+        case invite
+        /// A review queue, opened from a moderation notification: the site's
+        /// (`node` nil) or a node's, on `item` when given.
+        case reviewQueue(node: String?, item: Int?)
+        /// 账号状态, from a penalty or appeal notification (`/appeal`).
+        case accountStatus
+        /// 管理台, the site's (`node` nil) or one managed node's.
+        case moderationDashboard(node: String?)
+        /// 草稿箱.
+        case drafts
+        /// 所有标签.
+        case tags
+        /// One tag's page, by name.
+        case tag(String)
+        /// 我的收藏, 我的节点, 我的交易, 新人指引.
+        case saved
+        case myNodes
+        case trades
+        case onboardingGuide
+        /// A node's management hub.
+        case nodeAdmin(slug: String, name: String)
+        /// 浏览记录.
+        case history
+        /// 设置, a preference page of it, and its account pages.
+        case settings
+        case settingsPreference(PreferenceGroup)
+        case settingsAccount(SettingsAccountPage)
+    }
+
+    let id = UUID()
+    let kind: Kind
+
+    static func == (lhs: RoutedPage, rhs: RoutedPage) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+
+/// Why a post is hidden, as far as this reader may know
+/// (docs/specs/mobile-api.md「主题」, risk-control.md「AI 判定」).
+struct PostHiddenState: Equatable, Sendable {
+    /// `rule`, `spam`, `held`, `staff`, …; nil when the reader isn't told.
+    var reason: String?
+    /// The AI's or the staff member's sentence.
+    var note: String?
+    /// The author's edit re-judges it automatically.
+    var rejudge = false
+
+    var isHeld: Bool { reason == "held" }
+    var isRule: Bool { reason == "rule" }
 }

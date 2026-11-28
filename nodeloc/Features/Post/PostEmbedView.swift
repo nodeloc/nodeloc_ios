@@ -22,7 +22,7 @@ struct PostEmbedView: View {
     @Environment(\.openURL) private var openURL
 
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
     }
 
     var body: some View {

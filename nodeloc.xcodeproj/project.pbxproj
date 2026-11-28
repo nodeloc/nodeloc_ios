@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		7A9C5E012F00A1B200C0FFEE /* HCaptcha in Frameworks */ = {isa = PBXBuildFile; productRef = 7A9C5E022F00A1B200C0FFEE /* HCaptcha */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		7A14C09030355B8D00A736FA /* nodeloc.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nodeloc.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7A9C5E012F00A1B200C0FFEE /* HCaptcha in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +83,7 @@
 			);
 			name = nodeloc;
 			packageProductDependencies = (
+				7A9C5E022F00A1B200C0FFEE /* HCaptcha */,
 			);
 			productName = nodeloc;
 			productReference = 7A14C09030355B8D00A736FA /* nodeloc.app */;
@@ -107,6 +113,9 @@
 			);
 			mainGroup = 7A14C08730355B8D00A736FA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				7A9C5E032F00A1B200C0FFEE /* XCRemoteSwiftPackageReference "HCaptcha-ios-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 7A14C09130355B8D00A736FA /* Products */;
 			projectDirPath = "";
@@ -361,6 +370,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		7A9C5E032F00A1B200C0FFEE /* XCRemoteSwiftPackageReference "HCaptcha-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/hCaptcha/HCaptcha-ios-sdk";
+			requirement = {
+				kind = exactVersion;
+				version = 4.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		7A9C5E022F00A1B200C0FFEE /* HCaptcha */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 7A9C5E032F00A1B200C0FFEE /* XCRemoteSwiftPackageReference "HCaptcha-ios-sdk" */;
+			productName = HCaptcha;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 7A14C08830355B8D00A736FA /* Project object */;
 }

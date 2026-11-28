@@ -164,15 +164,21 @@ nonisolated enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     /// showing Chinese to someone who asked for Japanese — so every path that
     /// picks a language filters through here. Shipping a new translation is
     /// then just a matter of filling it in; this picks it up on its own.
-    static var available: [AppLanguage] {
+    /// What the bundle ships never changes while the app runs.
+    static let available: [AppLanguage] = {
         let shipped = Set(Bundle.main.localizations)
         return allCases.filter { shipped.contains($0.rawValue) }
-    }
+    }()
 
     var isAvailable: Bool { Self.available.contains(self) }
 
     /// The best of the device's preferred languages that the app can speak.
-    static var systemPreferred: AppLanguage {
+    /// Read once: iOS relaunches the app when the device language changes,
+    /// and `AppString` asks for this on every call — it showed up while
+    /// scrolling, re-parsing every preferred-language tag each time.
+    static let systemPreferred: AppLanguage = computeSystemPreferred()
+
+    private static func computeSystemPreferred() -> AppLanguage {
         let shipped = available
         for tag in Locale.preferredLanguages {
             if let match = matching(tag: tag), shipped.contains(match) { return match }
@@ -220,8 +226,106 @@ nonisolated extension AppLanguage {
 /// `Text` handles itself; this is for strings that go into toasts, alerts built
 /// from model code, and anything else assembled before it reaches SwiftUI.
 nonisolated func AppString(_ value: String.LocalizationValue) -> String {
+    observeAppLanguage()
     let language = AppLanguage.resolved
     return String(localized: value, bundle: language.bundle, locale: language.locale)
+}
+
+/// Reads the store's language so a view body that calls `AppString` redraws
+/// when the language changes.
+///
+/// `AppLanguage.resolved` comes from `UserDefaults`, which SwiftUI can't
+/// observe: a view whose text came from `AppString` (rather than a `Text`
+/// key, which follows the environment's locale) kept the old language until
+/// something else happened to redraw it — most of the app, after a switch.
+/// Touching the observable store inside the body registers the dependency.
+/// Off the main thread there is no body to register, so it's skipped.
+nonisolated private func observeAppLanguage() {
+    guard Thread.isMainThread else { return }
+    MainActor.assumeIsolated { _ = AppLocaleStore.shared.language }
+}
+
+/// For a Chinese source string that means two different things: the key
+/// tells them apart in the catalog, and `value` is what shows where the
+/// catalog has no entry (Chinese, the source text).
+nonisolated func AppString(key: StaticString, default value: String.LocalizationValue) -> String {
+    observeAppLanguage()
+    let language = AppLanguage.resolved
+    return String(localized: key, defaultValue: value, bundle: language.bundle, locale: language.locale)
+}
+
+// MARK: - The languages the server speaks
+
+/// The languages nodeloc's server speaks — `internal/locale/locale.go`,
+/// `all`, in its order. No endpoint lists them (`POST /api/v1/locale` only
+/// validates against this table), so they are written down here.
+///
+/// The app's own text exists only for the languages in `AppLanguage.available`
+/// (English and 简体中文 today). Choosing another server language asks the
+/// server for it — notices, notifications, translated posts, node names — and
+/// shows the app's own words in the closest language it has.
+nonisolated struct ServerLanguage: Identifiable, Hashable, Sendable {
+    let code: String
+    let name: String
+    var id: String { code }
+
+    static let all: [ServerLanguage] = [
+        .init(code: "zh-CN", name: "简体中文"), .init(code: "zh-TW", name: "繁體中文"),
+        .init(code: "en", name: "English"), .init(code: "ja", name: "日本語"),
+        .init(code: "ko", name: "한국어"), .init(code: "ru", name: "Русский"),
+        .init(code: "es", name: "Español"), .init(code: "fr", name: "Français"),
+        .init(code: "de", name: "Deutsch"), .init(code: "pt", name: "Português"),
+        .init(code: "it", name: "Italiano"), .init(code: "tr", name: "Türkçe"),
+        .init(code: "vi", name: "Tiếng Việt"), .init(code: "id", name: "Bahasa Indonesia"),
+        .init(code: "th", name: "ไทย"), .init(code: "ar", name: "العربية"),
+    ]
+
+    /// The closest language the app has its own strings for.
+    var appLanguage: AppLanguage {
+        if let match = AppLanguage.matching(tag: code), match.isAvailable { return match }
+        if code.hasPrefix("zh"), AppLanguage.simplifiedChinese.isAvailable { return .simplifiedChinese }
+        return AppLanguage.english.isAvailable ? .english : AppLanguage.systemPreferred
+    }
+
+    /// Whether the app itself has strings in this very language.
+    var appHasStrings: Bool { appLanguage.discourseCode.replacingOccurrences(of: "_", with: "-") == code }
+
+    var acceptLanguage: String {
+        code.contains("-") ? "\(code),\(code.prefix(2));q=0.9" : code
+    }
+
+    private static let key = "app.language.server"
+
+    /// The account's language as this device last sent or adopted it — what
+    /// `user.locale` should say when nothing changed elsewhere.
+    static var lastSynced: String? {
+        get { UserDefaults.standard.string(forKey: "app.language.synced") }
+        set {
+            if let newValue { UserDefaults.standard.set(newValue, forKey: "app.language.synced") }
+            else { UserDefaults.standard.removeObject(forKey: "app.language.synced") }
+        }
+    }
+    /// Read once per change, not per request.
+    nonisolated(unsafe) private static var cached: ServerLanguage?? = nil
+
+    /// The chosen language, nil when following the system.
+    static var choice: ServerLanguage? {
+        get {
+            if let cached { return cached }
+            let stored = UserDefaults.standard.string(forKey: key).flatMap { code in all.first { $0.code == code } }
+            cached = .some(stored)
+            return stored
+        }
+        set {
+            if let newValue { UserDefaults.standard.set(newValue.code, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+            cached = .some(newValue)
+        }
+    }
+}
+
+extension Notification.Name {
+    /// The reading language changed: server texts on screen are stale.
+    static let nodelocLanguageDidChange = Notification.Name("nodelocLanguageDidChange")
 }
 
 // MARK: - Store
@@ -247,17 +351,35 @@ final class AppLocaleStore {
     /// serving them the site default — that isn't a preference, so the device's
     /// language keeps winning. Only an explicit choice overrides it.
     func adopt(discourseLocale: String?) {
-        let trimmed = discourseLocale?.trimmingCharacters(in: .whitespaces) ?? ""
-        guard !trimmed.isEmpty,
-              let match = AppLanguage.matching(tag: trimmed),
-              match.isAvailable
-        else {
-            AppLanguage.accountChoice = nil
-            refresh()
-            return
-        }
-        AppLanguage.accountChoice = match
+        adoptAccountLocale(discourseLocale)
+    }
+
+    /// The language saved on the account (`user.locale`, mobile-api.md
+    /// 2026-11-28: `GET /api/v1/me` and every sign-in answer).
+    ///
+    /// Precedence:
+    /// 1. Empty or missing says nothing — the choice on this device stays.
+    ///    (Treating "empty" as "follow the system" is what wiped the choice
+    ///    at every launch before the field existed.)
+    /// 2. The same code this device last sent (or last adopted): already in
+    ///    agreement, nothing to do — a 跟随系统 chosen here stands too.
+    /// 3. A different code: it was changed on the web or another phone, and
+    ///    the account wins — applied here, server text and app text alike.
+    /// Guests never get here; their choice is local only.
+    func adoptAccountLocale(_ raw: String?) {
+        let code = (raw ?? "").trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "_", with: "-")
+        guard !code.isEmpty else { return }
+        if code.caseInsensitiveCompare(ServerLanguage.lastSynced ?? "") == .orderedSame { return }
+        let language = ServerLanguage.all.first { $0.code.caseInsensitiveCompare(code) == .orderedSame }
+            ?? ServerLanguage.all.first { $0.code.prefix(2).lowercased() == code.prefix(2).lowercased() }
+        guard let language else { return }
+        ServerLanguage.lastSynced = code
+        guard ServerLanguage.choice?.code != language.code else { return }
+        ServerLanguage.choice = language
+        AppLanguage.accountChoice = language.appLanguage
         refresh()
+        syncSystemLanguage()
+        NotificationCenter.default.post(name: .nodelocLanguageDidChange, object: nil)
     }
 
     /// Sets the language from inside the app and writes it back to the forum,
@@ -274,6 +396,50 @@ final class AppLocaleStore {
         }
     }
 
+    /// 设置 › 界面 › 语言: a server language, or nil to follow the system.
+    /// The app's own words switch at once (to the closest language it has);
+    /// the server is told (`POST /api/v1/locale`, which also keeps it for a
+    /// signed-in account); a refusal puts everything back and returns the
+    /// server's words.
+    func chooseServerLanguage(_ language: ServerLanguage?) async -> String? {
+        let previous = ServerLanguage.choice
+        let previousApp = AppLanguage.accountChoice
+        ServerLanguage.choice = language
+        AppLanguage.accountChoice = language?.appLanguage
+        refresh()
+        if let language {
+            do {
+                try await DiscourseClient().http.send("POST", "api/v1/locale", body: .json(["locale": language.code]))
+                // What the account holds now, so the next launch's `user.locale`
+                // reads as "in agreement" rather than "changed elsewhere".
+                ServerLanguage.lastSynced = language.code
+            } catch {
+                ServerLanguage.choice = previous
+                AppLanguage.accountChoice = previousApp
+                refresh()
+                return ServerFieldErrors.last()["locale"]
+                    ?? (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        }
+        syncSystemLanguage()
+        NotificationCenter.default.post(name: .nodelocLanguageDidChange, object: nil)
+        return nil
+    }
+
+    /// The system's own pieces — share sheet, photo picker, Copy / Paste,
+    /// date pickers, permission prompts — follow the app bundle's language,
+    /// which iOS reads from `AppleLanguages` at launch. Writing the choice
+    /// there makes them match the app's words from the next launch on (iOS
+    /// can't switch them in a running app). Following the system removes it,
+    /// which also clears a per-app language set in iOS 设置 › nodeloc.
+    private func syncSystemLanguage() {
+        if let choice = AppLanguage.accountChoice {
+            UserDefaults.standard.set([choice.rawValue], forKey: "AppleLanguages")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+        }
+    }
+
     /// Back to following the device.
     func clearAccountChoice() {
         AppLanguage.accountChoice = nil
@@ -284,9 +450,13 @@ final class AppLocaleStore {
     /// it lives on the user record, and Discourse only serializes it to its
     /// owner (`UserSerializer.private_attributes :locale`).
     func syncFromAccount() async {
-        guard let username = DiscourseAuth.shared.username else { return }
-        guard let profile = try? await DiscourseClient().user(username).user else { return }
-        adopt(discourseLocale: profile.locale)
+        guard DiscourseAuth.shared.isAuthenticated else { return }
+        struct Me: Decodable {
+            struct User: Decodable { let locale: String? }
+            let user: User?
+        }
+        guard let me: Me = try? await DiscourseClient().get("api/v1/me") else { return }
+        adoptAccountLocale(me.user?.locale)
     }
 
     private func refresh() {

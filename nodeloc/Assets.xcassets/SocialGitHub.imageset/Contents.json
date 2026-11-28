@@ -1,12 +1,16 @@
 {
-  "images" : [
-    { "filename" : "github-light.svg", "idiom" : "universal" },
+  "images": [
     {
-      "appearances" : [ { "appearance" : "luminosity", "value" : "dark" } ],
-      "filename" : "github-dark.svg",
-      "idiom" : "universal"
+      "filename": "github.pdf",
+      "idiom": "universal"
     }
   ],
-  "info" : { "author" : "xcode", "version" : 1 },
-  "properties" : { "preserves-vector-representation" : true, "template-rendering-intent" : "original" }
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "properties": {
+    "preserves-vector-representation": true,
+    "template-rendering-intent": "template"
+  }
 }

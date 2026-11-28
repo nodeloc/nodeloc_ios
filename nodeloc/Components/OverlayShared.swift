@@ -11,32 +11,80 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Shared overlay header
+// MARK: - Shared page header
 
-struct OverlayHeader: View {
-    @Environment(AppState.self) private var app
+/// The one header every settings-style page uses: a glass button, the title,
+/// and optional trailing items on a 56pt row.
+///
+/// `.back` (‹) for a page pushed onto a stack, `.close` (✕) for a full-screen
+/// modal or sheet that goes away entirely — so the glyph tells the reader
+/// where the button takes them.
+struct PageHeader<Trailing: View>: View {
+    enum Leading {
+        case back
+        case close
+
+        var systemImage: String {
+            switch self {
+            case .back: "chevron.left"
+            case .close: "xmark"
+            }
+        }
+
+        var accessibilityLabel: String {
+            switch self {
+            case .back: AppString("返回")
+            case .close: AppString("关闭")
+            }
+        }
+    }
+
     let title: String
-    var titleWeight: Font.Weight = .medium
+    var leading: Leading = .back
+    let onClose: () -> Void
+    @ViewBuilder var trailing: () -> Trailing
+
+    init(
+        title: String,
+        leading: Leading = .back,
+        onClose: @escaping () -> Void,
+        @ViewBuilder trailing: @escaping () -> Trailing
+    ) {
+        self.title = title
+        self.leading = leading
+        self.onClose = onClose
+        self.trailing = trailing
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Button { dismissOverlay() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
+            Button(action: onClose) {
+                Image(systemName: leading.systemImage)
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
+                    .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
             }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-            Text(title).font(Theme.body(15, weight: titleWeight))
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
+            .glassButton(tint: FloatingHeader.glassTint, shape: .circle)
+            .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
+            .accessibilityLabel(leading.accessibilityLabel)
 
-    private func dismissOverlay() {
-        closeOverlay(app)
+            Text(title)
+                .font(Theme.body(15, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+
+            Spacer(minLength: 8)
+
+            trailing()
+        }
+        .padding(.horizontal, Theme.pagePadding)
+        .frame(height: 56)
+    }
+}
+
+extension PageHeader where Trailing == EmptyView {
+    init(title: String, leading: Leading = .back, onClose: @escaping () -> Void) {
+        self.init(title: title, leading: leading, onClose: onClose) { EmptyView() }
     }
 }
 
@@ -62,38 +110,21 @@ func presentAuth(_ app: AppState, mode: AuthMode = .login) {
     }
 }
 
-/// Header 登录 button shown while browsing as a guest. Same glass chrome as
-/// the hamburger `HeaderIconButton`, stretched to a capsule for the text.
+/// 登录, as a tab root's trailing toolbar item while browsing as a guest.
+/// Plain text: the toolbar draws the glass capsule around it.
 struct GuestLoginButton: View {
     @Environment(AppState.self) private var app
-    @Environment(\.isInTabBarRow) private var isInTabBarRow
 
     var body: some View {
-        // See `HeaderIconButton`: inside the tab bar row the system draws the
-        // container, and ours would show through it as a grey pill.
-        if isInTabBarRow {
-            button
-                .buttonBorderShape(.capsule)
-        } else {
-            button
-                .glassButton(tint: FloatingHeader.glassTint, shape: .capsule)
-                .shadow(color: FloatingHeader.shadow, radius: 9, y: 6)
-        }
-    }
-
-    private var button: some View {
         Button {
             presentAuth(app)
         } label: {
             Text("登录")
-                .font(Theme.body(13, weight: .semibold))
-                .foregroundStyle(isInTabBarRow ? Theme.text : Theme.headerText)
-                // Never let a tight header squeeze the label to nothing —
-                // an empty pill is worse than a crowded row.
+                .font(Theme.body(15, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                // Never let a tight bar squeeze the label to nothing.
                 .lineLimit(1)
                 .fixedSize()
-                .padding(.horizontal, isInTabBarRow ? 0 : 14)
-                .frame(height: isInTabBarRow ? nil : FloatingHeader.controlHeight)
         }
     }
 }
@@ -407,10 +438,10 @@ struct EmptyStateView: View {
         VStack(spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: iconSize, weight: .medium))
-                .foregroundStyle(Theme.muted(0.34))
+                .foregroundStyle(Theme.textFaint)
             Text(message)
                 .font(Theme.body(14, weight: .medium))
-                .foregroundStyle(Theme.muted(0.58))
+                .foregroundStyle(Theme.textMuted)
                 .multilineTextAlignment(.center)
         }
     }

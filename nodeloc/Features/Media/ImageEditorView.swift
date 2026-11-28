@@ -742,7 +742,7 @@ struct ImageEditorView: View {
                     }
                     .foregroundStyle(.white)
                     .frame(width: 88, height: 40)
-                    .background(Color(hex: 0x1B6BFF), in: Capsule())
+                    .background(Theme.mediaAction, in: Capsule())
                 }
                 .buttonStyle(.pressable)
                 .disabled(state.isExporting)

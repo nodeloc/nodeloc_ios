@@ -162,10 +162,11 @@ struct ComposeOverlay: View {
     @State private var bodyText = AttributedString()
     @State private var selectedCommunity: SidebarNodeSummary?
     @State private var showsNodePicker = false
-    /// The rich editor's selection, boxed because its type is iOS 26 only.
-    @State private var selectionBox = RichSelectionBox()
-    /// The plain editor's selection. `TextSelection` is iOS 18, so no box.
-    @State private var plainSelection: TextSelection?
+    /// The body's selection, as character offsets into `bodyText`.
+    @State private var bodySelection: Range<Int> = 0..<0
+    /// Whether the body editor has focus. Separate from `focusedField`,
+    /// which only the title's SwiftUI field takes part in.
+    @State private var bodyFocused = false
     /// `@user` / `#node` completion for the body.
     @State private var mentions = MentionAutocompleteStore()
     /// The topic this post quotes, shown as the card it will cook into.
@@ -215,6 +216,14 @@ struct ComposeOverlay: View {
     /// Set when the topic posted but a follow-up record didn't.
     @State private var followUpRetryMessage: String?
     @FocusState private var focusedField: ComposeFocusField?
+    /// The emoji panel in the keyboard's place under the body.
+    @State private var showsEmojiPanel = false
+    @State private var bodyProxy = ComposerEditorProxy()
+    /// The new topic's tags, and what the node allows.
+    @State private var selectedTags: [String] = []
+    @State private var nodePosting: NLNodePosting?
+    @State private var nodeTagChoices: [String] = []
+    @State private var showsTagPicker = false
 
     /// One under the site's default `max_uploads_per_minute` of 10, leaving a
     /// slot for a post-edit re-upload.
@@ -252,6 +261,16 @@ struct ComposeOverlay: View {
                     .background(Theme.bg)
                 }
 
+                // The scheme's AFF reminder, whenever the body links off-site.
+                // Pinned here for the same reason as the repost card: after
+                // the editor it sat under the keyboard and was never seen.
+                if OffsiteLinkDetector.hasOffsiteLink(ComposerEmojiCodec.plain(bodyText)) {
+                    AffLinkHint()
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 8)
+                        .background(Theme.bg)
+                }
+
                 // Above the toolbar, directly under the keyboard's edge: the
                 // suggestion has to be reachable without covering the draft.
                 if !mentions.suggestions.isEmpty {
@@ -282,6 +301,14 @@ struct ComposeOverlay: View {
             focusedField = .title
             // Opened from a node page, so that node starts selected. Consumed
             // here so a later compose from the home feed doesn't inherit it.
+            if let key = app.composeDraftKey {
+                store.draftKey = key
+                app.composeDraftKey = nil
+            }
+            if let tags = app.composePrefillTags {
+                selectedTags = tags
+                app.composePrefillTags = nil
+            }
             if let preselected = app.composePreselectedNode {
                 selectedCommunity = preselected
                 app.composePreselectedNode = nil
@@ -295,7 +322,7 @@ struct ComposeOverlay: View {
             // all), so it goes in as source rather than through the rich editor,
             // which would rewrite it.
             if let prefillBody = app.composePrefillBody {
-                bodyText = AttributedString(prefillBody)
+                bodyText = ComposerEmojiCodec.inflate(prefillBody)
                 isSourceMode = true
                 app.composePrefillBody = nil
             }
@@ -303,7 +330,7 @@ struct ComposeOverlay: View {
                 editTarget = target
                 app.composeEditTarget = nil
                 title = target.title
-                bodyText = AttributedString(target.raw)
+                bodyText = ComposerEmojiCodec.inflate(target.raw)
                 isSourceMode = MarkdownSource.needsSourceEditing(target.raw)
                 if let categoryID = target.categoryID {
                     Task { selectedCommunity = await NodeCatalog.shared.node(id: categoryID) }
@@ -312,10 +339,39 @@ struct ComposeOverlay: View {
             if let topic = app.composeRepostTopic {
                 repostTopic = topic
                 app.composeRepostTopic = nil
-                focusedField = .body
+                bodyFocused = true
             }
         }
         .onDisappear { cleanUpMediaTempFiles() }
+        .task(id: selectedCommunity?.slug) {
+            guard let slug = selectedCommunity?.slug, !slug.isEmpty else { return }
+            let client = DiscourseClient()
+            nodePosting = try? await client.nodePosting(slug: slug)
+            nodeTagChoices = await client.nodeTagChoices(slug: slug, posting: nodePosting)
+            // Only a node that restricts its tags takes some away: any other
+            // accepts any tag. Said in one line, so it isn't a silent loss.
+            if nodePosting?.tagsRestricted == true {
+                let kept = selectedTags.filter { tag in
+                    tag.caseInsensitiveCompare("AFF") == .orderedSame
+                        || nodeTagChoices.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+                }
+                let dropped = selectedTags.filter { !kept.contains($0) }
+                if !dropped.isEmpty {
+                    selectedTags = kept
+                    ToastCenter.shared.show(AppString("n/\(slug) 只能用它自己的标签，已去掉：\(dropped.joined(separator: "、"))"))
+                }
+            }
+        }
+        .sheet(isPresented: $showsTagPicker) {
+            ComposeTagPicker(
+                nodeSlug: selectedCommunity?.slug ?? "",
+                options: nodeTagChoices,
+                minTags: nodePosting?.minTags ?? 0,
+                hasOffsiteLink: OffsiteLinkDetector.hasOffsiteLink(ComposerEmojiCodec.plain(bodyText)),
+                restricted: nodePosting?.tagsRestricted == true,
+                selected: $selectedTags
+            )
+        }
         .onChange(of: imageSelections) { _, items in
             ingestPickedImages(items)
         }
@@ -413,7 +469,7 @@ struct ComposeOverlay: View {
 
             Text("这篇帖子里有手机端富文本编辑器无法还原的语法（标题、列表、表格、插件等），因此按源码编辑，保存时原样提交。")
                 .font(Theme.body(11))
-                .foregroundStyle(Theme.muted(0.55))
+                .foregroundStyle(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
 
             if showsRenderedReference, let rendered = editTarget?.rendered {
@@ -424,9 +480,9 @@ struct ComposeOverlay: View {
                     .padding(12)
                     .frame(maxHeight: 220)
                     .clipped()
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                             .strokeBorder(Theme.divider, lineWidth: 1)
                     }
             }
@@ -469,7 +525,8 @@ struct ComposeOverlay: View {
 
     /// A space when empty, so the measurement is one line rather than zero.
     private var bodyMeasurementText: String {
-        let text = String(bodyText.characters)
+        // Each emoji measured as one wide glyph, which is what it draws as.
+        let text = String(bodyText.characters).replacingOccurrences(of: "\u{FFFC}", with: "国")
         return text.isEmpty ? " " : text
     }
 
@@ -521,7 +578,7 @@ struct ComposeOverlay: View {
                         .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Theme.muted(0.65))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 34)
@@ -537,13 +594,13 @@ struct ComposeOverlay: View {
                 Group {
                     if store.isSubmitting {
                         ProgressView()
-                            .tint(Theme.muted(0.55))
+                            .tint(Theme.textMuted)
                     } else {
                         Text(editTarget == nil ? AppString("发帖") : AppString("保存"))
                             .font(Theme.body(15, weight: .semibold))
                     }
                 }
-                .foregroundStyle(canPost ? Theme.text : Theme.muted(0.38))
+                .foregroundStyle(canPost ? Theme.text : Theme.textFaint)
                 .padding(.horizontal, 14)
                 .frame(height: 34)
             }
@@ -560,6 +617,16 @@ struct ComposeOverlay: View {
     private var composeEditor: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
+                // Tags for a new topic, under the bar (App-iOS-Compose).
+                // Always offered: before a node is chosen the picker shows
+                // site-wide tags.
+                if editTarget == nil {
+                    ComposeTagRow(tags: selectedTags, onAdd: { showsTagPicker = true }) { tag in
+                        selectedTags.removeAll { $0 == tag }
+                    }
+                        .padding(.bottom, -14)
+                }
+
                 TextField("标题", text: $title, axis: .vertical)
                     .font(Theme.heading(22, weight: .bold))
                     .foregroundStyle(Theme.text)
@@ -567,7 +634,7 @@ struct ComposeOverlay: View {
                     .textInputAutocapitalization(.sentences)
                     .focused($focusedField, equals: .title)
                     .submitLabel(.next)
-                    .onSubmit { focusedField = .body }
+                    .onSubmit { bodyFocused = true }
 
                 // Media sits above the body, matching where it lands in the
                 // posted markdown.
@@ -625,17 +692,12 @@ struct ComposeOverlay: View {
                     if bodyText.characters.isEmpty {
                         Text("正文文本（可选）")
                             .font(Theme.body(16))
-                            .foregroundStyle(Theme.muted(0.62))
+                            .foregroundStyle(Theme.textMuted)
                             .padding(.top, 8)
                             .allowsHitTesting(false)
                     }
 
                     bodyEditor
-                        .font(isSourceMode ? .system(size: 15, design: .monospaced) : Theme.body(16))
-                        .foregroundStyle(Theme.text)
-                        .scrollContentBackground(.hidden)
-                        .background(.clear)
-                        .focused($focusedField, equals: .body)
                         // Elastic, not a fixed 320pt: that minimum pushed
                         // anything after the editor — the repost card — below
                         // the keyboard where it couldn't be seen. The height
@@ -686,6 +748,7 @@ struct ComposeOverlay: View {
                         .onChange(of: bodyCaretOffset) { _, _ in refreshMentions() }
                 }
 
+
                 if !mediaAttachments.isEmpty {
                     composeMediaAttachments
                 }
@@ -705,7 +768,7 @@ struct ComposeOverlay: View {
                 } else if store.isUploadingMedia {
                     Text("正在上传媒体...")
                         .font(Theme.body(13, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.62))
+                        .foregroundStyle(Theme.textMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -713,7 +776,7 @@ struct ComposeOverlay: View {
             .padding(.bottom, 120)
         }
         .scrollIndicators(.hidden)
-        .tint(Color(light: 0x3366FF, dark: 0x7EA7FF))
+        .tint(Theme.editTint)
     }
 
     private var composeMediaAttachments: some View {
@@ -729,7 +792,7 @@ struct ComposeOverlay: View {
                             .lineLimit(1)
                         Text(attachment.kind == .image ? AppString("图片已上传") : AppString("视频已上传"))
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.58))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
 
@@ -740,15 +803,15 @@ struct ComposeOverlay: View {
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(Theme.muted(0.62))
+                            .foregroundStyle(Theme.textMuted)
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.pressable)
                 }
                 .padding(8)
-                .background(Theme.surface.opacity(0.86), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(Theme.surface.opacity(0.86), in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                         .strokeBorder(Theme.divider, lineWidth: 1)
                 )
             }
@@ -767,14 +830,14 @@ struct ComposeOverlay: View {
                 default:
                     Image(systemName: "photo")
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.58))
+                        .foregroundStyle(Theme.textMuted)
                 }
             }
             .frame(width: 48, height: 48)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         } else {
             ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                     .fill(Theme.hover)
                 Image(systemName: attachment.kind == .video ? "play.fill" : "paperclip")
                     .font(.system(size: 18, weight: .bold))
@@ -786,39 +849,23 @@ struct ComposeOverlay: View {
 
     /// Scrolls horizontally: nine buttons plus the divider overflow a phone's
     /// width, and shrinking them below 44pt would break the minimum tap target.
-    /// Rich where the system has it, plain where it doesn't.
-    @ViewBuilder
     private var bodyEditor: some View {
-        if #available(iOS 26.0, *) {
-            TextEditor(text: $bodyText, selection: selectionBox.binding)
-        } else {
-            // Writes back through the same `bodyText` storage everything else
-            // reads, so nothing downstream knows which editor is running.
-            // Flattening loses no attributes: below 26 none get applied,
-            // because `usesMarkdownTokens` sends the buttons down the markdown
-            // path instead.
-            TextEditor(
-                text: Binding(
-                    get: { bodyPlainText },
-                    set: { bodyText = AttributedString($0) }
-                ),
-                selection: $plainSelection
-            )
-        }
+        ComposerTextEditor(
+            text: $bodyText,
+            selection: $bodySelection,
+            isFocused: $bodyFocused,
+            showsEmojiPanel: $showsEmojiPanel,
+            style: .compose(source: isSourceMode),
+            proxy: bodyProxy
+        )
     }
 
     // MARK: @ / # completion
 
     private var bodyPlainText: String { String(bodyText.characters) }
 
-    /// The caret as a character offset into the body, from whichever editor
-    /// is running.
-    private var bodyCaretOffset: Int? {
-        if #available(iOS 26.0, *) {
-            return selectionBox.caretOffset(in: bodyText)
-        }
-        return plainSelection?.caretOffset(in: bodyPlainText)
-    }
+    /// The caret as a character offset into the body.
+    private var bodyCaretOffset: Int? { bodySelection.upperBound }
 
     private func refreshMentions() {
         guard let bodyCaretOffset else {
@@ -852,6 +899,7 @@ struct ComposeOverlay: View {
                 toolbarLotteryButton
                 toolbarRedEnvelopeButton
                 toolbarPollButton
+                toolbarEmojiButton
 
                 Rectangle()
                     .fill(Theme.divider)
@@ -884,6 +932,24 @@ struct ComposeOverlay: View {
         .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         .clipShape(Capsule())
         .shadow(color: .black.opacity(0.08), radius: 18, y: 10)
+    }
+
+    /// Swaps the keyboard for the emoji panel and back; shows the keyboard
+    /// glyph while the panel is up. Focuses the body if nothing is.
+    private var toolbarEmojiButton: some View {
+        let panelUp = showsEmojiPanel && bodyFocused
+        return Button {
+            focusedField = nil
+            showsEmojiPanel.toggle()
+            bodyFocused = true
+        } label: {
+            Image(systemName: panelUp ? "keyboard" : "face.smiling")
+                .font(.system(size: 19, weight: .regular))
+                .foregroundStyle(toolbarColor(disabled: false, isActive: false))
+                .frame(width: 44, height: 40)
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(panelUp ? AppString("键盘") : AppString("表情"))
     }
 
     /// One poll per post, matching the web builder.
@@ -1008,8 +1074,8 @@ struct ComposeOverlay: View {
     }
 
     private func toolbarColor(disabled: Bool, isActive: Bool) -> Color {
-        if disabled { return Theme.muted(0.28) }
-        if isActive { return Color(light: 0x3366FF, dark: 0x7EA7FF) }
+        if disabled { return Theme.textFaint }
+        if isActive { return Theme.editTint }
         return Theme.text
     }
 
@@ -1021,7 +1087,7 @@ struct ComposeOverlay: View {
     /// buttons keep working there: they wrap the selection in `**` the way the
     /// web composer does, through the same branch source mode already used.
     private var usesMarkdownTokens: Bool {
-        isSourceMode || !ComposerFormatting.isAvailable
+        isSourceMode
     }
 
     /// Whether the selection is already a link.
@@ -1031,14 +1097,25 @@ struct ComposeOverlay: View {
     /// there is nothing to light the button up from — and claiming otherwise
     /// would be worse than a button that never highlights.
     private var selectionHasLink: Bool {
-        guard #available(iOS 26.0, *), !usesMarkdownTokens else { return false }
-        return selectionBox.selection.attributes(in: bodyText)[\.link].contains { $0 != nil }
+        guard !usesMarkdownTokens else { return false }
+        return selectedRuns().contains { $0.link != nil }
     }
 
     private func selectionHasInlineIntent(_ intent: InlinePresentationIntent) -> Bool {
-        guard #available(iOS 26.0, *), !usesMarkdownTokens else { return false }
-        let values = Array(selectionBox.selection.attributes(in: bodyText)[\.inlinePresentationIntent])
-        return !values.isEmpty && values.allSatisfy { $0?.contains(intent) == true }
+        guard !usesMarkdownTokens else { return false }
+        let runs = selectedRuns()
+        return !runs.isEmpty && runs.allSatisfy { $0.inlinePresentationIntent?.contains(intent) == true }
+    }
+
+    /// The selected runs, or the run before the caret when nothing is.
+    private func selectedRuns() -> [AttributedString.Runs.Run] {
+        var range = selectedBodyRange()
+        if range.isEmpty {
+            guard range.lowerBound > bodyText.startIndex else { return [] }
+            let before = bodyText.index(beforeCharacter: range.lowerBound)
+            range = before..<range.lowerBound
+        }
+        return Array(bodyText[range].runs)
     }
 
     /// The selected range, from whichever editor is running.
@@ -1046,53 +1123,18 @@ struct ComposeOverlay: View {
     /// Every editing action goes through this and `setBodySelection` — which is
     /// why a second editor costs two functions here rather than fifteen.
     private func selectedBodyRange() -> Range<AttributedString.Index> {
-        if #available(iOS 26.0, *) {
-            switch selectionBox.selection.indices(in: bodyText) {
-            case .insertionPoint(let index):
-                return index..<index
-            case .ranges(let ranges):
-                return ranges.ranges.first ?? bodyText.endIndex..<bodyText.endIndex
-            @unknown default:
-                return bodyText.endIndex..<bodyText.endIndex
-            }
-        }
-
-        // The plain editor indexes the flattened string, so its offsets have to
-        // be walked back into the attributed storage.
-        let plain = bodyPlainText
-        guard let plainSelection, let caret = plainSelection.caretOffset(in: plain) else {
-            return bodyText.endIndex..<bodyText.endIndex
-        }
         let count = bodyText.characters.count
-        let upper = bodyText.index(bodyText.startIndex, offsetByCharacters: min(caret, count))
-        switch plainSelection.indices {
-        case .selection(let range) where !range.isEmpty:
-            let lower = plain.distance(from: plain.startIndex, to: range.lowerBound)
-            return bodyText.index(bodyText.startIndex, offsetByCharacters: min(lower, count))..<upper
-        default:
-            return upper..<upper
-        }
+        let lower = bodyText.index(bodyText.startIndex, offsetByCharacters: min(bodySelection.lowerBound, count))
+        let upper = bodyText.index(bodyText.startIndex, offsetByCharacters: min(bodySelection.upperBound, count))
+        return lower..<upper
     }
 
-    /// Selects a range in whichever editor is running.
+    /// Selects a range in the editor.
     private func setBodySelection(_ range: Range<AttributedString.Index>) {
-        if #available(iOS 26.0, *) {
-            selectionBox.selection = range.isEmpty
-                ? AttributedTextSelection(insertionPoint: range.lowerBound)
-                : AttributedTextSelection(range: range)
-            return
-        }
-
         let characters = bodyText.characters
         let lower = characters.distance(from: characters.startIndex, to: range.lowerBound)
         let upper = characters.distance(from: characters.startIndex, to: range.upperBound)
-        let plain = bodyPlainText
-        guard lower <= plain.count, upper <= plain.count else { return }
-        let start = plain.index(plain.startIndex, offsetBy: lower)
-        let end = plain.index(plain.startIndex, offsetBy: upper)
-        plainSelection = start == end
-            ? TextSelection(insertionPoint: start)
-            : TextSelection(range: start..<end)
+        bodySelection = lower..<upper
     }
 
     private func replaceBodyText(
@@ -1112,15 +1154,36 @@ struct ComposeOverlay: View {
             let insertionPoint = bodyText.index(replacementStart, offsetByCharacters: replacement.characters.count)
             setBodySelection(insertionPoint..<insertionPoint)
         }
-        focusedField = .body
+        bodyFocused = true
     }
 
+    /// Text rebuilt from the body's own characters (a line's list markers,
+    /// a heading) carries its emoji as bare U+FFFC: they get their codes back
+    /// from the range they came from, in order.
     private func replaceBodyText(
         in range: Range<AttributedString.Index>,
         with replacement: String,
         selecting selectionInReplacement: Range<Int>? = nil
     ) {
-        replaceBodyText(in: range, with: AttributedString(replacement), selecting: selectionInReplacement)
+        var codes: [String] = []
+        for run in bodyText[range].runs {
+            if let code = run[ComposerEmojiAttribute.self] {
+                codes += Array(repeating: code, count: bodyText[run.range].characters.count)
+            }
+        }
+        var attributed = AttributedString(replacement)
+        if !codes.isEmpty {
+            var index = attributed.startIndex
+            var next = codes.makeIterator()
+            while index < attributed.endIndex {
+                let after = attributed.index(afterCharacter: index)
+                if attributed.characters[index] == ComposerEmojiCodec.objectReplacement, let code = next.next() {
+                    attributed[index..<after][ComposerEmojiAttribute.self] = code
+                }
+                index = after
+            }
+        }
+        replaceBodyText(in: range, with: attributed, selecting: selectionInReplacement)
     }
 
     private func toggleInlineIntent(_ intent: InlinePresentationIntent, placeholder: String) {
@@ -1147,7 +1210,7 @@ struct ComposeOverlay: View {
             bodyText[run.range].inlinePresentationIntent = current.isEmpty ? nil : current
         }
         setBodySelection(range)
-        focusedField = .body
+        bodyFocused = true
     }
 
     private func markdownDelimiter(for intent: InlinePresentationIntent) -> String {
@@ -1175,10 +1238,8 @@ struct ComposeOverlay: View {
     private func showLinkPrompt(_ kind: ComposeLinkKind) {
         pendingLinkRange = selectedBodyRange()
         pendingLinkKind = kind
-        if #available(iOS 26.0, *), !usesMarkdownTokens {
-            linkURLText = selectionBox.selection.attributes(in: bodyText)[\.link]
-                .compactMap { $0?.absoluteString }
-                .first ?? ""
+        if !usesMarkdownTokens {
+            linkURLText = selectedRuns().compactMap { $0.link?.absoluteString }.first ?? ""
         } else {
             linkURLText = ""
         }
@@ -1220,7 +1281,7 @@ struct ComposeOverlay: View {
         } else {
             bodyText[range].link = url
             setBodySelection(range)
-            focusedField = .body
+            bodyFocused = true
         }
     }
 
@@ -1726,9 +1787,11 @@ struct ComposeOverlay: View {
         // through the rich renderer — which would, among other things, rewrite a
         // line starting with "• " into a list item. Only the blank lines around
         // it are trimmed; leading spaces can be an indented code block.
+        // Emoji go back to `:code:` here, as the old picker wrote them.
+        let flatBody = ComposerEmojiCodec.flatten(bodyText)
         let bodyMarkdown = isSourceMode
-            ? String(bodyText.characters).trimmingCharacters(in: .newlines)
-            : RichTextMarkdownRenderer.markdown(from: bodyText, mediaKindsByURL: [:])
+            ? String(flatBody.characters).trimmingCharacters(in: .newlines)
+            : RichTextMarkdownRenderer.markdown(from: flatBody, mediaKindsByURL: [:])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         let mediaMarkdown = mediaAttachments
             .map(\.markdown)
@@ -1780,7 +1843,8 @@ struct ComposeOverlay: View {
                 body: composedBodyMarkdown(),
                 node: selectedCommunity,
                 redEnvelope: redEnvelope,
-                lottery: lottery
+                lottery: lottery,
+                tags: selectedTags
             )
             switch outcome {
             case .failed:
@@ -1814,7 +1878,7 @@ struct ComposeOverlay: View {
                 if body != target.raw {
                     try await client.updatePost(id: target.postID, raw: body)
                 }
-                ToastCenter.shared.show(AppString("已保存修改"))
+                ToastCenter.shared.show(editTarget?.rejudge == true ? AppString("已提交重新判定，通过后会自动恢复显示") : AppString("已保存修改"))
                 dismiss()
             } catch {
                 ToastCenter.shared.showError(error)
@@ -1888,7 +1952,7 @@ private struct RepostOneboxCard: View {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }

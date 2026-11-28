@@ -16,7 +16,12 @@ struct ComposeNodePicker: View {
     @Environment(\.dismiss) private var dismiss
     let store: ComposeStore
     @Binding var selection: SidebarNodeSummary?
+    /// 发布至 for the composer; the move form says 移到.
+    var title: String = AppString("发布至")
     @State private var query = ""
+    /// 常去节点 (the nodes of your latest posts, busiest first — the same
+    /// source as the profile's), lower-cased slugs.
+    @State private var frequentSlugs: [String] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +33,15 @@ struct ComposeNodePicker: View {
                         loadingRow
                     }
 
+                    if showsDefaultHeader {
+                        Text(AppString("常用节点 · 搜索可找到全部节点"))
+                            .font(Theme.body(12, weight: .semibold))
+                            .foregroundStyle(Theme.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 12)
+                            .padding(.bottom, 2)
+                    }
                     ForEach(filteredOptions) { option in
                         nodeRow(option)
                     }
@@ -48,11 +62,42 @@ struct ComposeNodePicker: View {
                 .padding(.bottom, 10)
         }
         .task { await store.loadCommunities() }
+        .task { await loadFrequent() }
+    }
+
+    private func loadFrequent() async {
+        guard let me = DiscourseAuth.shared.username,
+              let nodes = try? await DiscourseClient().userFrequentNodes(username: me) else { return }
+        frequentSlugs = nodes.map { $0.slug.lowercased() }
+    }
+
+    /// Shown before anything is typed: your frequent nodes, then the ones
+    /// you've posted to recently or joined (all of them when that's short),
+    /// with the current choice kept at the top. Typing searches every node.
+    private var defaultOptions: [ComposeNodeOption] {
+        let all = store.nodeOptions
+        let bySlug = Dictionary(all.map { ($0.node.slug.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
+        var picked: [ComposeNodeOption] = []
+        var seen = Set<Int>()
+        func add(_ option: ComposeNodeOption?) {
+            guard let option, seen.insert(option.id).inserted else { return }
+            picked.append(option)
+        }
+        if let selection { add(all.first { $0.id == selection.id }) }
+        for slug in frequentSlugs { add(bySlug[slug]) }
+        for option in all where option.reason != .none { add(option) }
+        // Nothing to go on yet (a new account): the full list as before.
+        return picked.count > (selection == nil ? 0 : 1) ? picked : all
+    }
+
+    private var showsDefaultHeader: Bool {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && defaultOptions.count < store.nodeOptions.count
     }
 
     private var header: some View {
         ZStack {
-            Text("发布至")
+            Text(title)
                 .font(Theme.heading(17, weight: .semibold))
                 .foregroundStyle(Theme.text)
 
@@ -95,13 +140,13 @@ struct ComposeNodePicker: View {
 
                     Text(subtitle(for: option))
                         .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
 
                     if !node.description.isEmpty {
                         Text(node.description)
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.62))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
@@ -133,7 +178,7 @@ struct ComposeNodePicker: View {
 
     private var filteredOptions: [ComposeNodeOption] {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return store.nodeOptions }
+        guard !term.isEmpty else { return defaultOptions }
         return store.nodeOptions.filter { option in
             option.node.name.localizedCaseInsensitiveContains(term)
                 || option.node.slug.localizedCaseInsensitiveContains(term)
@@ -145,8 +190,8 @@ struct ComposeNodePicker: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.56))
-            TextField("搜索节点", text: $query)
+                .foregroundStyle(Theme.textMuted)
+            TextField(AppString("搜索全部节点"), text: $query)
                 .font(Theme.body(15))
                 .foregroundStyle(Theme.text)
                 .textInputAutocapitalization(.never)
@@ -155,7 +200,7 @@ struct ComposeNodePicker: View {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.4))
+                        .foregroundStyle(Theme.textFaint)
                 }
                 .buttonStyle(.pressable)
             }
@@ -170,7 +215,7 @@ struct ComposeNodePicker: View {
             ProgressView().tint(Theme.accent)
             Text("正在加载节点")
                 .font(Theme.body(14, weight: .medium))
-                .foregroundStyle(Theme.muted(0.58))
+                .foregroundStyle(Theme.textMuted)
             Spacer()
         }
         .padding(.horizontal, 16)
@@ -185,7 +230,7 @@ struct ComposeNodePicker: View {
                 .font(Theme.body(13))
             Spacer()
         }
-        .foregroundStyle(Theme.muted(0.54))
+        .foregroundStyle(Theme.textMuted)
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
     }

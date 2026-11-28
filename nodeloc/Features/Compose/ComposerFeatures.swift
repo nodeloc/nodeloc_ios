@@ -251,6 +251,9 @@ nonisolated struct LotteryDraft: Sendable, Equatable {
     /// Empty means unlimited; the server turns 0 into 1_000_000.
     var maxParticipants = ""
     var maxTicketsPerUser = 10
+    /// The fewest tickets a first purchase may be (`min_tickets`); Android's
+    /// composer asks for it too.
+    var minTicketsPerUser = 1
     var minTrustLevel = 1
     var drawAt: Date?
     var levels: [LotteryLevel] = [LotteryLevel()]
@@ -276,6 +279,9 @@ nonisolated struct LotteryDraft: Sendable, Equatable {
         }
         if maxTicketsPerUser < 1 {
             return AppString("每人最多票数至少为 1。")
+        }
+        if minTicketsPerUser < 1 || minTicketsPerUser > maxTicketsPerUser {
+            return AppString("每人最少票数需在 1 和最多票数之间。")
         }
         guard let drawAt else {
             return AppString("请选择开奖时间。")
@@ -384,9 +390,9 @@ struct PollComposerCard: View {
             }
         }
         .padding(14)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1.2)
         }
     }
@@ -411,7 +417,7 @@ struct PollComposerCard: View {
                         .foregroundStyle(Theme.text)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                 }
             }
 
@@ -432,7 +438,7 @@ struct PollComposerCard: View {
         HStack(spacing: 8) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.4))
+                .foregroundStyle(Theme.textFaint)
 
             TextField("选项", text: option.text)
                 .font(Theme.body(14))
@@ -445,7 +451,7 @@ struct PollComposerCard: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .frame(width: 22, height: 22)
                 }
                 .buttonStyle(.pressable)
@@ -453,7 +459,7 @@ struct PollComposerCard: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 38)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
     }
 
     private var addOptionRow: some View {
@@ -469,10 +475,10 @@ struct PollComposerCard: View {
                     .font(Theme.body(14))
                 Spacer()
             }
-            .foregroundStyle(Theme.muted(0.62))
+            .foregroundStyle(Theme.textMuted)
             .padding(.horizontal, 10)
             .frame(height: 38)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         }
         .buttonStyle(.pressable)
     }
@@ -481,7 +487,7 @@ struct PollComposerCard: View {
         HStack(spacing: 10) {
             Text("可选数量")
                 .font(Theme.body(13))
-                .foregroundStyle(Theme.muted(0.62))
+                .foregroundStyle(Theme.textMuted)
             Spacer(minLength: 8)
             // Stacked rather than side by side: two steppers plus their labels
             // exceed a narrow screen, and `.fixedSize()` on both would force
@@ -595,7 +601,7 @@ struct RedEnvelopeChip: View {
                     .foregroundStyle(Theme.text)
                 Text("发布后自动创建")
                     .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.58))
+                    .foregroundStyle(Theme.textMuted)
             }
 
             Spacer(minLength: 8)
@@ -603,18 +609,18 @@ struct RedEnvelopeChip: View {
             Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.pressable)
         }
         .padding(12)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1.2)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .onTapGesture(perform: onTap)
     }
 }
@@ -673,6 +679,11 @@ struct LotterySheet: View {
                             .multilineTextAlignment(.trailing)
                     }
                     Stepper(
+                        AppString("每人最少 \(working.minTicketsPerUser) 票"),
+                        value: $working.minTicketsPerUser,
+                        in: limits.minTicketsPerUser...max(limits.minTicketsPerUser, working.maxTicketsPerUser)
+                    )
+                    Stepper(
                         AppString("每人最多 \(working.maxTicketsPerUser) 票"),
                         value: $working.maxTicketsPerUser,
                         in: limits.minTicketsPerUser...max(limits.minTicketsPerUser, limits.maxTicketsPerUser)
@@ -715,7 +726,7 @@ struct LotterySheet: View {
                 Section {
                     Text("抽奖会在帖子发布后创建。")
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                 }
             }
             .navigationTitle("抽奖")
@@ -800,7 +811,7 @@ struct LotteryChip: View {
                     .lineLimit(1)
                 Text(summary)
                     .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.58))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
             }
 
@@ -809,18 +820,18 @@ struct LotteryChip: View {
             Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.pressable)
         }
         .padding(12)
-        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1.2)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
         .onTapGesture(perform: onTap)
     }
 

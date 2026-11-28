@@ -145,6 +145,24 @@ nonisolated struct NLIdentities: Codable, Sendable {
     let hasPassword: Bool?
 }
 
+/// `GET /api/v1/me/groups`: the groups you're in, and which one you wear
+/// (`primary_group_id`, 0 when none) — its 头衔 shows by your name when you
+/// have no personal title.
+nonisolated struct NLMyGroups: Codable, Sendable {
+    struct Group: Codable, Sendable, Identifiable, Equatable {
+        let id: Int
+        let name: String
+        let label: String?
+        /// The group's 头衔 in the reader's language; nil when it grants none.
+        let title: String?
+        let color: String?
+        let icon: String?
+        let primary: Bool?
+    }
+    let groups: [Group]
+    let primaryGroupId: Int?
+}
+
 nonisolated struct NLSessions: Codable, Sendable {
     struct Session: Codable, Sendable {
         let id: Int
@@ -245,14 +263,26 @@ nonisolated struct NLReputation: Codable, Sendable {
         /// False at bronze, where tasks pay energy but no reputation.
         let eligible: Bool?
     }
+    /// One tier and the reputation it starts at.
+    nonisolated struct TierStep: Codable, Sendable {
+        let level: Int
+        let name: String?
+        let threshold: Int?
+    }
     let reputation: Int?
     let pending: Int?
     let tier: Int?
     let tierName: String?
-    let next: Int?
+    /// The tier above; absent at 传奇. An object, not a number — decoding it
+    /// as `Int` failed the whole summary.
+    let next: TierStep?
     let needed: Int?
     let progress: Double?
     let week: Int?
+    /// All-time settled totals per source, in a fixed order (声望来源).
+    let sources: [SourceTotal]?
+    /// All nine tiers with their thresholds.
+    let tiers: [TierStep]?
     /// All five sources, always, in a fixed order; they sum to `week`.
     let weekBySource: [SourceTotal]?
     let tasks: Tasks?
@@ -327,6 +357,9 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     let viewerVote: Int?
     /// The first post's first image as a card thumbnail (absolute URL).
     let imageUrl: String?
+    /// Every image (up to 12) and the first video of the first post, for the
+    /// card (2026-11-27). Null when there are none or the body is gated.
+    let cardMedia: NLCardMedia?
     let adult: Bool?
     let bumpedAt: String?
     /// The topic accepted a best answer, so the row shows a "solved" badge.
@@ -339,6 +372,37 @@ nonisolated struct NLTopicSummary: Codable, Sendable {
     /// zero, for everyone else — and never on the personal feed.
     let reportCount: Int?
     let reviewItemId: Int?
+}
+
+/// `card_media` on topic list items (mobile-api.md, 主题列表). Absolute URLs.
+nonisolated struct NLCardMedia: Codable, Sendable, Hashable {
+    nonisolated struct Image: Codable, Sendable, Hashable {
+        /// The card-size thumbnail, scaled (not cropped) into 1280×1040.
+        let url: String
+        /// The full image, for the viewer.
+        let originalUrl: String?
+        /// The original's size, for uploads only; external images have none.
+        let w: Int?
+        let h: Int?
+        /// `#rrggbb`, drawn under the image until it loads.
+        let color: String?
+    }
+    nonisolated struct Video: Codable, Sendable, Hashable {
+        /// `upload`, `youtube` or `bilibili`.
+        let provider: String
+        let id: String?
+        /// Uploads: what a native player plays (HLS or the file); null while
+        /// transcoding. YouTube / bilibili: the page.
+        let url: String?
+        let hlsUrl: String?
+        let poster: String?
+        let w: Int?
+        let h: Int?
+        /// Seconds.
+        let duration: Double?
+    }
+    let images: [Image]?
+    let video: Video?
 }
 
 nonisolated struct NLTopicPage: Codable, Sendable {
@@ -384,6 +448,15 @@ nonisolated struct NLPost: Codable, Sendable {
     let editedAt: String?
     let deleted: Bool?
     let hidden: Bool?
+    /// Why it is hidden, for the author and the node's managers only:
+    /// `rule` (the AI found it breaks the posting rules), `spam`, `held`
+    /// (waiting for review), `staff` and others. Absent for everyone else.
+    let hiddenReason: String?
+    /// The one-sentence reason: the AI's for `rule`, the staff member's for
+    /// `staff`. Same audience; may be absent.
+    let hiddenNote: String?
+    /// Author only: an edit sends the post back to the AI automatically.
+    let rejudge: Bool?
     let locked: Bool?
     let collapsed: Bool?
     let adult: Bool?
@@ -545,6 +618,17 @@ nonisolated struct NLReviewQueue: Codable, Sendable {
         /// 403 for everyone but a site administrator.
         let ownAction: Bool?
         let author: Author?
+        /// What happened to the item since it was queued: the author edited
+        /// the post (`author_edit`), and what the AI made of each edit
+        /// (`rejudge_ok`, `rejudge_rule`, `rejudge_spam`, the reason in
+        /// `note`). Oldest first.
+        let history: [HistoryEvent]?
+    }
+
+    nonisolated struct HistoryEvent: Codable, Sendable, Hashable {
+        let action: String
+        let note: String?
+        let createdAt: String?
     }
 
     let items: [Item]
@@ -572,6 +656,10 @@ nonisolated struct NLModerationLog: Codable, Sendable {
         /// `node`. Older post-level entries only recorded the topic.
         let targetType: String?
         let targetId: Int?
+        /// The user it was done to: `target_name` in the site log,
+        /// `target` in a node's (moderation/handlers.go, node/manage_handlers.go).
+        let targetName: String?
+        let target: String?
         let details: JSONValue?
         /// Whether this reader may reverse it now — not merely whether the
         /// action is reversible in principle.
@@ -579,16 +667,57 @@ nonisolated struct NLModerationLog: Codable, Sendable {
         let undoneAt: String?
         /// Node log only.
         let undoneBy: String?
+
+        /// The server sends `target_name: ""` when the target isn't a user;
+        /// that is no name, not an empty one ("u/" with nothing after it).
+        ///
+        /// A node log's `target` is the *title* when the target is a topic or
+        /// post — read as a user, a moved topic showed as "u/〖…〗".
+        var targetUser: String? {
+            let named = targetName.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+            if let named { return named }
+            guard targetType == nil || targetType == "user" else { return nil }
+            return target.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        }
+
+        /// The topic's title when the target is a topic or post (node log).
+        var targetTitle: String? {
+            guard targetType == "topic" || targetType == "post" else { return nil }
+            return target.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        }
     }
     let items: [Entry]
     let nextBefore: Int?
+
+    /// Both logs answer `{"logs": [...], "next_before": …}`.
+    private enum CodingKeys: String, CodingKey {
+        case items = "logs"
+        case nextBefore
+    }
 }
 
 /// `GET /api/v1/moderation/reasons` — the picklist a manager chooses from,
 /// configured in site settings. "其他" is appended server-side and is always
 /// last, so this list arrives ready to show.
 nonisolated struct NLModerationReasons: Codable, Sendable {
-    let reasons: [String]
+    let reasons: [NLReason]
+}
+
+/// One reason from the server's shared list (后台「理由」): the same shape
+/// for `GET /api/v1/report-reasons` and `GET /api/v1/moderation/reasons`.
+/// `label` and `description` are in the reader's language; a report sends
+/// `key`, a moderation decision writes `value`. 「其他」(`other`) is last.
+nonisolated struct NLReason: Codable, Sendable, Hashable, Identifiable {
+    let key: String
+    let label: String
+    let description: String?
+    let report: Bool?
+    let moderate: Bool?
+    let value: String
+    let other: Bool?
+
+    var id: String { key }
+    var isOther: Bool { other == true }
 }
 
 nonisolated struct NLAppealEnvelope: Codable, Sendable {
@@ -628,7 +757,8 @@ nonisolated struct NLRemoval: Codable, Sendable {
     let refunded: Bool?
     /// How many times a manager has acted on this author in 90 days, this one
     /// included.
-    let strikes90d: Int?
+    /// `strikes_90d`: the snake-case decoder capitalises the "d" after the digits.
+    let strikes90D: Int?
     let appealable: Bool?
     let appealed: Bool?
     /// Seven days after the action; past it the appeal endpoint answers 409.
@@ -706,6 +836,8 @@ nonisolated struct NLCreatedTopic: Codable, Sendable {
     struct Post: Codable, Sendable { let id: Int; let postNumber: Int?; let html: String? }
     let topic: Topic
     let post: Post?
+    /// Held for review: shown once a moderator approves it.
+    let held: Bool?
 }
 
 nonisolated struct NLCreatedReply: Codable, Sendable {
@@ -717,6 +849,7 @@ nonisolated struct NLCreatedReply: Codable, Sendable {
         let createdAt: String?
     }
     let post: Post
+    /// Held for review: shown once a moderator approves it.
     let held: Bool?
 }
 
@@ -820,6 +953,18 @@ nonisolated struct NLLottery: Codable, Sendable {
     let participants: [Holder]?
 }
 
+/// `POST /api/v1/lotteries/{id}/tickets` → the viewer's total.
+nonisolated struct NLLotteryTickets: Codable, Sendable {
+    let tickets: Int
+}
+
+/// `GET /api/v1/lotteries/{id}/participants`.
+nonisolated struct NLLotteryParticipants: Codable, Sendable {
+    let participants: [NLLottery.Holder]
+    let participantCount: Int?
+    let ticketCount: Int?
+}
+
 nonisolated struct NLRedEnvelopeEnvelope: Codable, Sendable {
     let redEnvelope: NLRedEnvelope
 }
@@ -895,20 +1040,254 @@ nonisolated struct NLRevision: Codable, Sendable, Identifiable, Hashable {
     var id: Int { number }
 }
 
-/// The revisions endpoint answers `{"revisions": [...]}`; a bare array is
-/// accepted as well.
+/// `GET /api/v1/posts/{id}/revisions` answers one entry per counted edit,
+/// each carrying the body before and after it (`raw: [old, new]`, `title`
+/// likewise and only on a first post), plus the original author and
+/// `posted_at` (content/revisions.go `listRevisions`). This folds that into
+/// whole versions the way the web does: v1 is the body before the first
+/// edit, by the author; every later one keeps the server's `number`, which is
+/// what `…/revisions/{n}/restore` matches on.
 nonisolated struct NLRevisionList: Decodable, Sendable {
     let revisions: [NLRevision]
 
+    private nonisolated struct Entry: Decodable {
+        let number: Int
+        let editor: String?
+        let editorAvatar: String?
+        let editorSystem: Bool?
+        let byAuthor: Bool?
+        let reason: String?
+        let raw: [String]?
+        let title: [String]?
+        let createdAt: String?
+    }
+
+    private enum Keys: String, CodingKey { case revisions, author, authorAvatar, postedAt }
+
     init(from decoder: Decoder) throws {
-        if let array = try? [NLRevision](from: decoder) {
-            revisions = array
+        let container = try decoder.container(keyedBy: Keys.self)
+        let entries = try container.decodeIfPresent([Entry].self, forKey: .revisions) ?? []
+        guard let first = entries.first else {
+            revisions = []
             return
         }
-        enum Keys: String, CodingKey { case revisions }
-        let container = try decoder.container(keyedBy: Keys.self)
-        revisions = try container.decode([NLRevision].self, forKey: .revisions)
+        let author = try container.decodeIfPresent(String.self, forKey: .author)
+        var out = [NLRevision(
+            number: 1,
+            raw: first.raw?.first,
+            title: first.title?.first,
+            editor: NLRevision.Editor(
+                id: nil, username: author, name: nil,
+                avatar: try container.decodeIfPresent(String.self, forKey: .authorAvatar)
+            ),
+            reason: nil,
+            byModerator: false,
+            createdAt: try container.decodeIfPresent(String.self, forKey: .postedAt)
+        )]
+        for entry in entries {
+            let system = entry.editorSystem == true
+            let editor = entry.editor.flatMap { $0.isEmpty ? nil : $0 }
+            out.append(NLRevision(
+                number: entry.number,
+                raw: entry.raw?.last,
+                title: entry.title?.last,
+                editor: NLRevision.Editor(
+                    id: nil, username: editor, name: system ? AppString("系统") : nil, avatar: entry.editorAvatar
+                ),
+                reason: entry.reason,
+                // Neither the author nor an app or scheduled job: a manager.
+                byModerator: !(entry.byAuthor ?? true) && !system,
+                createdAt: entry.createdAt
+            ))
+        }
+        revisions = out
     }
+}
+
+// MARK: - Node access, channels, drafts
+//
+// First written from the design; now matched to the backend (node/access.go,
+// channel/handlers.go, content/handlers.go `draftJSON`).
+
+/// `GET /api/v1/nodes/{slug}/access` — the node's access list: each entry
+/// gives one group a step in this node, and `groups` is what the viewer may
+/// pick from. The list only lets more people in; it never shuts anyone out.
+nonisolated struct NLNodeAccess: Codable, Sendable {
+    /// One row: a group (`subject`) and how far it gets — 1 能看, 2 能回帖,
+    /// 3 能发主题, 4 能帮着管 (node/service.go `AccessView`…`AccessModerate`).
+    nonisolated struct Entry: Codable, Sendable, Hashable {
+        let subject: String
+        var level: Int
+    }
+    nonisolated struct Group: Codable, Sendable, Identifiable, Hashable {
+        let subject: String
+        /// `everyone` (signed out too), `members` (signed in), `level`
+        /// (a trust level and up), `moderators` or `group` (a custom group).
+        let kind: String
+        /// Shown for `level` and `group`; the others are named by the client.
+        let name: String?
+        let level: Int?
+        var id: String { subject }
+    }
+    let entries: [Entry]?
+    let groups: [Group]?
+}
+
+/// `GET /api/v1/nodes/{slug}/channels` — outside feeds a node imports as
+/// topics. Only the fields the app shows or must send back on an update are
+/// decoded; the update is a whole replacement (channel/handlers.go `channelBody`).
+nonisolated struct NLNodeChannels: Codable, Sendable {
+    nonisolated struct Channel: Codable, Sendable, Identifiable {
+        nonisolated struct Item: Codable, Sendable, Hashable {
+            let id: Int?
+            /// `published`, `pending`, `skipped`, `failed`, …
+            let status: String?
+            let title: String
+            let topicId: Int?
+            let createdAt: String?
+        }
+        let id: Int
+        /// `rss`, `youtube`, `telegram`, `bilibili` or `webhook`.
+        let kind: String?
+        let name: String?
+        let feedUrl: String?
+        let siteUrl: String?
+        let source: String?
+        let postAs: String?
+        let titlePrefix: String?
+        let tags: [String]?
+        let dailyLimit: Int?
+        let review: Bool?
+        let embed: Bool?
+        let enabled: Bool?
+        /// `ok`, `paused` or `error`.
+        let status: String?
+        let pollMinutes: Int?
+        let lastPolledAt: String?
+        let lastSyncedAt: String?
+        let pausedAt: String?
+        let lastError: String?
+        let lastErrorCode: String?
+        let recent: [Item]?
+
+        /// What the card shows as the channel's address.
+        var displayURL: String? { siteUrl ?? feedUrl ?? source }
+    }
+    let channels: [Channel]
+}
+
+/// `GET /api/v1/drafts` — drafts kept on the server, so the phone and the
+/// computer see the same ones. Each is keyed by where it was written
+/// (`new_topic:<random>` or `topic:<id>` for a reply) and its `data` is the
+/// web composer's own object, so the fields below are read out of it the way
+/// the web's drafts.js does.
+nonisolated struct NLDrafts: Decodable, Sendable {
+    nonisolated struct Draft: Decodable, Sendable, Identifiable {
+        /// The draft's key, the handle for `DELETE /api/v1/drafts/{key}`.
+        let id: String
+        /// `topic` or `reply`, from the key.
+        let kind: String
+        let title: String?
+        let raw: String?
+        let nodeSlug: String?
+        let nodeName: String?
+        /// For a reply: what it answers.
+        let topicId: Int?
+        let topicTitle: String?
+        let replyToUsername: String?
+        let updatedAt: String?
+        /// `phone` or `pc` — where it was last saved.
+        let device: String?
+        /// Set when it is scheduled to publish.
+        let scheduledAt: String?
+        let imageCount: Int?
+        /// When the server will delete it for inactivity.
+        let expiresAt: String?
+        /// For a reply to a particular floor: its number.
+        let replyTo: Int?
+        /// A topic draft's tags (`data.tags`: a list, or the older
+        /// space-separated string — content/drafts.go `topicDraft.tags`).
+        let tags: [String]
+        /// Why a scheduled publish failed, when it did.
+        let scheduleError: String?
+        /// Another device's save that the server held back (409
+        /// `draft_conflict`), waiting for the author to choose.
+        let conflict: Conflict?
+
+        nonisolated struct Conflict: Decodable, Sendable {
+            let raw: String?
+            let device: String?
+            let savedAt: String?
+        }
+
+        private nonisolated struct Payload: Decodable {
+            let title: String?
+            let raw: String?
+            let node: String?
+            let nodeName: String?
+            let topicTitle: String?
+            let replyToUser: String?
+            let replyTo: Int?
+            let tags: [String]?
+
+            private enum K: String, CodingKey { case title, raw, node, nodeName, topicTitle, replyToUser, replyTo, tags }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: K.self)
+                title = try? c.decodeIfPresent(String.self, forKey: .title)
+                raw = try? c.decodeIfPresent(String.self, forKey: .raw)
+                node = try? c.decodeIfPresent(String.self, forKey: .node)
+                nodeName = try? c.decodeIfPresent(String.self, forKey: .nodeName)
+                topicTitle = try? c.decodeIfPresent(String.self, forKey: .topicTitle)
+                replyToUser = try? c.decodeIfPresent(String.self, forKey: .replyToUser)
+                replyTo = try? c.decodeIfPresent(Int.self, forKey: .replyTo)
+                if let list = try? c.decodeIfPresent([String].self, forKey: .tags) {
+                    tags = list
+                } else if let text = try? c.decodeIfPresent(String.self, forKey: .tags) {
+                    tags = text.split(separator: " ").map(String.init)
+                } else {
+                    tags = nil
+                }
+            }
+        }
+        private nonisolated struct ConflictBody: Decodable {
+            let data: Payload?
+            let device: String?
+            let savedAt: String?
+        }
+        private enum Keys: String, CodingKey { case key, data, updatedAt, device, publishAt, expiresAt, scheduleError, conflict }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            let key = try c.decode(String.self, forKey: .key)
+            let data = try? c.decodeIfPresent(Payload.self, forKey: .data)
+            id = key
+            let isReply = key.hasPrefix("topic:")
+            kind = isReply ? "reply" : "topic"
+            topicId = isReply ? Int(key.dropFirst("topic:".count)) : nil
+            title = data?.title
+            raw = data?.raw
+            nodeSlug = data?.node
+            nodeName = data?.nodeName
+            topicTitle = data?.topicTitle
+            replyToUsername = data?.replyToUser
+            updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+            device = try c.decodeIfPresent(String.self, forKey: .device)
+            scheduledAt = try c.decodeIfPresent(String.self, forKey: .publishAt)
+            expiresAt = try c.decodeIfPresent(String.self, forKey: .expiresAt)
+            replyTo = data?.replyTo
+            tags = data?.tags ?? []
+            scheduleError = try? c.decodeIfPresent(String.self, forKey: .scheduleError)
+            if let held = try? c.decodeIfPresent(ConflictBody.self, forKey: .conflict) {
+                conflict = Conflict(raw: held.data?.raw, device: held.device, savedAt: held.savedAt)
+            } else {
+                conflict = nil
+            }
+            // Same count as the web: markdown images in the body.
+            imageCount = raw.map { $0.components(separatedBy: "![").count - 1 }
+        }
+    }
+    let drafts: [Draft]
+    let limit: Int?
 }
 
 // MARK: - Nodes
@@ -954,6 +1333,14 @@ nonisolated struct NLNodeDetail: Codable, Sendable {
     let logoDarkUrl: String?
     let bannerDarkUrl: String?
     let permissions: Permissions?
+    /// One of the node's rules; older nodes stored bare titles, which the
+    /// server folds into this shape.
+    struct Rule: Codable, Sendable, Hashable {
+        let title: String
+        let description: String?
+    }
+    /// The node's rules, for 关于 (Android shows them as its 规则 panel).
+    let rules: [Rule]?
     /// Signed-in readers who looked at this node in the last fifteen minutes,
     /// counted once each; guests don't count. Asking for this endpoint while
     /// signed in is itself what records the visit, which is how someone who
@@ -1319,6 +1706,8 @@ nonisolated struct NLSearchResults: Codable, Sendable {
         let topicId: Int
         let postNumber: Int?
         let topicTitle: String?
+        /// The title with the matched words in `<mark>`.
+        let titleHtml: String?
         let excerpt: String?
         let blurb: String?
         let author: String?
@@ -1382,10 +1771,15 @@ nonisolated struct NLMyNodes: Codable, Sendable {
         let memberCount: Int?
         let role: String?
         let notificationLevel: String?
+        /// The reader owns the node (`role` is `moderator` for an owner too).
+        var owner: Bool? = nil
+        /// Only on a node the reader manages: what waits in its queue.
+        var pending: NLManagedNodes.Node.Pending? = nil
     }
     struct Favorite: Codable, Sendable {
         let slug: String
         let name: String?
+        var color: String? = nil
     }
     let joined: [Joined]
     let favorites: [Favorite]?
@@ -1496,58 +1890,146 @@ nonisolated enum NLDate {
         return format(date)
     }
 
+    /// Parsed by hand from the UTF-8 bytes: a `DateFormatter` here cost
+    /// ~40µs a call through ICU, and every row of every list carries a few
+    /// of these, all on the main thread.
     static func parse(_ raw: String) -> Date? {
-        // Split "2026-11-25T01:33:46.723291+08:00" into its parts by hand.
-        guard raw.count >= 19 else { return nil }
-        let chars = Array(raw)
-        let base = String(chars[0..<19])
+        var raw = raw
+        return raw.withUTF8 { Self.parse(bytes: $0) }
+    }
+
+    static func parse(bytes b: UnsafeBufferPointer<UInt8>) -> Date? {
+        guard b.count >= 19 else { return nil }
+        func num(_ from: Int, _ length: Int) -> Int? {
+            var value = 0
+            for i in from..<(from + length) {
+                let c = b[i]
+                guard c >= 48, c <= 57 else { return nil }
+                value = value * 10 + Int(c - 48)
+            }
+            return value
+        }
+        guard b[4] == 45, b[7] == 45, b[10] == 84 || b[10] == 116 || b[10] == 32, b[13] == 58, b[16] == 58,
+              let year = num(0, 4), let month = num(5, 2), let day = num(8, 2),
+              let hour = num(11, 2), let minute = num(14, 2), let second = num(17, 2),
+              (1...12).contains(month), (1...31).contains(day), hour < 24, minute < 60, second < 61
+        else { return nil }
         var index = 19
         var fraction = 0.0
-        if index < chars.count, chars[index] == "." {
+        if index < b.count, b[index] == 46 {
             index += 1
-            var digits = ""
-            while index < chars.count, chars[index].isNumber {
-                digits.append(chars[index])
+            var scale = 0.1
+            while index < b.count, b[index] >= 48, b[index] <= 57 {
+                fraction += Double(b[index] - 48) * scale
+                scale /= 10
                 index += 1
             }
-            fraction = Double("0." + digits) ?? 0
         }
         var offsetSeconds = 0
-        if index < chars.count {
-            let zone = String(chars[index...])
-            if zone == "Z" || zone == "z" {
-                offsetSeconds = 0
-            } else if let sign = zone.first, sign == "+" || sign == "-" {
-                let digits = zone.dropFirst().replacingOccurrences(of: ":", with: "")
-                guard digits.count == 4, let hours = Int(digits.prefix(2)), let minutes = Int(digits.suffix(2)) else {
-                    return nil
+        if index < b.count {
+            let sign = b[index]
+            if sign == 90 || sign == 122 {
+                index += 1
+            } else if sign == 43 || sign == 45 {
+                var digits: [Int] = []
+                index += 1
+                while index < b.count, digits.count < 4 {
+                    let c = b[index]
+                    if c >= 48, c <= 57 { digits.append(Int(c - 48)) } else if c != 58 { return nil }
+                    index += 1
                 }
-                offsetSeconds = (hours * 3600 + minutes * 60) * (sign == "-" ? -1 : 1)
+                guard digits.count == 4 else { return nil }
+                offsetSeconds = ((digits[0] * 10 + digits[1]) * 3600 + (digits[2] * 10 + digits[3]) * 60) * (sign == 45 ? -1 : 1)
             } else {
                 return nil
             }
+            guard index == b.count else { return nil }
         }
-        guard let date = baseFormatter.date(from: base) else { return nil }
-        return date.addingTimeInterval(fraction - Double(offsetSeconds))
+        let days = daysFromCivil(year, month, day)
+        let seconds = Double(days * 86_400 + hour * 3600 + minute * 60 + second - offsetSeconds) + fraction
+        return Date(timeIntervalSince1970: seconds)
     }
 
+    /// `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` in UTC, written without a formatter.
     static func format(_ date: Date) -> String {
-        outputFormatter.string(from: date)
+        let total = date.timeIntervalSince1970
+        var millis = Int((total * 1000).rounded(.down))
+        let ms = ((millis % 1000) + 1000) % 1000
+        millis -= ms
+        var secs = millis / 1000
+        var days = secs / 86_400
+        secs -= days * 86_400
+        if secs < 0 { secs += 86_400; days -= 1 }
+        let (y, m, d) = civilFromDays(days)
+        func pad(_ v: Int, _ w: Int) -> String {
+            let s = String(v)
+            return s.count >= w ? s : String(repeating: "0", count: w - s.count) + s
+        }
+        return "\(pad(y, 4))-\(pad(m, 2))-\(pad(d, 2))T\(pad(secs / 3600, 2)):\(pad(secs % 3600 / 60, 2)):\(pad(secs % 60, 2)).\(pad(ms, 3))Z"
     }
 
-    private static let baseFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        return formatter
-    }()
+    /// Howard Hinnant's days-from-civil (proleptic Gregorian, 1970-01-01 = 0).
+    private static func daysFromCivil(_ year: Int, _ month: Int, _ day: Int) -> Int {
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let mp = (month + 9) % 12
+        let doy = (153 * mp + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097 + doe - 719_468
+    }
 
-    private static let outputFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
-        return formatter
-    }()
+    private static func civilFromDays(_ z0: Int) -> (Int, Int, Int) {
+        let z = z0 + 719_468
+        let era = (z >= 0 ? z : z - 146_096) / 146_097
+        let doe = z - era * 146_097
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        let mp = (5 * doy + 2) / 153
+        let d = doy - (153 * mp + 2) / 5 + 1
+        let m = mp < 10 ? mp + 3 : mp - 9
+        return (yoe + era * 400 + (m <= 2 ? 1 : 0), m, d)
+    }
+}
+
+/// `GET /api/v1/me/nodes`, read for the moderation dashboard: the same
+/// answer as `NLMyNodes`, plus the two fields only a node's managers get.
+/// `pending` is present exactly on the nodes the reader owns or moderates
+/// (web/mynodes_api.go), so it doubles as "can manage this node".
+nonisolated struct NLManagedNodes: Codable, Sendable {
+    nonisolated struct Node: Codable, Sendable {
+        nonisolated struct Pending: Codable, Sendable {
+            /// Pending reports on posts in this node (anything but `pending_post`).
+            let reports: Int?
+            /// Posts held for review.
+            let queued: Int?
+            let joinRequests: Int?
+        }
+        let slug: String
+        let name: String?
+        let color: String?
+        let role: String?
+        let owner: Bool?
+        let pending: Pending?
+    }
+    let joined: [Node]
+}
+
+/// `GET /api/v1/me/permissions`.
+nonisolated struct NLMyPermissions: Decodable, Sendable {
+    let permissions: [String]
+    let limits: [String: Int]?
+}
+
+/// The `fields` of a 422: which input the server refused and why.
+nonisolated enum ServerFieldErrors {
+    static func last() -> [String: String] {
+        struct Envelope: Decodable {
+            struct Body: Decodable { let fields: [String: String]? }
+            let error: Body?
+        }
+        guard let data = DiscourseError.lastErrorBody,
+              let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else { return [:] }
+        return envelope.error?.fields ?? [:]
+    }
 }

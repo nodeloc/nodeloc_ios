@@ -9,10 +9,13 @@ import SwiftUI
 /// because the search field in MainView's tab bar writes the query that
 /// screen-mode search reads.
 enum SearchScope: String, CaseIterable {
+    // The design's order (App-iOS-Search): 全部 帖子 节点 用户 标签, then
+    // the app's own two.
     case all = "全部"
-    case nodes = "节点"
     case posts = "帖子"
+    case nodes = "节点"
     case users = "用户"
+    case tags = "标签"
     case apps = "应用"
     case media = "媒体"
 
@@ -25,6 +28,7 @@ enum SearchScope: String, CaseIterable {
         case .nodes: return AppString("节点")
         case .posts: return AppString("帖子")
         case .users: return AppString("用户")
+        case .tags: return AppString("标签")
         case .apps: return AppString("应用")
         case .media: return AppString("媒体")
         }
@@ -83,8 +87,14 @@ private struct SearchExperience: View {
     @State private var query = ""
     @State private var showHistory = false
     @State private var selectedScope: SearchScope = .all
-    @State private var selectedProfile: UserProfileTarget?
+    /// The pending debounced search, replaced on every keystroke.
+    @State private var searchTask: Task<Void, Never>?
+    /// True from a keystroke until its debounced search has answered, so the
+    /// "nothing found" state doesn't flash while the request hasn't started.
+    @State private var searchPending = false
+    @State private var hotSearches = Self.fallbackHotSearches
     @FocusState private var searchFocused: Bool
+    @State private var didFocusOnce = false
     @Namespace private var scopeSelectionNamespace
 
     private var isOverlay: Bool { mode == .overlay }
@@ -134,17 +144,9 @@ private struct SearchExperience: View {
                 telegramSearchControls
             }
 
-            if let selectedProfile {
-                PublicProfileOverlay(target: selectedProfile) {
-                    withAnimation(.overlayPush) {
-                        self.selectedProfile = nil
-                    }
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-                .zIndex(30)
-            }
         }
         .task { await store.loadCategories() }
+        .task { await loadHotSearches() }
         .onAppear {
             // Seeding the query here rather than in an init: assigning to the
             // @State is a real change from "", so the onChange below runs the
@@ -153,18 +155,24 @@ private struct SearchExperience: View {
             if !initialQuery.isEmpty, query.isEmpty {
                 query = initialQuery
             }
-            guard isOverlay else { return }
+            // Once: coming back from a post opened from the results must not
+            // bring the keyboard back up.
+            guard isOverlay, !didFocusOnce else { return }
+            didFocusOnce = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                 searchFocused = true
             }
         }
+        // Debounced: the server allows 30 searches a minute per reader, and a
+        // request per keystroke spent that in a couple of queries — after
+        // which every search came back empty (a 429 reads as no results).
         .onChange(of: query) { _, newValue in
-            Task { await store.search(newValue, scope: activeScope) }
+            runSearch(newValue, scope: activeScope, delay: .milliseconds(350))
         }
         // Scopes aren't a filter over one payload — each is answered by a
         // different endpoint — so changing scope refetches.
         .onChange(of: activeScope) { _, newScope in
-            Task { await store.search(query, scope: newScope) }
+            runSearch(query, scope: newScope, delay: .zero)
         }
         // Screen mode types into the system field in the tab bar (.searchable
         // in MainView); mirror it into the local query that drives results.
@@ -178,12 +186,22 @@ private struct SearchExperience: View {
                 apply(term)
             }
         }
-        // Only for the shared leading control — this screen has no header of
-        // its own to hand over. `MainView` already wraps it in a stack.
-        .tabBarHeader(isPinned: drawsOwnField, needsNavigationStack: false) {
-            EmptyView()
-        } trailing: {
-            EmptyView()
+        // The search tab's bar (`MainView` wraps it in a stack) is the same
+        // inline, see-through one every other tab has.
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func runSearch(_ text: String, scope: SearchScope, delay: Duration) {
+        searchTask?.cancel()
+        searchPending = true
+        searchTask = Task {
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+            }
+            await store.search(text, scope: scope)
+            guard !Task.isCancelled else { return }
+            searchPending = false
         }
     }
 
@@ -254,14 +272,16 @@ private struct SearchExperience: View {
                 .padding(.bottom, 12)
 
             VStack(spacing: 0) {
-                ForEach(Self.hotSearches, id: \.self) { title in
+                ForEach(hotSearches, id: \.self) { title in
                     Button {
                         apply(title)
                     } label: {
                         RedditSearchRow(
                             icon: "arrow.up.right",
                             title: title,
-                            subtitle: AppString("根据你的兴趣"),
+                            // Not "根据你的兴趣": the list is the same for
+                            // everyone.
+                            subtitle: nil,
                             badge: nil,
                             trailingIcon: nil
                         )
@@ -286,6 +306,7 @@ private struct SearchExperience: View {
         case .nodes: return store.nodeResults.isEmpty
         case .posts: return store.results.isEmpty
         case .users: return store.userResults.isEmpty
+        case .tags: return store.tagResults.isEmpty
         case .apps: return store.appResults.isEmpty
         case .media: return store.mediaResults.isEmpty
         }
@@ -312,23 +333,32 @@ private struct SearchExperience: View {
                     sectionHeader(title: AppString("用户"), trailing: nil)
                     ForEach(store.userResults.prefix(3)) { userRow($0) }
                 }
-                if !store.results.isEmpty, !store.nodeResults.isEmpty || !store.userResults.isEmpty {
-                    sectionHeader(title: AppString("帖子"), trailing: nil)
+                if !store.results.isEmpty {
+                    postsHeader
                 }
                 postCards(store.results)
             case .nodes:
                 ForEach(store.nodeResults) { nodeRow($0) }
             case .posts:
+                if !store.results.isEmpty { postsHeader }
                 postCards(store.results)
             case .users:
                 ForEach(store.userResults) { userRow($0) }
+            case .tags:
+                HStack {
+                    Spacer()
+                    Button(AppString("所有标签")) { app.pushPage(.tags) }
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+                ForEach(store.tagResults) { tagRow($0) }
             case .apps:
                 ForEach(store.appResults) { appRow($0) }
             case .media:
                 postCards(store.mediaResults)
             }
 
-            if !store.isSearching && scopedResultsAreEmpty {
+            if !store.isSearching && !searchPending && scopedResultsAreEmpty {
                 EmptyStateView(icon: "magnifyingglass", message: AppString("没有找到相关内容"))
                 .frame(maxWidth: .infinity)
                 .padding(.top, 54)
@@ -337,31 +367,71 @@ private struct SearchExperience: View {
         .padding(.horizontal, 16)
     }
 
+    /// 帖子, and how they're ordered: 按相关度 or 按时间 (`sort=new`).
+    private var postsHeader: some View {
+        HStack {
+            Text(AppString("帖子"))
+                .font(Theme.body(15, weight: .bold))
+                .foregroundStyle(Theme.text)
+            Spacer()
+            Menu {
+                Picker(AppString("排序"), selection: Binding(
+                    get: { store.sort ?? "" },
+                    set: { value in
+                        store.sort = value.isEmpty ? nil : value
+                        runSearch(query, scope: activeScope, delay: .zero)
+                    }
+                )) {
+                    Text(AppString("按相关度")).tag("")
+                    Text(AppString("按时间")).tag("new")
+                }
+            } label: {
+                Label(store.sort == "new" ? AppString("按时间") : AppString("按相关度"), systemImage: "arrow.up.arrow.down")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+            }
+        }
+        .padding(.top, 6)
+    }
+
     @ViewBuilder
     private func postCards(_ posts: [Post]) -> some View {
         ForEach(posts) { post in
             PostCard(
                 post: post,
                 postTransitionNamespace: postTransitionNamespace,
-                onOpenAuthor: { target in
-                    withAnimation(.panelSlide) {
-                        selectedProfile = target
-                    }
-                },
-                readingQueue: posts
+                onOpenAuthor: { target in openProfile(target) }
             )
         }
     }
 
+    private func tagRow(_ tag: SearchTagResult) -> some View {
+        Button {
+            app.pushPage(.tag(tag.name))
+        } label: {
+            HStack(spacing: 10) {
+                TagLookChip(name: tag.name, size: .filter)
+                Spacer(minLength: 6)
+                Text(AppString("\(tag.topicCount) 个主题"))
+                    .font(Theme.body(13))
+                    .foregroundStyle(Theme.textMuted)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+    }
+
     private func userRow(_ user: SearchUserResult) -> some View {
         Button {
-            withAnimation(.panelSlide) {
-                selectedProfile = UserProfileTarget(
-                    username: user.username,
-                    displayName: user.displayName,
-                    avatarURL: user.avatarURL
-                )
-            }
+            openProfile(UserProfileTarget(
+                username: user.username,
+                displayName: user.displayName,
+                avatarURL: user.avatarURL
+            ))
         } label: {
             HStack(spacing: 10) {
                 RemoteAvatar(
@@ -376,7 +446,7 @@ private struct SearchExperience: View {
                         .foregroundStyle(Theme.text)
                     Text("u/\(user.username)")
                         .font(Theme.body(11))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 Spacer(minLength: 0)
             }
@@ -388,6 +458,7 @@ private struct SearchExperience: View {
 
     private func nodeRow(_ node: SearchNodeResult) -> some View {
         Button {
+            searchFocused = false
             app.openNode(slug: node.slug)
         } label: {
             HStack(spacing: 10) {
@@ -396,7 +467,7 @@ private struct SearchExperience: View {
                     letter: String(node.name.prefix(1)).uppercased(),
                     variant: node.id % 2,
                     size: 34,
-                    cornerRadius: 10
+                    cornerRadius: Theme.cornerMedium
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text("n/\(node.slug)")
@@ -405,7 +476,7 @@ private struct SearchExperience: View {
                     if !node.desc.isEmpty {
                         Text(node.desc)
                             .font(Theme.body(11))
-                            .foregroundStyle(Theme.muted(0.5))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
                 }
@@ -419,10 +490,7 @@ private struct SearchExperience: View {
 
     private func appRow(_ item: DirectoryApp) -> some View {
         Button {
-            app.selectedApp = item
-            withAnimation(.overlayPush) {
-                app.overlay = .appDetail
-            }
+            app.openApp(item)
         } label: {
             HStack(spacing: 10) {
                 RemoteAvatar(
@@ -430,7 +498,7 @@ private struct SearchExperience: View {
                     letter: String(item.name.prefix(1)).uppercased(),
                     variant: item.id % 2,
                     size: 34,
-                    cornerRadius: 10
+                    cornerRadius: Theme.cornerMedium
                 )
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.name)
@@ -439,7 +507,7 @@ private struct SearchExperience: View {
                     if let description = item.description, !description.isEmpty {
                         Text(description)
                             .font(Theme.body(11))
-                            .foregroundStyle(Theme.muted(0.5))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
                 }
@@ -500,18 +568,8 @@ private struct SearchExperience: View {
                                     proxy.scrollTo(scope, anchor: .center)
                                 }
                             } label: {
-                                Text(scope.label)
-                                    .font(Theme.body(14, weight: .semibold))
-                                    .foregroundStyle(selection.wrappedValue == scope ? Theme.text : Theme.text.opacity(0.84))
-                                    .padding(.horizontal, 15)
-                                    .frame(height: 38)
-                                    .background {
-                                        if selection.wrappedValue == scope {
-                                            Capsule()
-                                                .fill(Theme.neutral400.opacity(0.62))
-                                                .matchedGeometryEffect(id: "scope-selection", in: scopeSelectionNamespace)
-                                        }
-                                    }
+                                // The design's chips: ink when picked.
+                                CapsuleChipLabel(title: scope.label, isSelected: selection.wrappedValue == scope, unselectedWeight: .medium)
                             }
                             .buttonStyle(.pressable)
                             .id(scope)
@@ -538,7 +596,7 @@ private struct SearchExperience: View {
         HStack(spacing: 9) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Theme.muted(0.45))
+                .foregroundStyle(Theme.textFaint)
 
             TextField("搜索", text: $query)
                 .font(Theme.heading(19, weight: .regular))
@@ -558,7 +616,7 @@ private struct SearchExperience: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.35))
+                        .foregroundStyle(Theme.textFaint)
                 }
                 .buttonStyle(.pressable)
             }
@@ -577,7 +635,7 @@ private struct SearchExperience: View {
         HStack {
             Text(title)
                 .font(Theme.body(14, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.58))
+                .foregroundStyle(Theme.textMuted)
 
             Spacer()
 
@@ -589,7 +647,7 @@ private struct SearchExperience: View {
                             .font(.system(size: 12, weight: .bold))
                     }
                     .font(Theme.body(14, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.58))
+                    .foregroundStyle(Theme.textMuted)
                 }
                 .buttonStyle(.pressable)
             }
@@ -611,6 +669,16 @@ private struct SearchExperience: View {
         searchFocused = false
     }
 
+    /// Through the app's profile route, like every other tab. Profiles used
+    /// to open as a layer *inside* this screen, so the tab bar's search field
+    /// and its ✕ stayed on top of them — and ✕, which closes the search tab,
+    /// took the opened profile away with it. The routed page is a full-screen
+    /// page of its own; closing it comes back to the results as they were.
+    private func openProfile(_ target: UserProfileTarget) {
+        searchFocused = false
+        app.openProfile(target)
+    }
+
     private func dismissOverlay() {
         guard isOverlay else { return }
         searchFocused = false
@@ -623,12 +691,30 @@ private struct SearchExperience: View {
         }
     }
 
-    private static let hotSearches = [
-        "GitHub Outage",
-        "WNBA Highlights",
-        "Fairphone Gen 6+ US Launch",
-        "August 2026 Visa Bulletin"
-    ]
+    /// Shown until (or unless) the hot list's tags answer. The previous list
+    /// here was placeholder copy ("WNBA Highlights"…) with nothing to do with
+    /// this forum.
+    private static let fallbackHotSearches = ["VPS", "优惠", "教程", "白嫖", "折腾", "IPv6", "免费", "面板"]
+
+    /// Suggestions from the tags on the hot list, the way the Android client
+    /// does it: tags are short, real and searchable, where titles are whole
+    /// sentences. Search logs aren't exposed to readers.
+    private func loadHotSearches() async {
+        guard let list = try? await DiscourseClient().topicList(feed: .hot) else { return }
+        var counts: [String: Int] = [:]
+        for topic in list.topicList.topics {
+            for name in (topic.tags ?? []).compactMap(\.name) {
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { counts[trimmed, default: 0] += 1 }
+            }
+        }
+        let ranked = counts
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(8)
+            .map(\.key)
+        // A near-empty row reads as breakage; the fixed list is better.
+        if ranked.count >= 4 { hotSearches = Array(ranked) }
+    }
 }
 
 /// The full list of saved search terms, with per-row delete and a clear-all.
@@ -664,10 +750,9 @@ private struct SearchHistorySheet: View {
                 }
             }
             // Clearing everything can't be undone, so it asks first.
-            .confirmationDialog(
+            .alert(
                 AppString("清空全部历史记录？"),
-                isPresented: $confirmingClear,
-                titleVisibility: .visible
+                isPresented: $confirmingClear
             ) {
                 Button("清空", role: .destructive) { history.clear() }
                 Button("取消", role: .cancel) {}
@@ -686,7 +771,7 @@ private struct SearchHistorySheet: View {
                         HStack(spacing: 14) {
                             Image(systemName: "clock")
                                 .font(.system(size: 17, weight: .medium))
-                                .foregroundStyle(Theme.muted(0.5))
+                                .foregroundStyle(Theme.textMuted)
                                 .frame(width: 26)
 
                             Text(term)
@@ -701,7 +786,7 @@ private struct SearchHistorySheet: View {
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(Theme.muted(0.5))
+                                    .foregroundStyle(Theme.textMuted)
                                     .frame(width: 28, height: 28)
                                     .contentShape(Rectangle())
                             }
@@ -755,13 +840,13 @@ private struct RedditSearchRow: View {
                     if let badge {
                         Text(badge)
                             .font(Theme.body(12, weight: .bold))
-                            .foregroundStyle(Color(hex: 0x9A4E05))
+                            .foregroundStyle(Color(light: 0x9A4E05, dark: 0xFFC078))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(Color(hex: 0xFFF2D8), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .background(Color(light: 0xFFF2D8, dark: 0x3A2A12), in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
                             .overlay {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .strokeBorder(Color(hex: 0xA85C0D), lineWidth: 1)
+                                RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
+                                    .strokeBorder(Color(light: 0xA85C0D, dark: 0x8A5A1E), lineWidth: 1)
                             }
                     }
                 }
@@ -769,7 +854,7 @@ private struct RedditSearchRow: View {
                 if let subtitle {
                     Text(subtitle)
                         .font(Theme.body(13, weight: .regular))
-                        .foregroundStyle(Theme.muted(0.58))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
             }
@@ -779,7 +864,7 @@ private struct RedditSearchRow: View {
             if let trailingIcon {
                 let glyph = Image(systemName: trailingIcon)
                     .font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(Theme.muted(0.58))
+                    .foregroundStyle(Theme.textMuted)
                     .frame(width: 28, height: 28)
 
                 if let onTrailingTap {

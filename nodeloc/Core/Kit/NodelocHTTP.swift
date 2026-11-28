@@ -154,6 +154,13 @@ enum DiscourseError: Error, LocalizedError {
         }
     }
 
+    /// The body of the last error answer, for the few errors that carry
+    /// more than a message (409 `penalty_exists` names the penalty in force).
+    /// Read it right after catching the error.
+    nonisolated(unsafe) static var lastErrorBody: Data?
+    /// `Retry-After` of the last 429, in seconds.
+    nonisolated(unsafe) static var lastRetryAfter: Double?
+
     /// The server's error code, when it sent one.
     var serverCode: String? {
         if case .badResponse(_, _, let code) = self { return code }
@@ -169,8 +176,12 @@ enum DiscourseError: Error, LocalizedError {
     /// stay out of the UI.
     var errorDescription: String? {
         switch self {
-        case .badResponse(let code, let message, _):
-            if let message, !message.isEmpty { return message }
+        case .badResponse(let code, let message, let serverCode):
+            // A 500's generic "服务器内部错误" / "Internal server error" is
+            // the server saying nothing — the friendly line reads better.
+            if let message, !message.isEmpty, !(code >= 500 && (serverCode == nil || serverCode == "internal")) {
+                return message
+            }
             switch code {
             case 401, 403: return AppString("没有权限或登录已失效，请重新登录后再试")
             case 404: return AppString("内容不存在或已被删除")
@@ -267,7 +278,15 @@ struct NodelocHTTP {
         request.setValue(DiscourseConfig.userAgent, forHTTPHeaderField: "User-Agent")
         // Server-rendered names (nodes, tiers, system notices) follow the
         // reader's language, picked from this header and the `lang` cookie.
-        request.setValue(AppLanguage.resolved.acceptLanguageHeader, forHTTPHeaderField: "Accept-Language")
+        // A language chosen in 设置 › 界面 › 语言 wins; it may be one the app
+        // has no strings for but the server speaks.
+        request.setValue(
+            ServerLanguage.choice?.acceptLanguage ?? AppLanguage.resolved.acceptLanguageHeader,
+            forHTTPHeaderField: "Accept-Language"
+        )
+        // Times the server writes into messages ("禁言到 12 月 4 日 10:24")
+        // are in this zone; without it they are Beijing time.
+        request.setValue(TimeZone.current.identifier, forHTTPHeaderField: "X-Time-Zone")
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         applyAuth(to: &request)
 
@@ -342,8 +361,25 @@ struct NodelocHTTP {
         } catch {
             throw DiscourseError.decoding(error)
         }
-        return try await perform(request, retriesRemaining: method == "GET" ? 1 : 0)
+        guard method == "GET", let key = request.url?.absoluteString else {
+            return try await perform(request, retriesRemaining: 0)
+        }
+        // Several screens and stores ask for the same thing at the same
+        // moment (launch asked for /me, the unread counts and the block list
+        // twice each). Identical GETs for the same credential share one request.
+        let coalesceKey = key + "|" + (request.value(forHTTPHeaderField: "Authorization") ?? "")
+            + "|" + (request.value(forHTTPHeaderField: "Cookie") ?? "")
+        if let running = Self.inFlight[coalesceKey] {
+            return try await running.value
+        }
+        let task = Task { try await perform(request, retriesRemaining: 1) }
+        Self.inFlight[coalesceKey] = task
+        defer { Self.inFlight[coalesceKey] = nil }
+        return try await task.value
     }
+
+    /// GETs on the wire, by URL and credential.
+    private static var inFlight: [String: Task<(data: Data, response: HTTPURLResponse), Error>] = [:]
 
     /// The longest a 429 retry will wait before giving up instead: retrying
     /// early only earns another 429.
@@ -382,6 +418,9 @@ struct NodelocHTTP {
                envelope.code == nil || envelope.code == "unauthorized" {
                 Self.onUnauthorized?()
             }
+            DiscourseError.lastErrorBody = data
+            DiscourseError.lastRetryAfter = http.statusCode == 429
+                ? http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) : nil
             throw DiscourseError.badResponse(http.statusCode, message: envelope.message, code: envelope.code)
         }
         return (data, http)
@@ -495,3 +534,4 @@ nonisolated enum NodelocJSON {
         (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
     }
 }
+

@@ -64,7 +64,7 @@ struct ChatUserPickerSheet: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.45))
+                .foregroundStyle(Theme.textFaint)
             TextField("搜索用户名", text: $searchText)
                 .font(Theme.body(15))
                 .autocorrectionDisabled()
@@ -93,10 +93,10 @@ struct ChatUserPickerSheet: View {
                             Image(systemName: "xmark")
                                 .font(.system(size: 9, weight: .bold))
                         }
-                        .foregroundStyle(Theme.bg)
+                        .foregroundStyle(Theme.onAccent)
                         .padding(.horizontal, 10)
                         .frame(height: 30)
-                        .background(Theme.accent, in: Capsule())
+                        .background(Theme.accentFill, in: Capsule())
                     }
                     .buttonStyle(.pressable)
                 }
@@ -132,7 +132,7 @@ struct ChatUserPickerSheet: View {
                                     .lineLimit(1)
                                 Text("@\(user.username)")
                                     .font(Theme.body(12))
-                                    .foregroundStyle(Theme.muted(0.55))
+                                    .foregroundStyle(Theme.textMuted)
                                     .lineLimit(1)
                             }
 
@@ -140,9 +140,9 @@ struct ChatUserPickerSheet: View {
 
                             Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 18))
-                                .foregroundStyle(isPicked ? Theme.accent : Theme.muted(0.3))
+                                .foregroundStyle(isPicked ? Theme.accent : Theme.textFaint)
                         }
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, Theme.pagePadding)
                         .padding(.vertical, 11)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
@@ -153,7 +153,7 @@ struct ChatUserPickerSheet: View {
                 if results.isEmpty, !searchText.isEmpty, !isSearching {
                     Text("没有找到用户")
                         .font(Theme.body(13))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .padding(.top, 30)
                 }
             }

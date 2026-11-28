@@ -102,6 +102,15 @@ enum DiscourseShape {
 
     // MARK: Topic lists
 
+    /// `card_media` back into the snake-cased shape the list decoder expects.
+    static func cardMediaObject(_ media: NLCardMedia) -> Any {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        guard let data = try? encoder.encode(media),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return NSNull() }
+        return object
+    }
+
     static func topicListItem(_ topic: NLTopicSummary) -> Object {
         let nodeID = state.nodeID(forSlug: topic.nodeSlug)
         state.setNode(slug: topic.nodeSlug, topicID: topic.id)
@@ -132,6 +141,7 @@ enum DiscourseShape {
             "posters": [["user_id": authorID, "description": "Original Poster"] as Object],
         ]
         if let image = topic.imageUrl { object["image_url"] = image }
+        if let media = topic.cardMedia { object["card_media"] = cardMediaObject(media) }
         // The first post's id and the reader's vote let the row vote in place.
         if let firstPost = topic.firstPostId {
             let viewerVote = state.overrides(for: firstPost)?.viewerVote ?? topic.viewerVote ?? 0
@@ -242,6 +252,8 @@ enum DiscourseShape {
             "vote_direction": vote(direction: viewerVote),
             "can_vote_down": !yours,
             "user_title": value(post.authorTitle),
+            "user_title_color": value(post.authorTitleStyle?.color),
+            "user_title_effect": value(post.authorTitleStyle?.effect),
             // The server's own answer when it sent one (topic pages do).
             "can_edit": post.canEdit ?? (!deleted && (yours || canModerate)),
             "can_delete": post.canDelete ?? (!deleted && (yours || canModerate)),
@@ -260,6 +272,15 @@ enum DiscourseShape {
         }
         if post.authorBlocked == true {
             object["ignored_post_placeholder"] = true
+        }
+        // Hidden: everyone sees the placeholder; the author and managers get
+        // the content and why (`hidden_reason`, `hidden_note`), and the
+        // author whether an edit re-judges it.
+        if post.hidden == true, !deleted {
+            object["hidden"] = true
+            object["hidden_reason"] = value(post.hiddenReason)
+            object["hidden_note"] = value(post.hiddenNote)
+            object["rejudge"] = post.rejudge ?? false
         }
         if let reports = post.reportCount { object["report_count"] = reports }
         if let item = post.reviewItemId { object["review_item_id"] = item }
@@ -297,7 +318,13 @@ enum DiscourseShape {
                 object["polls_votes"] = votes
             }
             if post.postNumber == 1, let lottery {
-                object["lottery"] = self.lottery(lottery)
+                // The lottery JSON has no creator, but the backend only lets a
+                // post's author attach one (`CreateLottery`), so its post's
+                // author is the creator.
+                let isCreator = me.map { me in
+                    post.authorId.map { $0 == me.id } ?? isAuthor
+                } ?? false
+                object["lottery"] = self.lottery(lottery, isOwner: isCreator)
             }
             if let redEnvelope, post.postNumber > 1,
                let claim = redEnvelope.claims?.first(where: { $0.postId == post.id }) {
@@ -325,11 +352,14 @@ enum DiscourseShape {
             "created_at": time(topic.createdAt),
             "post_stream": ["posts": posts, "stream": detail.posts.map(\.id)] as Object,
             "closed": topic.closed ?? false,
+            "featured": topic.featured ?? false,
+            "has_trade": topic.hasTrade ?? false,
             "archived": false,
             "pinned": topic.pinned ?? false,
             "unpinned": false,
             "pinned_globally": false,
             "archetype": "regular",
+            "tags": topic.tags ?? [],
             "details": [
                 "can_edit": first?.canEdit ?? (isAuthor || canModerate),
                 "can_delete": first?.canDelete ?? (isAuthor || canModerate),
@@ -367,7 +397,7 @@ enum DiscourseShape {
             "at": time(removal.at),
             "reputation_penalty": value(removal.reputationPenalty),
             "refunded": removal.refunded ?? false,
-            "strikes_90d": value(removal.strikes90d),
+            "strikes_90d": value(removal.strikes90D),
             "appealable": removal.appealable ?? false,
             "appealed": removal.appealed ?? false,
             "appeal_deadline": time(removal.appealDeadline),
@@ -444,10 +474,19 @@ enum DiscourseShape {
         return object
     }
 
-    static func lottery(_ lottery: NLLottery) -> Object {
-        let me = state.me?.username.lowercased()
+    static func lottery(_ lottery: NLLottery, isOwner: Bool = false) -> Object {
+        let me = state.me
+        let myName = me?.username.lowercased()
         let participants = lottery.participants ?? []
         let mine = lottery.myTickets ?? 0
+        func holder(_ holder: NLLottery.Holder) -> Object {
+            [
+                "username": holder.username,
+                "avatar_template": value(holder.avatarUrl),
+                "tickets": value(holder.tickets),
+                "joined_at": time(holder.joinedAt),
+            ]
+        }
         var winners: [Object] = []
         for prize in lottery.prizes ?? [] {
             for winner in prize.winners ?? [] {
@@ -465,23 +504,29 @@ enum DiscourseShape {
             "post_id": value(lottery.postId),
             "min_participants": value(lottery.minParticipants),
             "max_participants": (lottery.maxParticipants ?? 0) == 0 ? 1_000_000 : lottery.maxParticipants!,
+            "min_tickets_per_user": value(lottery.minTickets),
             "max_tickets_per_user": value(lottery.maxTickets),
             "min_trust_level": value(lottery.minTrustLevel),
             "draw_at": time(lottery.drawAt),
+            "drawn_at": time(lottery.drawnAt),
             "status": value(lottery.status),
             "levels": (lottery.prizes ?? []).enumerated().map { index, prize -> Object in
-                ["id": index + 1, "name": value(prize.name), "prize": value(prize.prize), "quantity": value(prize.quantity)]
+                [
+                    "id": index + 1, "name": value(prize.name), "prize": value(prize.prize),
+                    "quantity": value(prize.quantity), "winners": (prize.winners ?? []).map(holder),
+                ]
             },
             "tickets_count": value(lottery.ticketCount),
             "participants_count": value(lottery.participantCount),
             "user_tickets": mine,
-            "is_participating": mine > 0 || participants.contains { $0.username.lowercased() == me },
+            "is_participating": mine > 0 || participants.contains { $0.username.lowercased() == myName },
+            "is_owner": isOwner,
+            "viewer_trust_level": value(me?.trustLevel),
             "can_draw": false,
             "can_manage": false,
-            "can_close": false,
-            "participants": participants.map { holder -> Object in
-                ["username": holder.username, "avatar_template": value(holder.avatarUrl), "tickets": value(holder.tickets)]
-            },
+            // `DELETE /api/v1/lotteries/{id}` is `httpx.Admin`.
+            "can_close": me?.role == "admin",
+            "participants": participants.map(holder),
             "winners": winners,
         ]
     }
@@ -535,7 +580,9 @@ enum DiscourseShape {
             "name": value(user.name),
             "avatar_template": value(avatar ?? user.avatarUrl),
             "created_at": time(user.createdAt),
-            "title": value(user.title ?? user.tierName),
+            // 头衔 and 段位 are separate facts; the profile shows both.
+            "title": value(user.title),
+            "tier_name": value(user.tierName),
             "trust_level": value(user.trustLevel),
             "admin": user.role == "admin",
             "moderator": user.role == "moderator",
@@ -548,6 +595,9 @@ enum DiscourseShape {
             "is_followed": user.viewerFollowing ?? profile.viewer?.following ?? false,
             "ignored": user.viewerBlocked ?? profile.viewer?.blocked ?? false,
         ]
+        // Whether the viewer may start a chat with them, and why not.
+        if let canMessage = user.canMessage { object["can_message"] = canMessage }
+        if let note = user.messageNote, !note.isEmpty { object["message_note"] = note }
         if let cover = user.coverUrl, !cover.isEmpty {
             object["profile_background_upload_url"] = cover
             object["card_background_upload_url"] = cover
@@ -602,6 +652,13 @@ enum DiscourseShape {
             if let body = data?["body"]?.string { payload["body"] = body }
         }
         if let topicTitle { payload["topic_title"] = topicTitle }
+        if isModeration(kind: item.kind, data: data) { payload["moderation"] = true }
+        // Where a system or moderation notification points: routed by these,
+        // never by its title.
+        if let path = data?["path"]?.string, !path.isEmpty { payload["path"] = path }
+        if let itemID = data?["item_id"]?.int { payload["item_id"] = itemID }
+        if let node = data?["node"]?.string, !node.isEmpty { payload["node"] = node }
+        if let postID = item.postId { payload["post_id"] = postID }
         if let actor = item.actor, item.kind != "system" {
             payload["display_username"] = item.actorCount.map { $0 > 1 ? "\(actor) +\($0 - 1)" : actor } ?? actor
             payload["username"] = actor
@@ -616,6 +673,16 @@ enum DiscourseShape {
             "post_number": value(item.postNumber),
             "slug": "topic",
         ]
+    }
+
+    /// Notifications about running a node or the site (版务): reports, held
+    /// posts, appeals, backlogs, and the outcome of the reader's own report.
+    /// The backend gives these their own kind, `moderation`, and its 管理
+    /// filter is exactly that kind (notify/moderation.go `KindModeration`,
+    /// service.go `ListFiltered`); what was done to the reader's own content
+    /// arrives as `system` and stays there. `data` is kept for the call sites.
+    static func isModeration(kind: String, data: JSONValue?) -> Bool {
+        kind == "moderation"
     }
 
     // MARK: Chat

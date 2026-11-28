@@ -2,8 +2,11 @@
 //  ProfileEditPage.swift
 //  nodeloc
 //
-//  Edits the signed-in user's profile: avatar, card background, name, bio,
-//  website, location, title, and featured badges.
+//  个人资料 (App-iOS-EditProfile): the banner and avatar on top, then 资料
+//  (昵称, 用户名, 自我介绍 with its counter, 网站, 地点) and 展示 (头衔,
+//  签名). 保存 is the bar's confirmation button. Limits are the server's;
+//  a 422 shows under its field. The design's 展示的成就徽章 row is left out:
+//  the server has no setting for which badges to feature.
 //
 
 import PhotosUI
@@ -12,128 +15,155 @@ import SwiftUI
 struct ProfileEditPage: View {
     let onClose: () -> Void
 
+    @Environment(AppState.self) private var app
     private var store = ProfileEditStore.shared
 
     @State private var avatarItem: PhotosPickerItem?
     @State private var cardItem: PhotosPickerItem?
+    @State private var isSavingText = false
+    @State private var pickingAvatar = false
+    @State private var pickingCard = false
 
     init(onClose: @escaping () -> Void) {
         self.onClose = onClose
     }
 
+    private var errors: [String: String] {
+        store.localErrors.merging(store.fieldErrors) { local, _ in local }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            ScrollView {
-                VStack(spacing: 0) {
-                    imagesSection
-                    textSection
-                    titleSection
-                    flairSection
-                }
-                .padding(.bottom, 32)
-            }
-            .scrollIndicators(.hidden)
+        Form {
+            imagesSection
+            textSection
+            titleSection
         }
-        .background(Theme.bg.ignoresSafeArea())
+        // Backstop: no single child may set the page's width.
+        .clampedToWidth()
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
+        .navigationTitle(AppString("个人资料"))
+        .navigationBarTitleDisplayMode(.inline)
+        .primaryToolbarAction(
+            AppString("保存"),
+            isEnabled: store.isDirty && store.localErrors.isEmpty,
+            isWorking: isSavingText || store.isSaving
+        ) {
+            Task {
+                isSavingText = true
+                let saved = await store.saveTextFields()
+                isSavingText = false
+                if saved {
+                    ToastCenter.shared.show(AppString("资料已保存"))
+                    onClose()
+                }
+            }
+        }
+        .photosPicker(isPresented: $pickingAvatar, selection: $avatarItem, matching: .images)
+        .photosPicker(isPresented: $pickingCard, selection: $cardItem, matching: .images)
         .task { await store.load() }
+        // Leaving by the system back button still saves what is valid, as before.
+        .onDisappear {
+            if store.isDirty, store.localErrors.isEmpty { Task { await store.saveTextFields() } }
+        }
+        .onChange(of: store.name) { store.fieldErrors["name"] = nil }
+        .onChange(of: store.bio) { store.fieldErrors["bio"] = nil }
+        .onChange(of: store.website) { store.fieldErrors["website"] = nil }
+        .onChange(of: store.location) { store.fieldErrors["location"] = nil }
+        // Uploads report failures through `errorText`.
+        .onChange(of: store.errorText) { _, text in
+            guard let text else { return }
+            ToastCenter.shared.show(text)
+            store.errorText = nil
+        }
         .onChange(of: avatarItem) { _, item in
             guard let item else { return }
             Task {
                 if let (data, mime) = await imageData(item) { await store.uploadAvatar(data, mimeType: mime) }
+                avatarItem = nil
             }
         }
         .onChange(of: cardItem) { _, item in
             guard let item else { return }
             Task {
                 if let (data, mime) = await imageData(item) { await store.uploadCardBackground(data, mimeType: mime) }
+                cardItem = nil
             }
         }
     }
 
-    // MARK: Header
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button {
-                Task { await store.saveTextFields(); onClose() }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-
-            Text("个人资料").font(Theme.body(15, weight: .medium))
-            Spacer()
-            if store.isSaving {
-                ProgressView().controlSize(.small).tint(Theme.accent)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
-
-    // MARK: Avatar + card background
+    // MARK: Banner + avatar
 
     private var imagesSection: some View {
-        VStack(spacing: 16) {
-            // Card background behind the avatar, mirroring the profile card.
+        Section {
             ZStack(alignment: .bottomLeading) {
                 cardBackground
-                RemoteAvatar(
-                    url: store.avatarURL,
-                    letter: String(store.name.prefix(1)).uppercased(),
-                    variant: abs(store.name.hashValue),
-                    size: 76
-                )
-                .overlay(Circle().strokeBorder(Theme.bg, lineWidth: 3))
+                    .overlay(alignment: .topTrailing) { backgroundMenu.padding(10) }
+                HStack(alignment: .bottom, spacing: 14) {
+                    Button { pickingAvatar = true } label: {
+                        RemoteAvatar(
+                            url: store.avatarURL,
+                            letter: String(store.name.prefix(1)).uppercased(),
+                            variant: abs(store.name.hashValue),
+                            size: 84
+                        )
+                        .overlay(Circle().strokeBorder(Color(.systemGroupedBackground), lineWidth: 4))
+                        .overlay(alignment: .bottomTrailing) {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(Color(.systemBackground))
+                                .frame(width: 30, height: 30)
+                                .background(Color(.label), in: Circle())
+                                .overlay(Circle().strokeBorder(Color(.systemGroupedBackground), lineWidth: 3))
+                                .offset(x: 2, y: 2)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(AppString("更换头像"))
+
+                    Text(AppString("头像 400×400 以上，背景建议 3:1。"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 .padding(.leading, 16)
-                .offset(y: 24)
+                .offset(y: 34)
             }
-            .padding(.bottom, 24)
+            .padding(.bottom, 34)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        }
+    }
 
-            HStack(spacing: 10) {
-                PhotosPicker(selection: $avatarItem, matching: .images) {
-                    Label("更换头像", systemImage: "person.crop.circle")
-                        .font(Theme.body(13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Theme.surface, in: Capsule())
-                }
-                .buttonStyle(.pressable)
-
-                PhotosPicker(selection: $cardItem, matching: .images) {
-                    Label("更换背景", systemImage: "photo")
-                        .font(Theme.body(13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Theme.surface, in: Capsule())
-                }
-                .buttonStyle(.pressable)
+    /// 更换背景: the photo picker, and 移除背景 when there is one.
+    private var backgroundMenu: some View {
+        Menu {
+            Button { pickingCard = true } label: {
+                Label(AppString("从相册选择"), systemImage: "photo.on.rectangle")
             }
-            .padding(.horizontal, 16)
-
             if store.cardBackgroundURL != nil {
                 Button(role: .destructive) {
                     Task { await store.removeCardBackground() }
                 } label: {
-                    Text("移除背景").font(Theme.body(12)).foregroundStyle(Theme.danger)
+                    Label(AppString("移除背景"), systemImage: "trash")
                 }
-                .buttonStyle(.pressable)
             }
+        } label: {
+            Label(AppString("更换背景"), systemImage: "photo")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(.black.opacity(0.55), in: Capsule())
         }
-        .padding(.top, 8)
     }
 
     @ViewBuilder
     private var cardBackground: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
         Group {
             if let url = store.cardBackgroundURL {
-                CachedRemoteImage(url: url) { $0.resizable().scaledToFill() } placeholder: {
+                CachedRemoteImage(url: url) { $0.resizable() } placeholder: {
                     Theme.surface
                 }
             } else {
@@ -143,20 +173,59 @@ struct ProfileEditPage: View {
                 )
             }
         }
-        .frame(height: 120)
-        .frame(maxWidth: .infinity)
-        .clipShape(shape)
-        .padding(.horizontal, 16)
+        // `filledBanner`, not `.scaledToFill()` + `.frame` + clip: a filled
+        // wide image reports its scaled width as the view's size, and that
+        // widened the whole page. The box is sized first and the image hung in it.
+        .filledBanner(height: 132, clip: shape)
     }
 
-    // MARK: Text fields
+    // MARK: 资料
 
     private var textSection: some View {
-        SettingsSection(title: AppString("资料")) {
-            SettingsTextRow(title: AppString("昵称"), placeholder: AppString("你的名字"), text: bindingName)
-            SettingsMultilineRow(title: AppString("自我介绍"), placeholder: AppString("介绍一下自己"), text: bindingBio)
-            SettingsTextRow(title: AppString("网站"), placeholder: "https://", text: bindingWebsite)
-            SettingsTextRow(title: AppString("地点"), placeholder: AppString("所在地"), text: bindingLocation)
+        Section {
+            field(AppString("昵称"), placeholder: AppString("你的名字"), text: bindingName, key: "name")
+            LabeledContent(AppString("用户名")) {
+                Text(verbatim: "@\(DiscourseAuth.shared.username ?? "")")
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(AppString("自我介绍"))
+                    Spacer()
+                    Text(verbatim: "\(store.bio.count) / \(ProfileEditStore.bioLimit)")
+                        .monospacedDigit()
+                        .foregroundStyle(store.bio.count > ProfileEditStore.bioLimit ? Theme.danger : .secondary)
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                TextField(AppString("介绍一下自己"), text: bindingBio, axis: .vertical)
+                    .lineLimit(3...8)
+                FieldErrorText(message: errors["bio"])
+            }
+            .padding(.vertical, 2)
+            field(AppString("网站"), placeholder: "https://", text: bindingWebsite, key: "website", keyboard: .URL)
+            field(AppString("地点"), placeholder: AppString("所在地"), text: bindingLocation, key: "location")
+        } header: {
+            Text(AppString("资料"))
+        }
+    }
+
+    private func field(
+        _ title: String,
+        placeholder: String,
+        text: Binding<String>,
+        key: String,
+        keyboard: UIKeyboardType = .default
+    ) -> some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            LabeledContent(title) {
+                TextField(placeholder, text: text)
+                    .multilineTextAlignment(.trailing)
+                    .keyboardType(keyboard)
+                    .textInputAutocapitalization(keyboard == .URL ? .never : .sentences)
+                    .autocorrectionDisabled(keyboard == .URL)
+            }
+            FieldErrorText(message: errors[key])
         }
     }
 
@@ -165,87 +234,64 @@ struct ProfileEditPage: View {
     private var bindingWebsite: Binding<String> { Binding(get: { store.website }, set: { store.website = $0 }) }
     private var bindingLocation: Binding<String> { Binding(get: { store.location }, set: { store.location = $0 }) }
 
-    // MARK: Title
+    // MARK: 展示
 
-    /// Wraps the title choice so it can drive a `SettingsPickerRow`. The empty
-    /// string is the "无" (clear) option.
-    private struct TitleChoice: Identifiable, Equatable {
-        let value: String
-        var id: String { value }
-        var label: String { value.isEmpty ? AppString("无") : value }
+    /// One picker choice: a group whose 头衔 to wear, or `id == 0` for none.
+    private struct TitleChoice: Identifiable, Hashable {
+        let id: Int
+        let label: String
     }
 
     private var titleChoices: [TitleChoice] {
-        [TitleChoice(value: "")] + store.titleOptions.map { TitleChoice(value: $0) }
+        [TitleChoice(id: 0, label: AppString("无"))] + store.titleGroups.map { group in
+            let name = group.label ?? group.name
+            guard let title = group.title, !title.isEmpty else { return TitleChoice(id: group.id, label: name) }
+            return TitleChoice(id: group.id, label: title == name ? title : "\(title) · \(name)")
+        }
     }
 
-    @ViewBuilder
+    /// 头衔 (the personal one, admin-given, read-only; or the group title you
+    /// wear) and 签名.
     private var titleSection: some View {
-        SettingsSection(
-            title: AppString("头衔"),
-            footer: store.titleOptions.isEmpty ? AppString("只有可授予头衔的徽章才能设为头衔。") : nil
-        ) {
-            if store.titleOptions.isEmpty {
-                // Nothing to choose: a plain, non-tappable row.
-                HStack {
-                    Text("头衔").font(Theme.body(14)).foregroundStyle(Theme.text)
-                    Spacer(minLength: 8)
-                    Text("无").font(Theme.body(13)).foregroundStyle(Theme.muted(0.4))
+        Section {
+            if let personal = store.title {
+                LabeledContent(AppString("头衔")) {
+                    UserTitleChip(title: personal, compact: true)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 13)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                SettingsPickerRow(
-                    title: AppString("头衔"),
-                    options: titleChoices,
-                    label: \.label,
-                    selection: titleBinding
-                )
             }
+            if !store.titleGroups.isEmpty {
+                Picker(store.title == nil ? AppString("头衔") : AppString("用户组头衔"), selection: titleBinding) {
+                    ForEach(titleChoices) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.navigationLink)
+            }
+            NavigationLink {
+                SignatureEditPage()
+            } label: {
+                LabeledContent(AppString("签名")) {
+                    Text(store.signature.isEmpty ? AppString("未设置") : AppString("已设置"))
+                }
+            }
+        } header: {
+            Text(AppString("展示"))
+        } footer: {
+            Text(titleFooter)
         }
+    }
+
+    private var titleFooter: String {
+        if store.title != nil {
+            return AppString("个人头衔由管理员授予，会优先显示；没有个人头衔时显示所选用户组的头衔。签名显示在你发的主题首帖下面。")
+        }
+        return AppString("头衔从你所在的用户组里选；签名显示在你发的主题首帖下面。")
     }
 
     private var titleBinding: Binding<TitleChoice> {
         Binding(
-            get: { TitleChoice(value: store.title ?? "") },
-            set: { choice in Task { await store.setTitle(choice.value.isEmpty ? nil : choice.value) } }
-        )
-    }
-
-    // MARK: 资质 (flair group)
-
-    /// Wraps a flair choice for `SettingsPickerRow`. `id == nil` is the "无" row.
-    private struct FlairChoice: Identifiable, Equatable {
-        let group: UserGroupFlair?
-        var id: Int { group?.id ?? -1 }
-        var label: String { group?.displayName ?? AppString("无") }
-    }
-
-    @ViewBuilder
-    private var flairSection: some View {
-        if !store.flairOptions.isEmpty {
-            SettingsSection(
-                title: AppString("资质"),
-                footer: AppString("资质来自你所在的用户组，会显示在你的头像旁。")
-            ) {
-                SettingsPickerRow(
-                    title: AppString("资质"),
-                    options: flairChoices,
-                    label: \.label,
-                    selection: flairBinding
-                )
-            }
-        }
-    }
-
-    private var flairChoices: [FlairChoice] {
-        [FlairChoice(group: nil)] + store.flairOptions.map { FlairChoice(group: $0) }
-    }
-
-    private var flairBinding: Binding<FlairChoice> {
-        Binding(
-            get: { FlairChoice(group: store.currentFlairGroup) },
-            set: { choice in Task { await store.setFlairGroup(choice.group?.id) } }
+            get: { titleChoices.first { $0.id == store.primaryGroupID } ?? titleChoices[0] },
+            set: { choice in Task { await store.setPrimaryGroup(choice.id) } }
         )
     }
 
@@ -256,5 +302,55 @@ struct ProfileEditPage: View {
         // PNG magic number, else treat as JPEG — matches the composer's handling.
         let mime = data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
         return (data, mime)
+    }
+}
+
+/// 签名: up to 300 characters of markdown under the first post of your
+/// topics. 保存 in the bar; the server's refusal under the field.
+struct SignatureEditPage: View {
+    @Environment(\.dismiss) private var dismiss
+    private var store = ProfileEditStore.shared
+    @State private var text = ""
+    @State private var loaded = false
+
+    init() {}
+
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var tooLong: Bool { trimmed.count > ProfileEditStore.signatureLimit }
+
+    var body: some View {
+        Form {
+            Section {
+                TextField(AppString("一句话签名，支持 Markdown"), text: $text, axis: .vertical)
+                    .lineLimit(4...10)
+                FieldErrorText(message: tooLong
+                    ? AppString("签名最多 \(ProfileEditStore.signatureLimit) 个字符")
+                    : store.fieldErrors["signature"])
+            } footer: {
+                HStack {
+                    Text(AppString("显示在你发的主题首帖下面。留空就不显示。"))
+                    Spacer()
+                    Text(verbatim: "\(trimmed.count) / \(ProfileEditStore.signatureLimit)")
+                        .monospacedDigit()
+                }
+            }
+        }
+        .navigationTitle(AppString("签名"))
+        .navigationBarTitleDisplayMode(.inline)
+        .primaryToolbarAction(
+            AppString("保存"),
+            isEnabled: loaded && !tooLong && trimmed != store.signature,
+            isWorking: store.isSaving
+        ) {
+            Task {
+                if await store.saveSignature(trimmed) { dismiss() }
+            }
+        }
+        .onAppear {
+            guard !loaded else { return }
+            text = store.signature
+            store.fieldErrors["signature"] = nil
+            loaded = true
+        }
     }
 }

@@ -39,6 +39,18 @@ enum LinkRouter {
         /// A group's PM inbox (staff/moderators), where group-message
         /// notifications point; opens the inbox filtered to that group.
         case groupInbox(group: String)
+        /// `/rank`, `/points`, `/invites` — 财富榜, 能量明细, 邀请好友.
+        case leaderboard, energy, invites
+        /// `/review[?item=N]` (the site queue, as `/admin/review`) and
+        /// `/n/<slug>/manage#review[?item=N]` (a node's queue): where
+        /// moderation notifications point.
+        case reviewQueue(node: String?, item: Int?)
+        /// `/appeal` — the account status page, where penalty and appeal
+        /// notifications point.
+        case accountStatus
+        /// `/reset-password?token=…` — the link in the password-reset email;
+        /// set the new password natively.
+        case resetPassword(token: String)
         /// Anything else, including nodeloc pages with no native equivalent.
         case web(URL)
         /// Not openable in a web view (mailto:, tel:, custom schemes).
@@ -51,6 +63,16 @@ enum LinkRouter {
         guard isNodeloc(url) else { return .web(url) }
 
         let segments = url.pathComponents.filter { $0 != "/" }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+
+        // /go?u=… and /leave?url=… are the site's leave-the-site interstitial.
+        // When what they wrap is the site itself, open that natively; anything
+        // else keeps the interstitial, which is the site's own safety check.
+        if segments.count == 1, segments[0] == "go" || segments[0] == "leave",
+           let inner = query.first(where: { $0.name == "u" || $0.name == "url" })?.value,
+           let innerURL = URL(string: inner), isNodeloc(innerURL) {
+            return destination(for: innerURL)
+        }
 
         // /t/<slug>/<id> and /t/topic/<id>, plus the bare /t/<id> form.
         if segments.first == "t" {
@@ -58,8 +80,14 @@ enum LinkRouter {
             // post number, as in /t/slug/123/45.
             let numbers = segments.dropFirst().compactMap(Int.init)
             if let id = numbers.first {
-                // The number after the id, when present, is the post number.
-                let postNumber = numbers.count > 1 ? numbers[1] : nil
+                // The number after the id, when present, is the post number;
+                // the site's own links put it in `?post=N` or `#post-N`.
+                let postNumber = numbers.count > 1
+                    ? numbers[1]
+                    : query.first(where: { $0.name == "post" })?.value.flatMap { Int($0) }
+                        ?? url.fragment.flatMap { fragment in
+                            fragment.hasPrefix("post-") ? Int(fragment.dropFirst(5)) : nil
+                        }
                 return .topic(id: id, postNumber: postNumber)
             }
         }
@@ -91,6 +119,20 @@ enum LinkRouter {
             }
         }
 
+        // The review queues: /review and /admin/review site-wide,
+        // /n/<slug>/manage#review for a node; `item` opens one item.
+        let item = query.first(where: { $0.name == "item" })?.value.flatMap { Int($0) }
+        if segments == ["review"] || segments == ["admin", "review"] {
+            return .reviewQueue(node: nil, item: item)
+        }
+        if segments.first == "n", segments.count >= 3, segments[2] == "manage",
+           url.fragment == "review" || item != nil {
+            return .reviewQueue(node: segments[1], item: item)
+        }
+        if segments == ["appeal"] {
+            return .accountStatus
+        }
+
         // /n/<slug> — discourse-community's node route, which appears in real
         // post bodies. /c/<slug>/<id> is core Discourse's equivalent.
         if segments.first == "n", segments.count >= 2 {
@@ -108,6 +150,22 @@ enum LinkRouter {
         // anything deeper is left to the web view rather than guessed at.
         if segments.first == "f", segments.count == 3 {
             return .customFeed(username: segments[1], slug: segments[2])
+        }
+
+        // /rank, /points and /invites have native pages. Notifications about
+        // energy and invite rewards point at the last two.
+        if segments.count == 1, segments[0] == "reset-password",
+           let token = query.first(where: { $0.name == "token" })?.value, !token.isEmpty {
+            return .resetPassword(token: token)
+        }
+
+        if segments.count == 1 {
+            switch segments[0] {
+            case "rank": return .leaderboard
+            case "points": return .energy
+            case "invites": return .invites
+            default: break
+            }
         }
 
         // /tag/<slug>[/<id>] — cooked `#tag` hrefs, and the same shape when one
@@ -141,8 +199,54 @@ final class BrowserState {
 
     var url: URL?
 
-    func open(_ url: URL) { self.url = url }
+    /// The browsers of the presentation hosts on screen (covers and sheets,
+    /// see `appPresentationHost`), innermost last.
+    ///
+    /// Code that opens a page without a view's environment (`openWeb`) used
+    /// to open the root's browser, whose cover then knocked down whatever
+    /// cover was showing — 关联账户's 连接 popped back to 设置 and came back.
+    /// The shared browser now hands the page to the innermost host.
+    private var hosts: [BrowserState] = []
+
+    func open(_ url: URL) {
+        if self === Self.shared, let host = hosts.last {
+            host.url = url
+        } else {
+            self.url = url
+        }
+    }
+
     func close() { url = nil }
+
+    /// Hosts that present the app's task overlays (`Overlay.presentsFromTopHost`).
+    /// A host that *is* one of those overlays doesn't, so it isn't listed here.
+    private var overlayHosts: [ObjectIdentifier] = []
+
+    func register(_ host: BrowserState, hostsOverlays: Bool = true) {
+        guard self === Self.shared, !hosts.contains(where: { $0 === host }) else { return }
+        hosts.append(host)
+        if hostsOverlays { overlayHosts.append(ObjectIdentifier(host)) }
+    }
+
+    func unregister(_ host: BrowserState) {
+        hosts.removeAll { $0 === host }
+        overlayHosts.removeAll { $0 == ObjectIdentifier(host) }
+    }
+
+    /// The host an app overlay opened now should present from: the innermost
+    /// one that presents overlays, or nil for the root (`MainView`).
+    var topOverlayHost: ObjectIdentifier? {
+        let ids = Set(overlayHosts)
+        return hosts.last(where: { ids.contains(ObjectIdentifier($0)) }).map(ObjectIdentifier.init)
+    }
+
+    /// Whether this host is the innermost one on screen; the root (no
+    /// hosts) when `host` is nil. Used for anything only the top screen
+    /// should present, like the guest login prompt.
+    func isTop(_ host: BrowserState?) -> Bool {
+        guard let host else { return hosts.isEmpty }
+        return hosts.last === host
+    }
 }
 
 extension LinkRouter {
@@ -162,7 +266,9 @@ extension LinkRouter {
     ) -> Bool {
         switch destination(for: url) {
         case .topic(let id, let postNumber):
-            app.openTopic(id: id, postNumber: postNumber)
+            // Onto the page stack when it's up — the reader overlay draws
+            // under it and would open out of sight.
+            app.openTopicPage(id: id, postNumber: postNumber)
         case .profile(let username):
             app.openProfile(username: username)
         case .node(let slug):
@@ -170,21 +276,24 @@ extension LinkRouter {
         case .customFeed(let username, let slug):
             app.openCustomFeed(username: username, slug: slug)
         case .tag(let slug):
-            let reference = PostReference(
-                kind: .tag,
-                slug: slug,
-                label: slug,
-                href: "/tag/\(slug)"
-            )
-            if let openReference {
-                openReference(reference)
-            } else {
-                app.routedReference = reference
-            }
+            // Its own page now (App-iOS-Tag), not a reference sheet.
+            app.pushPage(.tag(slug))
         case .app(let slug):
             app.openApp(slug: slug)
         case .groupInbox(let group):
             app.openGroupInbox(group: group)
+        case .reviewQueue(let node, let item):
+            app.pushPage(.reviewQueue(node: node, item: item))
+        case .accountStatus:
+            app.pushPage(.accountStatus)
+        case .leaderboard:
+            app.pushPage(.leaderboard)
+        case .energy:
+            app.pushPage(.energy)
+        case .invites:
+            app.pushPage(.invite)
+        case .resetPassword(let token):
+            app.resetPasswordToken = ResetPasswordToken(value: token)
         case .web(let url):
             browser.open(url)
         case .external:
@@ -225,13 +334,42 @@ struct BrowserView: View {
         ZStack(alignment: .top) {
             // The web content owns the whole surface; the chrome floats on top
             // and gets out of the way while reading.
+            //
+            // Laid out below the chrome's row rather than under it: a site's
+            // own sticky header sat behind the glass and couldn't be read or
+            // tapped. A content inset wouldn't help there — fixed-position
+            // elements ignore it — so the web view simply starts lower.
             BrowserWebView(url: url, model: model)
                 .ignoresSafeArea(edges: .bottom)
+                .padding(.top, chromeRowHeight)
+
+            if let loadError = model.loadError {
+                VStack(spacing: 12) {
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Theme.textFaint)
+                    Text(AppString("页面加载失败"))
+                        .font(Theme.body(15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(loadError)
+                        .font(Theme.body(13))
+                        .foregroundStyle(Theme.textMuted)
+                        .multilineTextAlignment(.center)
+                    Button(AppString("重试")) { model.retry(fallback: url) }
+                        .font(Theme.body(14, weight: .semibold))
+                        .foregroundStyle(Theme.accent700)
+                }
+                .padding(.horizontal, 32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Theme.bg)
+                .padding(.top, chromeRowHeight)
+            }
 
             if model.estimatedProgress < 1 {
                 ProgressView(value: model.estimatedProgress)
                     .progressViewStyle(.linear)
                     .tint(Theme.accent)
+                    .padding(.top, chromeRowHeight)
             }
 
             topChrome
@@ -241,6 +379,9 @@ struct BrowserView: View {
     }
 
     // MARK: Floating chrome
+
+    /// The top row's full height: 8pt above a 48pt glass control.
+    private let chromeRowHeight: CGFloat = 56
 
     /// Telegram-style top row: close — full-width host capsule — ellipsis menu.
     /// While reading, the buttons fade out (keeping their layout slots, so the
@@ -278,7 +419,7 @@ struct BrowserView: View {
                 if model.currentURL?.scheme == "https" {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 9))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 Text(model.currentURL?.host ?? url.host ?? "")
                     .font(Theme.body(12, weight: .semibold))
@@ -422,7 +563,7 @@ struct BrowserView: View {
     private func toolIcon(_ systemName: String, enabled: Bool) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 16, weight: .medium))
-            .foregroundStyle(enabled ? Theme.text : Theme.muted(0.3))
+            .foregroundStyle(enabled ? Theme.text : Theme.textFaint)
             .frame(width: 40, height: 34)
             .contentShape(Rectangle())
     }
@@ -447,9 +588,25 @@ final class BrowserWebModel {
 
     fileprivate weak var webView: WKWebView?
 
+    /// Why the last navigation failed to load at all, shown over the blank
+    /// web view; nil while a page is loading or loaded.
+    var loadError: String?
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
-    func reload() { webView?.reload() }
+    func reload() { retry(fallback: nil) }
+
+    /// Reloads, or — when the very first load failed and the web view has no
+    /// page to reload — loads the URL the browser was opened with.
+    func retry(fallback: URL?) {
+        loadError = nil
+        guard let webView else { return }
+        if webView.url == nil, let target = currentURL ?? fallback {
+            webView.load(URLRequest(url: target))
+        } else {
+            webView.reload()
+        }
+    }
 
     // MARK: Text size
 
@@ -577,6 +734,24 @@ private struct BrowserWebView: UIViewRepresentable {
         func invalidate() {
             observations.forEach { $0.invalidate() }
             observations = []
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            Task { @MainActor [model] in model.loadError = nil }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            // A navigation replaced by another (a redirect, a second tap) or
+            // handed off to another app isn't a failure the reader should see.
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+            if nsError.domain == "WebKitErrorDomain", nsError.code == 102 { return }
+            let message = nsError.localizedDescription
+            Task { @MainActor [model] in model.loadError = message }
         }
 
         /// `target="_blank"` links return a nil web view from WebKit and would

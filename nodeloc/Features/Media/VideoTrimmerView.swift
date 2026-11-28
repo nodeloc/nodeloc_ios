@@ -24,7 +24,7 @@ struct ComposeVideoTile: View {
     let onRetry: () -> Void
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
 
         return poster
             .filledBanner(height: 190, clip: shape)
@@ -355,7 +355,7 @@ struct VideoTrimmerView: View {
                     set: { state.plan.asGIF = $0 }
                 ))
                 .labelsHidden()
-                .tint(Color(hex: 0x1B6BFF))
+                .tint(Theme.mediaAction)
             }
 
             if state.gifWouldClamp {
@@ -408,7 +408,7 @@ struct VideoTrimmerView: View {
                 .gesture(timelineGesture(width: width))
             }
             .frame(height: trackHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
 
             HStack {
                 Text(VideoTimeFormat.short(state.plan.startSeconds))
@@ -444,7 +444,7 @@ struct VideoTrimmerView: View {
         let width = max(0, endX - startX)
         return ZStack(alignment: .leading) {
             Rectangle()
-                .strokeBorder(Color(hex: 0xF5C518), lineWidth: 3)
+                .strokeBorder(Theme.trimSelection, lineWidth: 3)
                 .frame(width: width)
                 .offset(x: startX)
 
@@ -456,7 +456,7 @@ struct VideoTrimmerView: View {
 
     private func handle(at x: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 3, style: .continuous)
-            .fill(Color(hex: 0xF5C518))
+            .fill(Theme.trimSelection)
             .frame(width: handleWidth)
             .overlay {
                 RoundedRectangle(cornerRadius: 1)

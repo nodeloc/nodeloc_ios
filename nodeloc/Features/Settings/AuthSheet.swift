@@ -17,6 +17,10 @@
 import SwiftUI
 
 private enum SignupStep: Hashable {
+    /// App-iOS-Register: the single sign-up page.
+    case register
+    /// 忘记密码: ask for the reset mail.
+    case forgot
     case email
     case username
     case password
@@ -71,7 +75,13 @@ struct AuthFlowOverlay: View {
     @State private var activationMessage = ""
 
     @State private var isBusy = false
+    /// The server-driven 人机验证 widget, when a submit needs a token.
+    @State private var captchaGate = CaptchaGate()
     @State private var errorText: String?
+    /// Login said the account is suspended: the message, and the
+    /// credentials the account status page reads with.
+    @State private var suspendedMessage: String?
+    @State private var suspendedCredentials: AccountStatusStore.Credentials?
     /// Social sign-in options from site.json, and the one being run.
     @State private var socialProviders: [SocialAuthProvider] = []
     @State private var activeProvider: SocialAuthProvider?
@@ -106,79 +116,67 @@ struct AuthFlowOverlay: View {
                 }
         }
         .tint(Theme.accent)
+        .captchaGate(captchaGate)
+        // 注册 from anywhere opens straight on the sign-up page.
+        .onAppear { if app.authMode == .signup, path.isEmpty { path = [.register] } }
         .task { await userFields.load() }
+        .fullScreenCover(item: Binding(
+            get: { suspendedCredentials.map { SuspendedCredentialsBox(credentials: $0) } },
+            set: { if $0 == nil { suspendedCredentials = nil } }
+        )) { box in
+            // Its own stack here (it's a cover, not a pushed page): the
+            // system bar with a close button.
+            NavigationStack {
+                AccountStatusPage(credentials: box.credentials) { suspendedCredentials = nil }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button { suspendedCredentials = nil } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel(AppString("关闭"))
+                        }
+                    }
+            }
+        }
     }
 
     // MARK: - Login (root)
 
     private var loginPage: some View {
         page {
-            VStack(spacing: 0) {
-                AuthWordmark(height: 32)
-                    .padding(.bottom, 18)
+            VStack(alignment: .leading, spacing: 0) {
+                // App-iOS-Login: the title to the left, the way to 注册 under
+                // it, labelled fields, and the other methods after them.
+                Text(AppString("登录 nodeloc"))
+                    .font(Theme.heading(28, weight: .bold))
+                    .padding(.bottom, 6)
 
-                Text("登录")
-                    .font(Theme.heading(26, weight: .bold))
-                    .padding(.bottom, 8)
-
-                Text(AuthLegalCopy.attributedCompact)
-                    .font(Theme.body(13))
-                    .foregroundStyle(Theme.muted(0.6))
-                    .multilineTextAlignment(.center)
-                    .tint(Theme.accent)
-                    .padding(.bottom, 24)
-
-                // Apple keeps its own native control; everything else the
-                // site offers is one button, because the browser flow lands on
-                // Discourse's login page and *that* is where the individual
-                // provider buttons live. See the fuller note in `AuthView`.
-                VStack(spacing: 10) {
-                    if let apple = appleProvider {
-                        NativeAppleSignInButton(
-                            perform: { await signInWithApple($0) },
-                            onFallbackToWeb: { activeProvider = apple },
-                            height: SocialAuthButtonStyle.height
-                        )
-                        .disabled(isBusy)
+                HStack(spacing: 4) {
+                    Text(AppString("还没有账号？"))
+                        .foregroundStyle(Theme.textMuted)
+                    Button(AppString("免费注册")) {
+                        errorText = nil
+                        path = [.register]
                     }
-
-                    if let fallback = webProviders.first {
-                        Button {
-                            signInWithSystemBrowser(fallingBackTo: fallback)
-                        } label: {
-                            AuthButtonLabel(title: AppString("使用其他方式继续")) {
-                                AuthButtonSymbol(name: "globe")
-                            }
-                        }
-                        .buttonStyle(SocialAuthButtonStyle(filled: false))
-                        .disabled(isBusy)
-                    }
+                    .fontWeight(.bold)
+                    .foregroundStyle(Theme.accent)
                 }
-                .padding(.bottom, socialProviders.isEmpty ? 0 : 16)
+                .font(Theme.body(15))
+                .padding(.bottom, 22)
 
-                // Nothing to separate if the site offers no providers at all.
-                if !socialProviders.isEmpty {
-                    HStack(spacing: 12) {
-                        Rectangle().fill(Theme.divider).frame(height: 1)
-                        Text("或")
-                            .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.5))
-                        Rectangle().fill(Theme.divider).frame(height: 1)
-                    }
-                    .padding(.bottom, 16)
-                }
-
-                VStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AppString("用户名或邮箱"))
+                        .font(Theme.body(14, weight: .bold))
                     AuthInputField(
-                        AppString("电子邮件地址或用户名"),
+                        AppString("比如 lin_ops 或 you@example.com"),
                         text: $loginIdentifier,
                         keyboard: .emailAddress,
                         contentType: .username,
                         submitLabel: .next
                     )
-
+                    Text(AppString("密码"))
+                        .font(Theme.body(14, weight: .bold))
+                        .padding(.top, 8)
                     AuthInputField(
-                        AppString("密码"),
+                        AppString("输入密码"),
                         text: $loginPassword,
                         secure: true,
                         contentType: .password,
@@ -200,7 +198,7 @@ struct AuthFlowOverlay: View {
                         HStack {
                             Label("此账号已开启两步验证", systemImage: "lock.shield")
                                 .font(Theme.body(12))
-                                .foregroundStyle(Theme.muted(0.55))
+                                .foregroundStyle(Theme.textMuted)
                             Spacer(minLength: 8)
                             Button(usingBackupCode ? AppString("使用验证器") : AppString("使用备用码")) {
                                 usingBackupCode.toggle()
@@ -211,24 +209,72 @@ struct AuthFlowOverlay: View {
                     }
                 }
 
-                Button("忘记了密码？") {
-                    openWebsite(path: "password-reset")
+                Button(AppString("忘记密码？")) {
+                    errorText = nil
+                    path.append(.forgot)
                 }
                 .font(Theme.body(14, weight: .semibold))
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 12)
+
+                // In the page flow, not pinned above the keyboard.
+                Button {
+                    submitLogin()
+                } label: {
+                    continueLabel("登录")
+                }
+                .buttonStyle(AuthPrimaryPillStyle(disabled: !canContinueLogin))
+                .disabled(isBusy || !canContinueLogin)
                 .padding(.top, 14)
+
+                // Nothing to separate if the site offers no providers at all.
+                if appleProvider != nil || !webProviders.isEmpty {
+                    HStack(spacing: 12) {
+                        Rectangle().fill(Theme.divider).frame(height: 1)
+                        Text(AppString("或者用这些方式"))
+                            .font(Theme.body(13))
+                            .foregroundStyle(Theme.textMuted)
+                            .fixedSize()
+                        Rectangle().fill(Theme.divider).frame(height: 1)
+                    }
+                    .padding(.vertical, 18)
+
+                    // Apple keeps its own native control; the rest of the
+                    // site's providers sit behind one button, because the
+                    // browser flow lands on the site's own sign-in page.
+                    VStack(spacing: 10) {
+                        if let apple = appleProvider {
+                            NativeAppleSignInButton(
+                                perform: { await signInWithApple($0) },
+                                onFallbackToWeb: { activeProvider = apple },
+                                height: SocialAuthButtonStyle.height
+                            )
+                            .disabled(isBusy)
+                        }
+
+                        // Each provider straight to its own sign-in, the same
+                        // row as the sign-up page; the passkey beside them.
+                        SocialIconRow(
+                            providers: webProviders,
+                            onProvider: { provider in signInWithSystemBrowser(fallingBackTo: provider, provider: provider.name) },
+                            onPasskey: { signInWithPasskey() }
+                        )
+                        .disabled(isBusy)
+                        .padding(.top, 4)
+                    }
+                }
+
+                Text(AuthLegalCopy.attributedCompact)
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .tint(Theme.accent)
+                    .padding(.top, 18)
 
                 inlineError
             }
         } continueButton: {
-            Button {
-                submitLogin()
-            } label: {
-                continueLabel("继续")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(isBusy || !canContinueLogin)
+            // 登录 sits in the page, under 忘记密码 (above).
+            EmptyView()
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -236,12 +282,6 @@ struct AuthFlowOverlay: View {
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("注册") {
-                    errorText = nil
-                    path = [.email]
                 }
             }
         }
@@ -331,6 +371,22 @@ struct AuthFlowOverlay: View {
     @ViewBuilder
     private func signupPage(_ step: SignupStep) -> some View {
         switch step {
+        case .register:
+            RegisterPage(
+                onLogin: { path = [] },
+                onSignedIn: { completeAuth() },
+                onPending: { message in
+                    activationMessage = message
+                    path.append(.activation)
+                },
+                providers: webProviders,
+                onProvider: { provider in signInWithSystemBrowser(fallingBackTo: provider, provider: provider.name) },
+                onPasskey: { signInWithPasskey() }
+            )
+            .navigationBarTitleDisplayMode(.inline)
+        case .forgot:
+            ForgotPasswordPage(initialEmail: loginIdentifier) { path.removeLast() }
+                .navigationBarTitleDisplayMode(.inline)
         case .email: emailPage
         case .username: usernamePage
         case .password: passwordPage
@@ -343,6 +399,20 @@ struct AuthFlowOverlay: View {
     private var emailPage: some View {
         page {
             VStack(spacing: 0) {
+                Text(AppString("注册 nodeloc"))
+                    .font(Theme.heading(28, weight: .bold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.bottom, 6)
+                HStack(spacing: 4) {
+                    Text(AppString("已经有账号了？"))
+                        .foregroundStyle(Theme.textMuted)
+                    Button(AppString("去登录")) { path = [] }
+                        .fontWeight(.bold)
+                        .foregroundStyle(Theme.accent)
+                }
+                .font(Theme.body(15))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 18)
                 stepHeader("输入你的电子邮件", subtitle: "我们会向这个地址发送账户激活邮件。")
 
                 AuthInputField(
@@ -445,7 +515,7 @@ struct AuthFlowOverlay: View {
                     systemImage: canContinuePassword ? "checkmark.circle.fill" : "info.circle"
                 )
                 .font(Theme.body(13))
-                .foregroundStyle(canContinuePassword ? Theme.success : Theme.muted(0.5))
+                .foregroundStyle(canContinuePassword ? Theme.success : Theme.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 10)
 
@@ -537,7 +607,7 @@ struct AuthFlowOverlay: View {
 
                     Text("已选择 \(selectedNodes.count)/\(Self.maxInterestNodes)")
                         .font(Theme.body(12, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 10)
 
@@ -615,20 +685,21 @@ struct AuthFlowOverlay: View {
     ) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                content()
-                    .padding(.horizontal, 24)
-                    .padding(.top, 18)
+                // The step's button follows its content, scrolling with it —
+                // not floating above the keyboard.
+                VStack(spacing: 0) {
+                    content()
+                    continueButton()
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 20)
+                        .padding(.bottom, 24)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 18)
             }
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.bg.ignoresSafeArea())
-            .safeAreaInset(edge: .bottom) {
-                continueButton()
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 10)
-                    .background(.bar)
-            }
             // A field that appears below the fold (the 2FA code) has to be
             // scrolled to, or it stays hidden behind the keyboard.
             .onChange(of: scrollTarget) { _, target in
@@ -671,7 +742,7 @@ struct AuthFlowOverlay: View {
     private func subtitleText(_ text: Text) -> some View {
         text
             .font(Theme.body(14))
-            .foregroundStyle(Theme.muted(0.6))
+            .foregroundStyle(Theme.textMuted)
             .multilineTextAlignment(.center)
             .lineSpacing(3)
             .padding(.bottom, 18)
@@ -692,6 +763,12 @@ struct AuthFlowOverlay: View {
 
     @ViewBuilder
     private var inlineError: some View {
+        if let suspendedMessage {
+            SuspendedLoginNotice(message: suspendedMessage) {
+                suspendedCredentials = .init(login: loginIdentifier, password: loginPassword)
+            }
+            .padding(.top, 16)
+        }
         if let errorText {
             Text(errorText)
                 .font(Theme.body(13))
@@ -711,14 +788,29 @@ struct AuthFlowOverlay: View {
     /// session opens on, and that page carries all of them. One extra tap than
     /// the old in-app web view, in exchange for not retyping a password —
     /// and the old view is still the fallback if this can't complete.
-    private func signInWithSystemBrowser(fallingBackTo provider: SocialAuthProvider) {
+    private func signInWithPasskey() {
         guard !isBusy else { return }
         isBusy = true
         errorText = nil
         Task {
             defer { isBusy = false }
             do {
-                try await DiscourseLogin.shared.loginWithSystemBrowser()
+                try await DiscourseLogin.shared.loginWithPasskey()
+                completeAuth()
+            } catch {
+                // Cancelled or no passkey here: the page stays as it was.
+            }
+        }
+    }
+
+    private func signInWithSystemBrowser(fallingBackTo provider: SocialAuthProvider, provider name: String? = nil) {
+        guard !isBusy else { return }
+        isBusy = true
+        errorText = nil
+        Task {
+            defer { isBusy = false }
+            do {
+                try await DiscourseLogin.shared.loginWithSystemBrowser(provider: name)
                 completeAuth()
             } catch SocialAuthError.cancelled {
                 // Backing out of the sheet is a choice, not a failure.
@@ -735,10 +827,12 @@ struct AuthFlowOverlay: View {
         guard !isBusy else { return }
         isBusy = true
         errorText = nil
+        suspendedMessage = nil
         Task {
             do {
                 let token = otpCode.trimmingCharacters(in: .whitespaces)
-                try await DiscourseLogin.shared.login(
+                try await CaptchaLogin.login(
+                    gate: captchaGate,
                     identifier: loginIdentifier,
                     password: loginPassword,
                     secondFactorToken: needsSecondFactor && !token.isEmpty ? token : nil,
@@ -746,6 +840,10 @@ struct AuthFlowOverlay: View {
                 )
                 await applyPendingNodeJoins()
                 completeAuth()
+            } catch is CancellationError {
+                // Closed the 人机验证 widget: nothing sent, nothing to say.
+            } catch AuthError.suspended(let message) {
+                suspendedMessage = message
             } catch AuthError.secondFactorRequired {
                 withAnimation(.quick) { needsSecondFactor = true }
                 otpFocused = true

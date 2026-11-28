@@ -191,6 +191,9 @@ enum PostReferenceAttributedBuilder {
         // applies the CJK rules about which characters may not open or close a
         // line. `.byCharWrapping` would break anywhere and lose that.
         paragraph.lineBreakMode = .byWordWrapping
+        // What SwiftUI's `Text` uses, so a paragraph wraps on the same
+        // character here as in the `Text` it stands in for.
+        paragraph.lineBreakStrategy = .standard
         result.addAttribute(
             .paragraphStyle,
             value: paragraph,
@@ -253,7 +256,7 @@ enum PostReferenceAttributedBuilder {
                 if let image = emoji.image(for: url, pointSize: metrics.bodySize) {
                     result.append(imageAttachment(image, fontSize: metrics.bodySize))
                 } else {
-                    emoji.loadIfNeeded(url)
+                    emoji.loadIfNeeded(url, pointSize: metrics.bodySize)
                     result.append(NSAttributedString(string: shortcode, attributes: [
                         .font: Theme.uiBody(metrics.bodySize),
                         .foregroundColor: textColor.withAlphaComponent(0.5),
@@ -387,12 +390,16 @@ struct PostReferenceTextView: UIViewRepresentable {
     /// text view swallows its own touches, so the reply's collapse action has
     /// to be handed back rather than left to an ancestor gesture.
     var onTapBackground: () -> Void = {}
+    /// Long-press range selection with handles and the system edit menu.
+    /// Off, the view keeps a caret-less body that only links and badges
+    /// answer.
+    var selectable = false
 
     @Environment(EmojiImageStore.self) private var emoji
     @Environment(\.colorScheme) private var colorScheme
 
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView()
+        let view = PostBodyTextView()
         view.delegate = context.coordinator
         view.isEditable = false
         // Selectable is required for text items to receive taps at all; the
@@ -409,8 +416,15 @@ struct PostReferenceTextView: UIViewRepresentable {
             .foregroundColor: UIColor(Theme.accent),
             .underlineStyle: 0,
         ]
-        // A post body is not a text field: no caret, no magnifier, no drag.
-        view.tintColor = .clear
+        // A post body is not a text field: no caret, no magnifier, no drag —
+        // unless it takes selection, where the handles wear the accent.
+        view.tintColor = selectable ? UIColor(Theme.accent) : .clear
+        context.coordinator.allowsSelection = selectable
+        if selectable {
+            // Selecting is the long press; dragging the text out of the post
+            // is not something a reader wants from it.
+            view.textDragInteraction?.isEnabled = false
+        }
 
         // Belt and braces alongside the delegate. Whether UIKit raises a text
         // item for an attachment range is not something the docs commit to, and
@@ -429,12 +443,14 @@ struct PostReferenceTextView: UIViewRepresentable {
         context.coordinator.onTapReference = onTapReference
         context.coordinator.onTapLink = onTapLink
         context.coordinator.onTapBackground = onTapBackground
-        view.attributedText = PostReferenceAttributedBuilder.attributedString(
+        context.coordinator.allowsSelection = selectable
+        let text = PostReferenceAttributedBuilder.attributedString(
             for: inlines,
             metrics: metrics,
             isDark: colorScheme == .dark,
             emoji: emoji
         )
+        if view.attributedText != text { view.attributedText = text }
     }
 
     /// `isScrollEnabled = false` makes the view self-size, but SwiftUI still
@@ -450,7 +466,10 @@ struct PostReferenceTextView: UIViewRepresentable {
         let fitted = uiView.sizeThatFits(
             CGSize(width: width, height: .greatestFiniteMagnitude)
         )
-        return CGSize(width: width, height: ceil(fitted.height))
+        // Unrounded: the text view already measures to the pixel, and SwiftUI's
+        // `Text` reports the same fractional height — rounding up pushed every
+        // paragraph below a little further down than the `Text` it replaces.
+        return CGSize(width: width, height: fitted.height)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -463,6 +482,7 @@ struct PostReferenceTextView: UIViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, UITextViewDelegate {
+        var allowsSelection = false
         var onTapReference: (PostReference) -> Void
         var onTapLink: (URL) -> Void
         var onTapBackground: () -> Void
@@ -497,7 +517,7 @@ struct PostReferenceTextView: UIViewRepresentable {
 
             switch textItem.content {
             case .link(let url):
-                return UIAction { [onTapLink] _ in onTapLink(url) }
+                return UIAction { [weak self] _ in self?.openLink(url) }
             default:
                 // Suppresses the system menu on a plain attachment (emoji).
                 return nil
@@ -506,14 +526,36 @@ struct PostReferenceTextView: UIViewRepresentable {
 
         /// Resolves a tap straight from the attributed string, independent of
         /// UIKit's text-item machinery.
+        /// The text item action and the tap recognizer can both answer one
+        /// tap on a link; it opens once.
+        private var lastLink: (url: URL, at: Date)?
+        private func openLink(_ url: URL) {
+            if let last = lastLink, last.url == url, Date().timeIntervalSince(last.at) < 0.6 { return }
+            lastLink = (url, Date())
+            onTapLink(url)
+        }
+
+        /// A long press on a link selects, like the rest of the text, rather
+        /// than opening the link preview menu.
+        func textView(
+            _ textView: UITextView,
+            menuConfigurationFor textItem: UITextItem,
+            defaultMenu: UIMenu
+        ) -> UITextItem.MenuConfiguration? {
+            allowsSelection ? nil : UITextItem.MenuConfiguration(menu: defaultMenu)
+        }
+
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard let textView = gesture.view as? UITextView else { return }
             let point = gesture.location(in: textView)
+            // A tap with a selection up only clears it (the text view does
+            // that itself); it isn't also a tap on what lies under it.
+            if allowsSelection, textView.selectedRange.length > 0 { return }
 
             if let target = target(in: textView, at: point) {
                 switch target {
                 case .reference(let reference): onTapReference(reference)
-                case .link(let url): onTapLink(url)
+                case .link(let url): openLink(url)
                 }
                 return
             }
@@ -617,8 +659,60 @@ struct PostReferenceTextView: UIViewRepresentable {
         /// No selection: clearing it on change keeps the body feeling like prose
         /// rather than an editable field, while leaving text items tappable.
         func textViewDidChangeSelection(_ textView: UITextView) {
-            guard textView.selectedRange.length > 0 else { return }
+            guard !allowsSelection, textView.selectedRange.length > 0 else { return }
             textView.selectedRange = NSRange(location: 0, length: 0)
         }
+    }
+}
+
+// MARK: - Body text view
+
+/// A non-scrolling text view that never scrolls the page around it. Setting
+/// a selectable text view's text asks it to bring the end of the text into
+/// view, and with scrolling off that request went to the reader's scroll view
+/// — which jumped down to the last paragraph as the post opened.
+final class PostBodyTextView: UITextView {
+    override func scrollRangeToVisible(_ range: NSRange) {}
+    override func scrollRectToVisible(_ rect: CGRect, animated: Bool) {}
+}
+
+// MARK: - Selectable code
+
+/// A code block's text in a `UITextView`, for range selection: unwrapped and
+/// as wide as its longest line, so the code block's horizontal scroll still
+/// pans it. Same font and colour as the `Text` it stands in for.
+struct SelectableCodeText: UIViewRepresentable {
+    let code: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = PostBodyTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.textContainer.widthTracksTextView = false
+        view.textContainer.size = CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)
+        view.textContainer.lineBreakMode = .byClipping
+        view.tintColor = UIColor(Theme.accent)
+        view.textDragInteraction?.isEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        let traits = UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light)
+        let text = NSAttributedString(string: code, attributes: [
+            .font: UIFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .foregroundColor: UIColor(Theme.text).resolvedColor(with: traits).withAlphaComponent(0.9),
+        ])
+        if view.attributedText != text { view.attributedText = text }
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        // The text view's own measure, unwrapped: the same size, to the
+        // pixel, that the `Text` it replaces reports.
+        uiView.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
     }
 }

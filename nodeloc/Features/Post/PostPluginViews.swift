@@ -9,7 +9,7 @@
 //
 //    * poll         — `post.polls` + `post.polls_votes`, rendered at the
 //                     `<div class="poll">` position via a placeholder block.
-//    * lottery      — `post.lottery`, appended after the body.
+//    * lottery      — `post.lottery`, appended after the body (LotteryCard.swift).
 //    * red envelope — `topic.red_envelope`, a banner above the body.
 //
 //  The red envelope deliberately has no claim button: the plugin claims it
@@ -27,45 +27,65 @@ struct PollView: View {
     let onVote: ([String]) -> Void
     let onRemoveVote: () -> Void
 
-    /// Staged selections for multi-choice polls, which submit as a batch.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Staged selections, sent with 投票 (single or multiple).
     @State private var pending: Set<String> = []
     @State private var hasStagedEdits = false
+    /// Each bar's drawn share, animated toward the poll's.
+    @State private var shown: [String: Double] = [:]
 
     private var hasVoted: Bool { !myVotes.isEmpty }
-    /// Discourse hides counts until the viewer is entitled to see them, which it
-    /// signals by omitting `votes` from the options entirely.
+    /// The server leaves `votes` out until the reader may see them.
     private var showsResults: Bool {
         poll.options?.contains { $0.votes != nil } ?? false
     }
     private var selection: Set<String> {
         hasStagedEdits ? pending : Set(myVotes)
     }
+    private var leaderVotes: Int {
+        poll.options?.compactMap(\.votes).max() ?? 0
+    }
+    /// The shares, keyed by option, that the bars animate to.
+    private var targets: [String: Double] {
+        let total = Double(max(1, poll.totalVotes))
+        var out: [String: Double] = [:]
+        for option in poll.options ?? [] {
+            out[option.id] = showsResults ? Double(option.votes ?? 0) / total : 0
+        }
+        return out
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             header
 
             VStack(spacing: 8) {
-                ForEach(poll.options ?? []) { option in
+                ForEach(Array((poll.options ?? []).enumerated()), id: \.element.id) { index, option in
                     optionRow(option)
                 }
             }
 
             footer
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         }
-        .onAppear { resetStaging() }
-        // `.onAppear` doesn't re-fire when the parent hands down new votes, and
-        // SwiftUI may reuse this view's state for a different poll, so staged
-        // selections are re-seeded whenever the server truth changes.
+        .sensoryFeedback(.selection, trigger: pending)
+        .sensoryFeedback(.success, trigger: myVotes) { old, new in !new.isEmpty && old != new }
+        .onAppear {
+            resetStaging()
+            animateBars(from: [:])
+        }
+        // Re-seeded whenever the server truth changes (the view may be
+        // reused for another poll).
         .onChange(of: myVotes) { _, _ in resetStaging() }
         .onChange(of: poll.pollName) { _, _ in resetStaging() }
+        .onChange(of: targets) { old, _ in animateBars(from: old) }
     }
 
     private func resetStaging() {
@@ -73,117 +93,212 @@ struct PollView: View {
         hasStagedEdits = false
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image("LucideVote")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 14, height: 14)
-                    .foregroundStyle(Theme.accent)
-                Text(poll.title ?? AppString("投票"))
-                    .font(Theme.body(15, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                Spacer(minLength: 0)
-                if poll.isClosed {
-                    Text("已结束")
-                        .font(Theme.body(11, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.55))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Theme.hover, in: Capsule())
-                }
-            }
-
-            if poll.isMultiple, let min = poll.min, let max = poll.max {
-                Text("可选 \(min)–\(max) 项")
-                    .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.5))
+    /// Bars grow from where they were (zero the first time) to their share,
+    /// a row at a time; with Reduce Motion they are simply there.
+    private func animateBars(from old: [String: Double]) {
+        let goal = targets
+        guard !reduceMotion else { shown = goal; return }
+        for (index, option) in (poll.options ?? []).enumerated() {
+            if shown[option.id] == nil { shown[option.id] = old[option.id] ?? 0 }
+            withAnimation(.smooth(duration: 0.7).delay(Double(index) * 0.07)) {
+                shown[option.id] = goal[option.id] ?? 0
             }
         }
+    }
+
+    /// 投票 · 单选, who took part and when it closes, and whether it's open.
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "chart.bar")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 40, height: 40)
+                .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(headline)
+                    .font(Theme.body(16, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                Text(subline)
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 6)
+            Text(poll.isClosed ? AppString("已结束") : AppString("进行中"))
+                .font(Theme.body(12, weight: .bold))
+                .foregroundStyle(poll.isClosed ? Theme.textMuted : Theme.accent)
+                .padding(.horizontal, 9)
+                .frame(height: 24)
+                .background(poll.isClosed ? Theme.chip : Theme.accent.opacity(0.12), in: Capsule())
+        }
+    }
+
+    private var headline: String {
+        let kind = poll.isMultiple ? AppString("多选") : AppString("单选")
+        if let title = poll.title, !title.isEmpty { return "\(title) · \(kind)" }
+        return AppString("投票 · \(kind)")
+    }
+
+    /// 312 人参与 · 11 月 21 日 20:00 结束（还有 3 天）
+    private var subline: String {
+        var parts = [AppString("\(poll.voters ?? poll.totalVotes) 人参与")]
+        if let close = DiscourseFormat.date(poll.close) {
+            let when = close.formatted(.dateTime.month().day().hour().minute().locale(AppLanguage.resolved.locale))
+            if poll.isClosed || close < Date() {
+                parts.append(AppString("\(when) 结束"))
+            } else {
+                let days = Int(ceil(close.timeIntervalSinceNow / 86_400))
+                parts.append(AppString("\(when) 结束（还有 \(days) 天）"))
+            }
+        }
+        if poll.isMultiple, let min = poll.min, let max = poll.max {
+            parts.append(AppString("可选 \(min)–\(max) 项"))
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func optionRow(_ option: PollOptionResult) -> some View {
         let isSelected = selection.contains(option.id)
+        let isMine = myVotes.contains(option.id) && !hasStagedEdits
         let votes = option.votes ?? 0
-        let total = max(1, poll.totalVotes)
-        let fraction = showsResults ? Double(votes) / Double(total) : 0
+        let isLeader = showsResults && votes > 0 && votes == leaderVotes
+        let share = targets[option.id] ?? 0
+        let drawn = shown[option.id] ?? 0
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
         return Button {
             toggle(option.id)
         } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Image(systemName: selectionSymbol(isSelected: isSelected))
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(isSelected ? Theme.accent : Theme.muted(0.35))
-
+            HStack(spacing: 10) {
+                Image(systemName: selectionSymbol(isSelected: isSelected))
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textFaint)
+                    .contentTransition(.symbolEffect(.replace))
+                HStack(spacing: 6) {
                     Text(option.html ?? "")
-                        .font(Theme.body(14))
-                        .foregroundStyle(Theme.text.opacity(0.9))
+                        .font(Theme.body(15, weight: isLeader ? .semibold : .medium))
+                        .foregroundStyle(Theme.text)
                         .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer(minLength: 6)
-
-                    if showsResults {
-                        Text("\(votes)")
-                            .font(Theme.body(12, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.6))
-                            .monospacedDigit()
+                        .lineLimit(2)
+                    if isMine && showsResults {
+                        tag(AppString("我的选择"), text: .white, fill: Theme.accent)
+                    }
+                    if isLeader {
+                        tag(AppString("最高票"), text: AdminTone.amber.text, fill: AdminTone.amber.fill)
                     }
                 }
-
-                if showsResults {
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Theme.hover)
-                            Capsule()
-                                .fill(Theme.accent.opacity(isSelected ? 0.75 : 0.4))
-                                .frame(width: max(2, proxy.size.width * fraction))
-                        }
-                    }
-                    .frame(height: 5)
+                Spacer(minLength: 6)
+                // Always laid out, so the row keeps its height and its text
+                // its width when the results appear.
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(verbatim: "\(Int((share * 100).rounded()))%")
+                        .font(Theme.body(14, weight: .bold))
+                        .foregroundStyle(Theme.text)
+                        .contentTransition(.numericText(value: share))
+                    Text(AppString("\(votes) 票"))
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.textMuted)
+                        .contentTransition(.numericText(value: Double(votes)))
+                }
+                .monospacedDigit()
+                .opacity(showsResults ? 1 : 0)
+                .animation(reduceMotion ? nil : .smooth(duration: 0.6), value: share)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 46)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // The bar: the share of the votes, behind the row's text.
+            .background(alignment: .leading) {
+                GeometryReader { proxy in
+                    Rectangle()
+                        .fill(barColor(isMine: isMine, isLeader: isLeader))
+                        .frame(width: proxy.size.width * drawn)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isSelected ? Theme.accent.opacity(0.08) : Theme.bg.opacity(0.5),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-            )
+            .background(Theme.surface)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(isSelected ? Theme.accent : Theme.divider, lineWidth: isSelected ? 1.5 : 1))
+            .animation(reduceMotion ? nil : .snappy(duration: 0.22), value: isSelected)
         }
         .buttonStyle(.pressable)
         .disabled(!canInteract)
+        .accessibilityValue(showsResults ? AppString("\(Int((share * 100).rounded()))%，\(votes) 票") : "")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func barColor(isMine: Bool, isLeader: Bool) -> Color {
+        if isMine { return Theme.accent.opacity(0.24) }
+        if isLeader { return Theme.accent.opacity(0.16) }
+        return Theme.accent.opacity(0.09)
+    }
+
+    private func tag(_ title: String, text: Color, fill: Color) -> some View {
+        Text(title)
+            .font(Theme.body(11, weight: .bold))
+            .foregroundStyle(text)
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(fill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .fixedSize()
+            .transition(.scale(scale: 0.8).combined(with: .opacity))
+    }
+
+    // MARK: Footer
+
+    /// Within the poll's limits (a single poll: exactly one).
+    private var stagedIsValid: Bool {
+        let count = pending.count
+        if poll.isMultiple {
+            let low = max(1, poll.min ?? 1)
+            let high = poll.max ?? Int.max
+            return (low...max(low, high)).contains(count)
+        }
+        return count == 1
+    }
+
+    @ViewBuilder
+    private var hint: some View {
+        if canInteract, !hasVoted || hasStagedEdits {
+            if poll.isMultiple, let min = poll.min, let max = poll.max {
+                Text(AppString("已选 \(pending.count) 项 · 可选 \(min)–\(max) 项"))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            } else {
+                Text(AppString("选好后点「投票」，投票后可以看到结果"))
+            }
+        }
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
-            Text("\(poll.voters ?? poll.totalVotes) 人参与")
-                .font(Theme.body(11))
-                .foregroundStyle(Theme.muted(0.5))
-
-            Spacer(minLength: 0)
-
-            if isBusy {
-                ProgressView().controlSize(.small)
-            }
-
-            // Multi-choice stages selections, so it needs an explicit submit.
-            if poll.isMultiple, canInteract, hasStagedEdits {
-                Button("提交") { submitPending() }
-                    .font(Theme.body(12, weight: .semibold))
-                    .buttonStyle(.pressable)
-                    .foregroundStyle(Theme.accent)
-            }
-
-            if hasVoted, canInteract {
-                Button("取消投票") { onRemoveVote() }
-                    .font(Theme.body(12))
-                    .buttonStyle(.pressable)
-                    .foregroundStyle(Theme.muted(0.55))
+        VStack(alignment: .leading, spacing: 10) {
+            hint
+                .font(Theme.body(12))
+                .foregroundStyle(Theme.textMuted)
+            if canInteract || isBusy {
+                HStack(spacing: 10) {
+                    if hasVoted {
+                        Button(AppString("取消投票")) { onRemoveVote() }
+                            .buttonStyle(.bordered)
+                            .tint(.primary)
+                    }
+                    Button {
+                        submitPending()
+                    } label: {
+                        ZStack {
+                            Text(hasVoted ? AppString("修改投票") : AppString("投票")).opacity(isBusy ? 0 : 1)
+                            if isBusy { ProgressView().controlSize(.small).tint(.white) }
+                        }
+                        .fontWeight(.bold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.accent)
+                    .disabled(!(hasStagedEdits && stagedIsValid) || isBusy)
+                }
+                .buttonBorderShape(.capsule)
+                .controlSize(.regular)
+                .disabled(isBusy)
             }
         }
     }
@@ -198,259 +313,39 @@ struct PollView: View {
         if poll.isMultiple {
             return isSelected ? "checkmark.square.fill" : "square"
         }
-        return isSelected ? "largecircle.fill.circle" : "circle"
+        return isSelected ? "checkmark.circle.fill" : "circle"
     }
 
     private func toggle(_ optionID: String) {
         guard canInteract else { return }
+        var next = selection
         if poll.isMultiple {
-            var next = selection
-            if next.contains(optionID) { next.remove(optionID) } else { next.insert(optionID) }
-            pending = next
-            hasStagedEdits = true
+            if next.contains(optionID) {
+                next.remove(optionID)
+            } else if let max = poll.max, next.count >= max {
+                return
+            } else {
+                next.insert(optionID)
+            }
         } else {
-            // Single choice submits immediately.
-            hasStagedEdits = false
-            onVote([optionID])
+            next = [optionID]
+        }
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.22)) {
+            pending = next
+            hasStagedEdits = next != Set(myVotes)
         }
     }
 
     private func submitPending() {
-        hasStagedEdits = false
+        // Staging stays until the store's (optimistic) votes arrive, so the
+        // selection never flickers back to the old choice.
         onVote(Array(pending))
     }
 }
 
 // MARK: - Lottery
 
-struct LotteryView: View {
-    let lottery: PostLottery
-    let isBusy: Bool
-    let onParticipate: (Int, Bool) -> Void
-
-    @State private var quantity = 1
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            prizes
-
-            if !(lottery.winners?.isEmpty ?? true) {
-                winners
-            }
-
-            stats
-
-            if lottery.isOpen {
-                participation
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Theme.accent2.opacity(0.35), lineWidth: 1)
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 7) {
-            Image("LucideGift")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 15, height: 15)
-                .foregroundStyle(Theme.accent2)
-
-            Text(lottery.title ?? AppString("抽奖"))
-                .font(Theme.body(15, weight: .semibold))
-                .foregroundStyle(Theme.text)
-                .lineLimit(2)
-
-            Spacer(minLength: 0)
-
-            LotteryRulesLink()
-
-            Text(statusLabel)
-                .font(Theme.body(11, weight: .semibold))
-                .foregroundStyle(statusColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(statusColor.opacity(0.12), in: Capsule())
-        }
-    }
-
-    private var prizes: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(lottery.levels ?? []) { level in
-                HStack(spacing: 8) {
-                    Text(level.name ?? "")
-                        .font(Theme.body(11, weight: .bold))
-                        .foregroundStyle(Theme.accent2)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Theme.accent2.opacity(0.12), in: Capsule())
-
-                    Text(level.prize ?? "")
-                        .font(Theme.body(13))
-                        .foregroundStyle(Theme.text.opacity(0.85))
-                        .lineLimit(1)
-
-                    Spacer(minLength: 4)
-
-                    Text("×\(level.quantity ?? 1)")
-                        .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.5))
-                        .monospacedDigit()
-                }
-            }
-        }
-    }
-
-    private var winners: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("中奖名单")
-                .font(Theme.body(12, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.6))
-            ForEach(Array((lottery.winners ?? []).enumerated()), id: \.offset) { _, winner in
-                HStack(spacing: 6) {
-                    Image(systemName: "rosette")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.accent2)
-                    Text(winner.username ?? "")
-                        .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.text.opacity(0.85))
-                    if let prize = winner.prize {
-                        Text("· \(prize)")
-                            .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.5))
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-    }
-
-    private var stats: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 14) {
-                statistic("\(lottery.participantsCount ?? 0)", label: AppString("参与"))
-                statistic("\(lottery.ticketsCount ?? 0)", label: AppString("总票数"))
-                if (lottery.userTickets ?? 0) > 0 {
-                    statistic("\(lottery.userTickets ?? 0)", label: AppString("我的票"), highlighted: true)
-                }
-                Spacer(minLength: 0)
-            }
-
-            if let drawAt = lottery.drawAt {
-                Text("开奖时间 \(DiscourseFormat.relative(drawAt))")
-                    .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.5))
-            }
-            if let minimum = lottery.minParticipants, (lottery.participantsCount ?? 0) < minimum {
-                Text("满 \(minimum) 人开奖，不足则流抽并退还能量")
-                    .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.5))
-            }
-        }
-    }
-
-    private func statistic(_ value: String, label: String, highlighted: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value)
-                .font(Theme.body(15, weight: .semibold))
-                .foregroundStyle(highlighted ? Theme.accent2 : Theme.text)
-                .monospacedDigit()
-            Text(label)
-                .font(Theme.body(10))
-                .foregroundStyle(Theme.muted(0.45))
-        }
-    }
-
-    @ViewBuilder
-    private var participation: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider().overlay(Theme.divider)
-
-            if !FeatureFlags.shared.lotteryEnabled {
-                // Withdrawn server-side. Existing posts still show the prizes
-                // and the outcome; only entering is closed off.
-                Text("抽奖功能暂不可用")
-                    .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
-            } else if remainingTickets <= 0 {
-                // At the per-user cap: offering a stepper here would let the
-                // user buy one more than allowed and get rejected server-side.
-                Text("你已达到每人票数上限")
-                    .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
-            } else {
-                HStack(spacing: 10) {
-                    Stepper("\(quantity) 张", value: $quantity, in: 1...remainingTickets)
-                        .font(Theme.body(13))
-                        // Vertical only: `.fixedSize()` on both axes would let
-                        // the label push the row past the screen.
-                        .fixedSize(horizontal: false, vertical: true)
-                        .layoutPriority(1)
-
-                    Spacer(minLength: 0)
-
-                    if isBusy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button {
-                            onParticipate(quantity, false)
-                        } label: {
-                            Text("参与")
-                                .font(Theme.body(13, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 18)
-                                .frame(height: 32)
-                                .background(Theme.accent2, in: Capsule())
-                        }
-                        .buttonStyle(.pressable)
-                    }
-                }
-
-                Text("每张票消耗 1 能量")
-                    .font(Theme.body(10))
-                    .foregroundStyle(Theme.muted(0.45))
-            }
-        }
-        // Clamp if the cap shrinks under us after a purchase.
-        .onChange(of: remainingTickets) { _, remaining in
-            quantity = min(quantity, max(1, remaining))
-        }
-    }
-
-    /// Tickets this user may still buy. Capped at 100 per action so the stepper
-    /// stays usable when the server allows a very large per-user limit.
-    private var remainingTickets: Int {
-        let cap = lottery.maxTicketsPerUser ?? 10
-        return min(cap - (lottery.userTickets ?? 0), 100)
-    }
-
-    private var statusLabel: String {
-        switch lottery.status {
-        case "open": AppString("进行中")
-        case "drawn": AppString("已开奖")
-        case "closed": AppString("已关闭")
-        case "failed": AppString("已流抽")
-        default: lottery.status ?? ""
-        }
-    }
-
-    private var statusColor: Color {
-        switch lottery.status {
-        case "open": Theme.accent
-        case "drawn": Theme.accent2
-        case "failed": Theme.danger
-        default: Theme.muted(0.55)
-        }
-    }
-}
+// `LotteryView` lives in LotteryCard.swift.
 
 // MARK: - Red envelope
 
@@ -459,82 +354,72 @@ struct LotteryView: View {
 /// is to reply to the topic.
 struct RedEnvelopeBanner: View {
     let envelope: TopicRedEnvelope
+    /// 回帖后领取: there is no claim endpoint — a reply claims it — so the
+    /// button opens the reply panel.
+    var onReply: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image("LucideHandCoins")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 16, height: 16)
-                    .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(AppString("回帖的人各领一份，金额随机"))
+                .font(Theme.body(14))
+                .foregroundStyle(.white.opacity(0.9))
 
-                Text("红包")
-                    .font(Theme.body(15, weight: .semibold))
-                    .foregroundStyle(.white)
-
-                Spacer(minLength: 0)
-
-                Text(isExhausted ? AppString("已抢完") : AppString("进行中"))
-                    .font(Theme.body(11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.white.opacity(0.22), in: Capsule())
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(envelope.totalPoints ?? 0)")
-                    .font(Theme.heading(26, weight: .bold))
+                    .font(Theme.heading(36, weight: .bold))
                     .foregroundStyle(.white)
                     .monospacedDigit()
-                Text("能量 · \(envelope.totalCount ?? 0) 个")
-                    .font(Theme.body(12))
-                    .foregroundStyle(.white.opacity(0.85))
+                Text(AppString("能量 · \(envelope.totalCount ?? 0) 份"))
+                    .font(Theme.body(17, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 0)
+                if isExhausted {
+                    Text(AppString("已领完"))
+                        .font(Theme.body(12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(.white.opacity(0.22), in: Capsule())
+                }
             }
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.25))
+                    Capsule().fill(.white.opacity(0.28))
                     Capsule()
                         .fill(.white)
                         .frame(width: max(2, proxy.size.width * claimedFraction))
                 }
             }
-            .frame(height: 5)
+            .frame(height: 6)
 
-            HStack {
-                Text("已领 \(envelope.claimedCount ?? 0)/\(envelope.totalCount ?? 0)")
-                    .font(Theme.body(11))
-                    .foregroundStyle(.white.opacity(0.85))
-                Spacer()
-                Text("剩余 \(envelope.remainingPoints ?? 0) 能量")
-                    .font(Theme.body(11))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
+            Text(AppString("已领 \(envelope.claimedCount ?? 0) / \(envelope.totalCount ?? 0) 份 · 剩余 \(envelope.remainingPoints ?? 0) 能量 · 领到的金额显示在每条回复上"))
+                .font(Theme.body(12))
+                .foregroundStyle(.white.opacity(0.88))
+                .fixedSize(horizontal: false, vertical: true)
 
-            // The mechanic is non-obvious, so it's spelled out rather than
-            // implied by a button that doesn't exist.
-            if !isExhausted {
-                Label("回复本帖即可领取", systemImage: "arrowshape.turn.up.left.fill")
-                    .font(Theme.body(11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .background(.white.opacity(0.18), in: Capsule())
+            if !isExhausted, let onReply {
+                Button(action: onReply) {
+                    Text(AppString("回帖后领取"))
+                        .font(Theme.body(16, weight: .bold))
+                        .foregroundStyle(Color(hex: 0xC2410C))
+                        .padding(.horizontal, 20)
+                        .frame(height: 48)
+                        .background(.white, in: Capsule())
+                }
+                .buttonStyle(.pressable)
+                .padding(.top, 4)
             }
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             LinearGradient(
-                colors: [Color(hex: 0xE8452F), Color(hex: 0xC1121F)],
+                colors: [Color(hex: 0xC2410C), Color(hex: 0xEA580C)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
     }
 

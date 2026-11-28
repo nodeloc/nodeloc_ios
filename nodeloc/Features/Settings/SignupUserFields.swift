@@ -102,7 +102,7 @@ struct SignupUserFieldsSection: View {
                     Text(selection.wrappedValue.isEmpty ? name : selection.wrappedValue)
                         .font(Theme.body(18))
                         .foregroundStyle(
-                            selection.wrappedValue.isEmpty ? Theme.muted(0.55) : Theme.text
+                            selection.wrappedValue.isEmpty ? Theme.textMuted : Theme.text
                         )
                         .lineLimit(1)
 
@@ -110,7 +110,7 @@ struct SignupUserFieldsSection: View {
 
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .modifier(AuthFieldCapsule(isFilled: !selection.wrappedValue.isEmpty))
                 // A menu's label is hit-tested like any other drawn content,

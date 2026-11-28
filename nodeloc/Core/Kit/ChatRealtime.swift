@@ -154,6 +154,12 @@ final class NodelocRealtime {
 
     private var handlers: [UUID: Handler] = [:]
     private var task: URLSessionDataTask?
+    /// The session behind `task`. Each connection gets its own (its delegate
+    /// carries that stream's parser state); the delegate invalidates it when
+    /// the task completes, and this reference lets `disconnect` and a new
+    /// connect invalidate it outright so a session and its delegate can never
+    /// outlive their stream.
+    private var session: URLSession?
     private var reconnectTask: Task<Void, Never>?
     private var failures = 0
     private(set) var isConnected = false
@@ -213,8 +219,10 @@ final class NodelocRealtime {
         // connection is gone.
         configuration.timeoutIntervalForRequest = 70
         configuration.timeoutIntervalForResource = 60 * 60
+        self.session?.invalidateAndCancel()
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         let task = session.dataTask(with: request)
+        self.session = session
         self.task = task
         task.resume()
     }
@@ -224,6 +232,9 @@ final class NodelocRealtime {
         reconnectTask = nil
         task?.cancel()
         task = nil
+        // Cancels anything left and releases the delegate the session retains.
+        session?.invalidateAndCancel()
+        session = nil
         isConnected = false
     }
 
@@ -327,8 +338,19 @@ final class MessageBusClient {
             return Int(channel.dropFirst("/topic/".count))
         }
         if !topics.isEmpty {
+            // `self` is re-acquired per poll rather than held for the life of
+            // the loop: `await self?.pollTopics(…)` kept the client (and the
+            // store owning it) alive, polling, until someone called `stop`.
             pollTask = Task { [weak self] in
-                await self?.pollTopics(topics)
+                var highest: [Int: Int] = [:]
+                while !Task.isCancelled {
+                    for topicID in topics {
+                        guard let self, !Task.isCancelled else { return }
+                        await self.pollTopic(topicID, highest: &highest)
+                    }
+                    guard let interval = self?.topicPollInterval else { return }
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                }
             }
         }
     }
@@ -368,16 +390,6 @@ final class MessageBusClient {
             let matches = resolved == conversation
             return (matches && (channel.hasSuffix("/new-messages") || parts.count == 2))
                 || (listWide.contains(event.type) && channel.hasSuffix("/new-messages"))
-        }
-    }
-
-    private func pollTopics(_ topics: [Int]) async {
-        var highest: [Int: Int] = [:]
-        while !Task.isCancelled {
-            for topicID in topics {
-                await pollTopic(topicID, highest: &highest)
-            }
-            try? await Task.sleep(nanoseconds: UInt64(topicPollInterval * 1_000_000_000))
         }
     }
 

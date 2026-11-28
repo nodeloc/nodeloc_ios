@@ -132,10 +132,9 @@ struct TopicMoreSheet: View {
         }
         // Says what blocking actually does, because it does two things: hides
         // their content here and reports it to the moderators.
-        .confirmationDialog(
+        .alert(
             AppString("屏蔽 @\(post.authorUsername ?? "")？"),
-            isPresented: $confirmsBlock,
-            titleVisibility: .visible
+            isPresented: $confirmsBlock
         ) {
             Button(AppString("屏蔽并举报"), role: .destructive) {
                 guard let author = post.authorUsername else { return }
@@ -174,7 +173,7 @@ struct TopicMoreSheet: View {
         HStack(spacing: 14) {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(tint == Theme.text ? Theme.muted(0.65) : tint)
+                .foregroundStyle(tint == Theme.text ? Theme.textMuted : tint)
                 .frame(width: 24)
             Text(title)
                 .font(Theme.body(15))
@@ -230,7 +229,7 @@ struct TopicMoreSheet: View {
         // Presenting the gate while this sheet is still dismissing drops it.
         Task {
             try? await Task.sleep(for: .milliseconds(320))
-            presentAuth(app)
+            requestLogin(app)
         }
         return false
     }

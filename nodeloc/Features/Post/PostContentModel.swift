@@ -130,7 +130,12 @@ nonisolated extension [PostInline] {
 /// The intrinsic size matters: without it the layout reflows when each image
 /// finishes loading.
 nonisolated struct PostImage: Sendable, Equatable, Identifiable {
-    let id = UUID()
+    /// Derived from the content rather than a fresh `UUID()`. A stored UUID
+    /// made two parses of the same HTML compare unequal, so every re-parse
+    /// looked like new content to SwiftUI's diffing. Nothing uses this as a
+    /// `ForEach` key (a repeated image within a post is iterated by offset; see
+    /// `PostBlock.stableKey`), only to present one item at a time.
+    var id: String { src }
     var src: String
     /// Full-resolution target from the enclosing lightbox link, when present.
     var href: String?
@@ -167,7 +172,12 @@ nonisolated struct PostQuote: Sendable, Equatable {
 /// `discourse-anyvideo` transcodes the upload; `AnyVideoResolver` swaps in that
 /// HLS rendition before anything plays, and keeps `src` as the fallback.
 nonisolated struct PostVideo: Sendable, Equatable, Identifiable {
-    let id = UUID()
+    /// Derived from the content rather than a fresh `UUID()`. A stored UUID
+    /// made two parses of the same HTML compare unequal, so every re-parse
+    /// looked like new content to SwiftUI's diffing. Nothing uses this as a
+    /// `ForEach` key (a repeated video within a post is iterated by offset; see
+    /// `PostBlock.stableKey`), only to present one item at a time.
+    var id: String { src }
     var src: String
     /// Present when the server cooked an optimized variant.
     var originalSrc: String?
@@ -201,7 +211,12 @@ nonisolated struct PostVideo: Sendable, Equatable, Identifiable {
 /// different players, so keeping them apart stops one from being handed to the
 /// wrong one.
 nonisolated struct PostEmbed: Sendable, Equatable, Identifiable {
-    let id = UUID()
+    /// Derived from the content rather than a fresh `UUID()`. A stored UUID
+    /// made two parses of the same HTML compare unequal, so every re-parse
+    /// looked like new content to SwiftUI's diffing. Nothing uses this as a
+    /// `ForEach` key (a repeated embed within a post is iterated by offset; see
+    /// `PostBlock.stableKey`), only to present one item at a time.
+    var id: String { embedURL }
     /// What a web view loads to play it.
     var embedURL: String
     /// The human page for the same video, when the markup reveals it — used by
@@ -240,7 +255,8 @@ nonisolated indirect enum PostBlock: Sendable, Equatable, Identifiable {
     case codeBlock(language: String?, code: String)
     case quote(PostQuote)
     case blockquote([PostBlock])
-    case list(ordered: Bool, items: [[PostBlock]])
+    /// `start` is `<ol start="N">`'s first number (1 when absent).
+    case list(ordered: Bool, items: [[PostBlock]], start: Int = 1)
     case table(headers: [[PostInline]], rows: [[[PostInline]]])
     case details(summary: [PostInline], blocks: [PostBlock])
     case spoiler([PostBlock])
@@ -271,7 +287,7 @@ nonisolated indirect enum PostBlock: Sendable, Equatable, Identifiable {
             return nested.contains(where: \.containsReference)
         case .permission(let block):
             return block.blocks.contains(where: \.containsReference)
-        case .list(_, let items):
+        case .list(_, let items, _):
             return items.contains { $0.contains(where: \.containsReference) }
         default:
             return false
@@ -290,7 +306,7 @@ nonisolated indirect enum PostBlock: Sendable, Equatable, Identifiable {
         case .codeBlock(let language, let code): "code:\(language ?? "")\(code.prefix(32))"
         case .quote(let quote): "quote:\(quote.username ?? "")\(quote.blocks.count)"
         case .blockquote(let blocks): "bq:\(blocks.count):\(blocks.first?.stableKey ?? "")"
-        case .list(let ordered, let items): "list:\(ordered):\(items.count):\(items.first?.first?.stableKey ?? "")"
+        case .list(let ordered, let items, let start): "list:\(ordered):\(start):\(items.count):\(items.first?.first?.stableKey ?? "")"
         case .table(let headers, let rows): "table:\(headers.count)x\(rows.count)"
         case .details(let summary, _): "details:\(summary.plainText.prefix(32))"
         case .spoiler(let blocks): "spoiler:\(blocks.count):\(blocks.first?.stableKey ?? "")"
@@ -312,7 +328,7 @@ nonisolated indirect enum PostBlock: Sendable, Equatable, Identifiable {
         case .codeBlock(_, let code): code
         case .quote(let quote): quote.blocks.map(\.plainText).joined(separator: "\n")
         case .blockquote(let blocks): blocks.map(\.plainText).joined(separator: "\n")
-        case .list(_, let items): items.map { $0.map(\.plainText).joined() }.joined(separator: "\n")
+        case .list(_, let items, _): items.map { $0.map(\.plainText).joined() }.joined(separator: "\n")
         case .table(let headers, let rows):
             ([headers.map(\.plainText)] + rows.map { $0.map(\.plainText) })
                 .map { $0.joined(separator: " ") }
@@ -431,7 +447,7 @@ nonisolated struct PostContent: Sendable, Equatable {
                 return containsReplyLock(in: permission.blocks)
             case .quote(let quote): return containsReplyLock(in: quote.blocks)
             case .blockquote(let nested): return containsReplyLock(in: nested)
-            case .list(_, let items): return items.contains { containsReplyLock(in: $0) }
+            case .list(_, let items, _): return items.contains { containsReplyLock(in: $0) }
             case .details(_, let nested): return containsReplyLock(in: nested)
             case .spoiler(let nested): return containsReplyLock(in: nested)
             default: return false
@@ -445,7 +461,7 @@ nonisolated struct PostContent: Sendable, Equatable {
             case .image(let image): [image]
             case .quote(let quote): collectImages(in: quote.blocks)
             case .blockquote(let nested): collectImages(in: nested)
-            case .list(_, let items): items.flatMap { collectImages(in: $0) }
+            case .list(_, let items, _): items.flatMap { collectImages(in: $0) }
             case .details(_, let nested): collectImages(in: nested)
             case .spoiler(let nested): collectImages(in: nested)
             default: []
@@ -459,7 +475,7 @@ nonisolated struct PostContent: Sendable, Equatable {
             case .video(let video): [video]
             case .quote(let quote): collectVideos(in: quote.blocks)
             case .blockquote(let nested): collectVideos(in: nested)
-            case .list(_, let items): items.flatMap { collectVideos(in: $0) }
+            case .list(_, let items, _): items.flatMap { collectVideos(in: $0) }
             case .details(_, let nested): collectVideos(in: nested)
             case .spoiler(let nested): collectVideos(in: nested)
             default: []

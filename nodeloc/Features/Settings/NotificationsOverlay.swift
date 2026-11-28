@@ -10,15 +10,25 @@ import SwiftUI
 // MARK: - Notifications
 
 struct NotificationsOverlay: View {
+    @Environment(AppState.self) private var app
     @State private var store = NotificationsStore()
 
     var body: some View {
         VStack(spacing: 0) {
-            OverlayHeader(title: "Notifications")
+            PageHeader(title: AppString("通知")) { closeOverlay(app) }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if store.isLoading && store.items.isEmpty {
                         ProgressView().tint(Theme.accent).padding(.top, 40)
+                    } else if store.items.isEmpty, let errorText = store.errorText {
+                        VStack(spacing: 12) {
+                            EmptyStateView(icon: "exclamationmark.triangle", message: errorText)
+                            Button(AppString("重试")) { Task { await store.reload() } }
+                                .buttonStyle(.bordered)
+                                .tint(Theme.accent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
                     } else if store.items.isEmpty {
                         EmptyStateView(
                             icon: "bell",
@@ -38,6 +48,8 @@ struct NotificationsOverlay: View {
                 }
             }
             .scrollIndicators(.hidden)
+            // A failed refetch keeps what's on screen (see `load`).
+            .refreshable { await store.reload() }
         }
         .background(Theme.bg.ignoresSafeArea())
         .task { await store.load() }
@@ -50,15 +62,21 @@ private struct NotificationRow: View {
     var onOpen: (() -> Void)?
     @Environment(\.openURL) private var openURL
 
+    /// A notification with nowhere to go opens its own text rather than
+    /// leaving a row that ignores the tap.
+    @State private var showsDetail = false
+
     var body: some View {
         Button {
             onOpen?()
-            if let url = notification.url { openURL(url) }
+            if let url = notification.url { openURL(url) } else { showsDetail = true }
         } label: {
             rowContent
         }
         .buttonStyle(.pressable)
-        .disabled(notification.url == nil)
+        .sheet(isPresented: $showsDetail) {
+            NotificationDetailSheet(notification: notification)
+        }
     }
 
     private var rowContent: some View {
@@ -74,11 +92,11 @@ private struct NotificationRow: View {
                 let textPart = Text(" \(notification.text)").font(Theme.body(13))
                 Text("\(namePart)\(textPart)")
                     .foregroundStyle(Theme.text)
-                Text(notification.time).font(Theme.body(11)).foregroundStyle(Theme.muted(0.5))
+                Text(notification.time).font(Theme.body(11)).foregroundStyle(Theme.textMuted)
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 12).padding(.horizontal, 20)
+        .padding(.vertical, 12).padding(.horizontal, Theme.pagePadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(notification.unread ? Theme.accent.opacity(0.06) : .clear)
         .overlay(alignment: .bottom) {
@@ -118,5 +136,41 @@ private struct NotificationRow: View {
         case .star: return Theme.surface.blended(with: Theme.accent2_500, fraction: 0.18)
         case .system: return Theme.surface.blended(with: Theme.accent, fraction: 0.15)
         }
+    }
+}
+
+/// A notification that points nowhere: its title and text in full.
+struct NotificationDetailSheet: View {
+    let notification: AppNotification
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(notification.name)
+                        .font(Theme.body(13, weight: .semibold))
+                        .foregroundStyle(Theme.textMuted)
+                    Text(notification.text)
+                        .font(Theme.body(17))
+                        .foregroundStyle(Theme.text)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(notification.time)
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.textMuted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+            }
+            .navigationTitle(AppString("通知"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(AppString("完成")) { dismiss() }
+                }
+            }
+        }
+        .standardSheet([.medium, .large])
     }
 }

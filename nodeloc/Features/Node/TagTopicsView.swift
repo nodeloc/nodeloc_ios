@@ -45,10 +45,20 @@ struct TagTopicsView: View {
                 .tint(Theme.accent)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.visiblePosts.isEmpty {
-            EmptyStateView(
-                icon: "number",
-                message: store.errorText ?? AppString("这个标签下还没有主题")
-            )
+            VStack(spacing: 12) {
+                EmptyStateView(
+                    icon: store.errorText == nil ? "number" : "wifi.exclamationmark",
+                    message: store.errorText ?? AppString("这个标签下还没有主题")
+                )
+                // A failed load had no way back short of closing the sheet.
+                if store.errorText != nil {
+                    Button(AppString("重试")) {
+                        Task { await store.load(slug: slug) }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.horizontal, 32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
@@ -76,6 +86,7 @@ struct TagTopicsView: View {
                 .padding(.bottom, 24)
             }
             .scrollIndicators(.hidden)
+            .refreshable { await store.load(slug: slug) }
         }
     }
 }

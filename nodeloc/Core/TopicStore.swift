@@ -83,12 +83,16 @@ final class TopicReadTracker {
     func begin(topicID: Int) {
         self.topicID = topicID
         visible = [1]        // the first post is on screen when a topic opens
+        furthest = 1
         pendingByPost = [:]
         pendingTopicTime = 0
     }
 
+    /// The furthest floor that has been on screen, for 浏览记录.
+    private(set) var furthest = 1
+
     func setVisible(_ postNumber: Int, _ isVisible: Bool) {
-        if isVisible { visible.insert(postNumber) } else { visible.remove(postNumber) }
+        if isVisible { visible.insert(postNumber); furthest = max(furthest, postNumber) } else { visible.remove(postNumber) }
     }
 
     /// Called on a ~1s heartbeat: credit the elapsed time to on-screen posts.
@@ -160,7 +164,13 @@ final class TopicStore {
     /// everyone else each see the slice the server sent them.
     private(set) var removal: TopicRemoval?
     private(set) var acceptedAnswerPostID: Int?
+    /// The best answer's floor and author, for the 最佳答案 block when the
+    /// reply itself isn't loaded yet.
+    private(set) var acceptedAnswerPostNumber: Int?
+    private(set) var acceptedAnswerUsername: String?
     private(set) var acceptedAnswerBy: String?
+    /// The topic's tags, shown under the title.
+    private(set) var topicTags: [String] = []
     private(set) var canAcceptAnswer = false
     private(set) var canEditTopic = false
     private(set) var canDeleteTopic = false
@@ -171,6 +181,10 @@ final class TopicStore {
     private(set) var firstPostEditCount = 0
     private(set) var canDeleteFirstPost = false
     private(set) var isTopicClosed = false
+    /// 精华, and whether this reader manages the topic's node at all — the
+    /// gate for 版主操作 and 处理帖子和作者.
+    private(set) var isTopicFeatured = false
+    private(set) var canModerateTopic = false
     /// Discourse features a topic three different ways, and they are not
     /// interchangeable: a node pin tops one node's lists, a global pin tops
     /// every list, and a banner floats above every page. On top of that each
@@ -198,14 +212,21 @@ final class TopicStore {
     private(set) var firstPostVoteDirection: VoteDirection = .none
     private(set) var firstPostCanVoteUp = false
     private(set) var firstPostCanVoteDown = false
+    /// The first post is hidden; why, when this reader may know.
+    private(set) var firstPostHidden: PostHiddenState?
+    /// Replies this reader just posted that went to review (`held`), shown
+    /// as waiting even before the server says why they are hidden.
+    private var heldPostIDs: Set<Int> = []
+    /// The last reply went to review rather than being published.
+    private(set) var lastReplyHeld = false
     /// The OP's like count (kept here so the toggle can update it live).
     var firstPostLikeCount = 0
-    /// Rewards the OP has received (for the 打赏 total + detail sheet).
-    var firstPostRewards: [PostReward] = []
     /// Plugin payloads for the first post and the topic.
     var firstPostPolls: [PostPoll] = []
     var myPollVotes: [String: [String]] = [:]
     var lottery: PostLottery?
+    /// The first post's 担保交易, when the topic has one.
+    private(set) var trade: NLTrade?
     var redEnvelope: TopicRedEnvelope?
     /// How top-level reply threads are ordered.
     private(set) var replySort: ReplySort = .oldest
@@ -254,6 +275,10 @@ final class TopicStore {
 
     /// Why the last load failed, or nil. Drives the reader's failure state.
     private(set) var loadError: String?
+    /// The server's code and sentence when it refused the topic
+    /// (`not_found`, `login_required`, `trust_level_too_low`, `node_banned`).
+    private(set) var loadErrorCode: String?
+    private(set) var loadErrorMessage: String?
     /// Which kind of failure, because the reader is told a different thing and
     /// offered a different action for each.
     private(set) var loadFailure: LoadFailure?
@@ -272,6 +297,8 @@ final class TopicStore {
         guard loadedID != topicID else { return }
         loadError = nil
         loadFailure = nil
+        loadErrorCode = nil
+        loadErrorMessage = nil
         // Only a *different* topic gets cleared. Reloading the one already on
         // screen — what posting a reply does — used to empty `content` and
         // `comments` first, which pulled the whole scroll content out from
@@ -295,13 +322,18 @@ final class TopicStore {
             revealingPostIDs = []
             removal = nil
             acceptedAnswerPostID = nil
+            acceptedAnswerPostNumber = nil
+            acceptedAnswerUsername = nil
             acceptedAnswerBy = nil
+            topicTags = []
             canAcceptAnswer = false
             canEditTopic = false
             canDeleteTopic = false
             canCloseTopic = false
             canPinTopic = false
             canBannerTopic = false
+            canModerateTopic = false
+            isTopicFeatured = false
             canEditFirstPost = false
             firstPostEditCount = 0
             canDeleteFirstPost = false
@@ -313,11 +345,12 @@ final class TopicStore {
             firstPostVoteDirection = .none
             firstPostCanVoteUp = false
             firstPostCanVoteDown = false
+            firstPostHidden = nil
             firstPostLikeCount = 0
-            firstPostRewards = []
             firstPostPolls = []
             myPollVotes = [:]
             lottery = nil
+            trade = nil
             redEnvelope = nil
             nestedRoots = []
         }
@@ -329,6 +362,13 @@ final class TopicStore {
            let cached = try? DiscourseClient.decodeTopic(snapshot.data) {
             await apply(topic: cached)
         }
+        // The reply thread doesn't depend on the topic response, so it is
+        // requested alongside it instead of after it; `loadNested` picks it up.
+        let prefetchSort = replySort.apiValue
+        let prefetchClient = client
+        nestedPrefetch = (topicID, prefetchSort, Task {
+            try? await prefetchClient.nestedTopicWithRaw(id: topicID, sort: prefetchSort, page: 0)
+        })
         do {
             let (topic, raw) = try await client.topicWithRaw(id: topicID)
             await apply(topic: topic)
@@ -348,7 +388,9 @@ final class TopicStore {
             // 403 is the answer for a topic this account may not read — a
             // private message, a staff category — and it is not worth a retry
             // button, so the overlay offers the web page instead.
-            if case DiscourseError.badResponse(let status, _, _) = error {
+            if case DiscourseError.badResponse(let status, let message, let code) = error {
+                loadErrorCode = code
+                loadErrorMessage = message
                 loadFailure = switch status {
                 case 403: .denied
                 case 404: .missing
@@ -367,6 +409,8 @@ final class TopicStore {
             // a message thread showed its first post and then stopped, which
             // is what "看不到回复" was. A PM has no reply tree to render
             // anyway; it is a flat conversation.
+            nestedPrefetch?.task.cancel()
+            nestedPrefetch = nil
             nestedRoots = Array(privateMessagePosts.dropFirst())
             comments = buildNestedComments(from: nestedRoots)
             totalReplyCount = nestedRoots.count
@@ -417,8 +461,8 @@ final class TopicStore {
             firstPostVoteDirection = Self.direction(for: firstPost)
             firstPostCanVoteUp = firstPost.canVoteUp ?? true
             firstPostCanVoteDown = firstPost.canVoteDown ?? false
+            firstPostHidden = hiddenState(for: firstPost)
             firstPostLikeCount = firstPost.likeCount
-            firstPostRewards = firstPost.rewards ?? []
         }
         redEnvelope = topic.redEnvelope
         totalReplyCount = max(0, (topic.postsCount ?? 1) - 1)
@@ -431,8 +475,11 @@ final class TopicStore {
         topicSlug = topic.slug
         // `firstAuthorTitle` is already set above, and unlike `firstPost`
         // it's in scope here.
-        await resolveTitleStyles(for: [firstAuthorTitle].compactMap { $0 })
+        await resolveTitleStyles(for: Array(posts.prefix(1)))
         isTopicClosed = topic.closed ?? false
+        isTopicFeatured = topic.featured ?? false
+        hasTrade = topic.hasTrade ?? false
+        canModerateTopic = topic.details?.canModerate ?? false
         // `pinned_at`, not `pinned`: the latter is already filtered by this
         // reader's own dismissal, so a moderator who cleared the pin for
         // themselves would be offered 置顶 on a topic that is pinned.
@@ -451,7 +498,10 @@ final class TopicStore {
         canBannerTopic = details?.canBannerTopic ?? false
         removal = topic.removal
         acceptedAnswerPostID = topic.acceptedAnswer?.postId
+        acceptedAnswerPostNumber = topic.acceptedAnswer?.postNumber
+        acceptedAnswerUsername = topic.acceptedAnswer?.username
         acceptedAnswerBy = topic.acceptedAnswer?.acceptedBy
+        topicTags = topic.tags ?? []
         canAcceptAnswer = topic.canAcceptAnswer ?? false
 
         // Parse the OP off the main actor before touching @Observable state.
@@ -468,14 +518,25 @@ final class TopicStore {
     private func applyNested(_ response: NestedTopicResponse, reset: Bool) async {
         let roots = response.roots ?? []
         if let pinned = response.pinnedPostIds { pinnedPostIDs = Set(pinned) }
-        if reset { nestedRoots = roots } else { nestedRoots.append(contentsOf: roots) }
+        if reset {
+            nestedRoots = roots
+        } else {
+            // Replies posted since the previous page shift the server's
+            // offsets, so a later page can repeat roots already shown. Rows
+            // are keyed on post id; a repeat would duplicate SwiftUI identity.
+            let loaded = Set(flatten(nestedRoots).map(\.id))
+            nestedRoots.append(contentsOf: roots.filter { !loaded.contains($0.id) })
+        }
         nestedHasMore = response.hasMoreRoots?.value ?? false
         await parseContents(for: flatten(nestedRoots))
         comments = buildNestedComments(from: nestedRoots)
-        await resolveTitleStyles(for: flatten(nestedRoots).compactMap(\.userTitle))
+        await resolveTitleStyles(for: flatten(nestedRoots))
     }
 
     /// Loads (or appends) the nested reply tree for the current `replySort`.
+    /// The first reply page, requested together with the topic.
+    private var nestedPrefetch: (topicID: Int, sort: String, task: Task<(response: NestedTopicResponse, raw: Data)?, Never>)?
+
     private func loadNested(reset: Bool) async {
         guard let topicID else { return }
         if reset {
@@ -495,15 +556,31 @@ final class TopicStore {
            let response = try? DiscourseClient.decodeNestedTopic(cached) {
             await applyNested(response, reset: true)
         }
+        let sort = replySort
+        // The first page may already be on its way (started with the topic).
+        var prefetched: (response: NestedTopicResponse, raw: Data)?
+        if reset, let pending = nestedPrefetch, pending.topicID == topicID, pending.sort == sort.apiValue {
+            nestedPrefetch = nil
+            prefetched = await pending.task.value
+        }
         do {
-            let (response, raw) = try await client.nestedTopicWithRaw(
-                id: topicID,
-                sort: replySort.apiValue,
-                page: nestedPage
-            )
-            if reset { TopicSnapshot.saveReplies(raw, id: topicID, sort: replySort.apiValue) }
+            let (response, raw) = try await {
+                if let prefetched { return prefetched }
+                return try await client.nestedTopicWithRaw(
+                    id: topicID,
+                    sort: sort.apiValue,
+                    page: nestedPage
+                )
+            }()
+            if reset { TopicSnapshot.saveReplies(raw, id: topicID, sort: sort.apiValue) }
+            // The sort or the topic changed while this page was in flight; its
+            // rows belong to a list that is no longer on screen.
+            guard sort == replySort, topicID == self.topicID else { return }
             await applyNested(response, reset: reset)
         } catch {
+            // A failed next page is retried by the sentinel, so it has to ask
+            // for the same page again rather than skip past it.
+            if !reset { nestedPage = max(0, nestedPage - 1) }
             // Deliberately keeps whatever is already on screen. Emptying the
             // rows here meant one failed refresh — a 429 right after posting is
             // the easy way to get one — replaced a perfectly good thread with a
@@ -587,13 +664,19 @@ final class TopicStore {
         pollsInFlight.insert(pollName)
         defer { pollsInFlight.remove(pollName) }
 
-        // Optimistic: reflect the selection immediately, roll back on failure.
+        // Optimistic: the selection and the counts move at once (when the
+        // counts are known); the server's answer then replaces them, and a
+        // failure puts both back.
         let previousVotes = myPollVotes[pollName]
         let previousPolls = firstPostPolls
+        if let index = firstPostPolls.firstIndex(where: { $0.pollName == pollName }) {
+            firstPostPolls[index] = Self.applying(options, replacing: previousVotes ?? [], to: firstPostPolls[index])
+        }
         myPollVotes[pollName] = options
 
         do {
-            let response = try await client.votePoll(postID: postID, pollName: pollName, options: options)
+            let pollID = previousPolls.first { $0.pollName == pollName }?.id
+            let response = try await client.votePoll(postID: postID, pollName: pollName, options: options, pollID: pollID)
             if let poll = response.poll { replacePoll(poll, name: pollName) }
             if let vote = response.vote { myPollVotes[pollName] = vote }
         } catch {
@@ -610,10 +693,14 @@ final class TopicStore {
 
         let previousVotes = myPollVotes[pollName]
         let previousPolls = firstPostPolls
+        if let index = firstPostPolls.firstIndex(where: { $0.pollName == pollName }) {
+            firstPostPolls[index] = Self.applying([], replacing: previousVotes ?? [], to: firstPostPolls[index])
+        }
         myPollVotes[pollName] = []
 
         do {
-            let response = try await client.removePollVote(postID: postID, pollName: pollName)
+            let pollID = previousPolls.first { $0.pollName == pollName }?.id
+            let response = try await client.removePollVote(postID: postID, pollName: pollName, pollID: pollID)
             if let poll = response.poll { replacePoll(poll, name: pollName) }
         } catch {
             myPollVotes[pollName] = previousVotes
@@ -622,8 +709,11 @@ final class TopicStore {
         }
     }
 
-    func participateInLottery(quantity: Int, isRandom: Bool) async {
-        guard let lottery, !isLotteryBusy else { return }
+    /// Buys tickets. Returns the viewer's new total, or nil when it failed
+    /// (the reason is in `pluginErrorText`).
+    @discardableResult
+    func participateInLottery(quantity: Int, isRandom: Bool) async -> Int? {
+        guard let lottery, !isLotteryBusy else { return nil }
         isLotteryBusy = true
         defer { isLotteryBusy = false }
 
@@ -635,18 +725,64 @@ final class TopicStore {
             )
             if response.success == false {
                 pluginErrorText = response.error ?? AppString("参与失败。")
-                return
+                return nil
             }
-            if let updated = response.lottery {
-                self.lottery = updated
-            } else if let topicID = loadedID {
-                // The endpoint doesn't always echo the lottery back; refetch so
-                // ticket counts stay truthful.
-                await refreshLottery(topicID: topicID)
-            }
+            // The endpoint answers with the ticket total only; refetch so the
+            // counts and the avatar strip stay truthful.
+            await refreshLottery()
+            return response.tickets ?? self.lottery?.userTickets
         } catch {
-            pluginErrorText = failureText(error)
+            pluginErrorText = lotteryFailureText(error)
+            return nil
         }
+    }
+
+    /// Admins only. Closes the lottery and refunds every ticket.
+    func cancelLottery() async {
+        guard let lottery, !isLotteryBusy else { return }
+        isLotteryBusy = true
+        defer { isLotteryBusy = false }
+        do {
+            try await client.cancelLottery(lotteryID: lottery.id)
+            await refreshLottery()
+        } catch {
+            pluginErrorText = lotteryFailureText(error)
+        }
+    }
+
+    func lotteryParticipants() async throws -> LotteryParticipantsResponse {
+        guard let lottery else { throw DiscourseError.badResponse(404, message: nil, code: "not_found") }
+        return try await client.lotteryParticipants(lotteryID: lottery.id)
+    }
+
+    /// The server's own words ("升到白银后才能参与这个抽奖") read better than a
+    /// generic status line.
+    private func lotteryFailureText(_ error: Error) -> String {
+        if case DiscourseError.badResponse(_, let message?, _) = error, !message.isEmpty {
+            return message
+        }
+        return failureText(error)
+    }
+
+    /// The poll with one voter's choice moved from `old` to `new`. Counts the
+    /// server hid (nil) stay hidden: nothing is invented.
+    static func applying(_ new: [String], replacing old: [String], to poll: PostPoll) -> PostPoll {
+        guard let options = poll.options, options.contains(where: { $0.votes != nil }) else { return poll }
+        let removed = Set(old), added = Set(new)
+        let moved = options.map { option -> PollOptionResult in
+            var votes = option.votes ?? 0
+            if removed.contains(option.id) { votes -= 1 }
+            if added.contains(option.id) { votes += 1 }
+            return PollOptionResult(id: option.id, html: option.html, votes: max(0, votes))
+        }
+        var voters = poll.voters
+        if old.isEmpty, !new.isEmpty { voters = (voters ?? 0) + 1 }
+        if !old.isEmpty, new.isEmpty { voters = max(0, (voters ?? 1) - 1) }
+        return PostPoll(
+            id: poll.id, name: poll.name, type: poll.type, status: poll.status, results: poll.results,
+            min: poll.min, max: poll.max, step: poll.step, options: moved, voters: voters,
+            close: poll.close, chartType: poll.chartType, title: poll.title, public: poll.public
+        )
     }
 
     private func replacePoll(_ poll: PostPoll, name: String) {
@@ -655,11 +791,20 @@ final class TopicStore {
         }
     }
 
-    private func refreshLottery(topicID: Int) async {
-        guard let topic = try? await client.topic(id: topicID),
-              let first = topic.postStream.posts.first
-        else { return }
-        lottery = first.lottery
+    private var hasTrade = false
+
+
+    /// Fetches the first post's trade when the topic says it has one.
+    func refreshTrade() async {
+        guard hasTrade, let postID = firstPostID else { trade = nil; return }
+        if let fresh = try? await client.postTrade(postID: postID) { trade = fresh }
+    }
+
+    func refreshLottery() async {
+        guard let current = lottery, let postID = current.postId ?? firstPostID else { return }
+        if let fresh = try? await client.lottery(postID: postID, isOwner: current.isOwner ?? false) {
+            lottery = fresh
+        }
     }
 
     private func failureText(_ error: Error) -> String {
@@ -816,7 +961,6 @@ final class TopicStore {
                     voteScore: post.voteScore,
                     voteDirection: Self.direction(for: post),
                     canVoteDown: post.canVoteDown ?? false,
-                    rewards: post.rewards ?? [],
                     mobileSource: post.mobileSource,
                     isPinned: pinnedPostIDs.contains(post.id),
                     isDeletedPlaceholder: post.deletedPostPlaceholder ?? false,
@@ -835,6 +979,7 @@ final class TopicStore {
                     editCount: max(0, (post.version ?? 1) - 1)
                 )
             )
+            result[result.count - 1].hidden = hiddenState(for: post)
             let nextTrails = trails + [!isLast]
             let last = kids.count - 1
             for (index, kid) in kids.enumerated() {
@@ -914,6 +1059,12 @@ final class TopicStore {
         defer { isSubmitting = false }
         do {
             let created = try await client.reply(topicID: topicID, raw: trimmed, replyToPostNumber: replyToPostNumber)
+            lastReplyHeld = created.held == true
+            if lastReplyHeld, let id = created.id {
+                // Not published yet: say so, and mark the row as waiting.
+                heldPostIDs.insert(id)
+                ToastCenter.shared.show(AppString("已提交，审核通过后显示"))
+            }
             if let id = created.id {
                 await insertPostedReply(
                     id: id,
@@ -978,8 +1129,8 @@ final class TopicStore {
     /// Pull-to-refresh on the reader.
     ///
     /// `load` short-circuits for the topic already on screen, so the marker has
-    /// to be cleared first — the same two steps `giveReward` and `blockAuthor`
-    /// take. The reload folds in anything the live-update pill was holding, so
+    /// to be cleared first — the same two steps `blockAuthor` takes.
+    /// The reload folds in anything the live-update pill was holding, so
     /// the count goes with it.
     func refresh() async {
         guard let id = loadedID ?? topicID else { return }
@@ -1034,7 +1185,11 @@ final class TopicStore {
     /// than anything assembled here, and one request for the batch.
     private func insertFetchedReplies(ids: [Int], topicID: Int) async {
         guard let response = try? await client.topicPosts(topicID: topicID, postIDs: ids) else { return }
-        let posts = response.postStream.posts.filter { ids.contains($0.id) }
+        // Skips anything already threaded in. The bus can announce this
+        // reader's own reply before `insertPostedReply` places it, which left
+        // the id in the pill and a second tap on it added the row twice.
+        let posts = response.postStream.posts.filter { ids.contains($0.id) && !isLoaded(postID: $0.id) }
+        pendingUpdateIDs.removeAll { ids.contains($0) }
         guard !posts.isEmpty else { return }
 
         await parseContents(for: posts)
@@ -1215,15 +1370,28 @@ final class TopicStore {
     /// Looks up the styles for titles this topic actually shows, skipping any
     /// already resolved. `TitleStyleCatalog` caches the whole set after its
     /// first load, so this is one await and no request on later topics.
-    private func resolveTitleStyles(for titles: [String]) async {
-        let pending = Set(
-            titles
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && titleStyles[$0] == nil }
-        )
-        guard !pending.isEmpty else { return }
-
+    ///
+    /// The v1 backend sends each post's style with it (`author_title_style`),
+    /// which wins; the catalog only fills titles that came without one.
+    private func resolveTitleStyles(for posts: [TopicPost]) async {
         var resolved = titleStyles
+        for post in posts {
+            guard let title = post.userTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+                  let style = TitleStyle(color: post.userTitleColor, effect: post.userTitleEffect)
+            else { continue }
+            if resolved[title] != style { await TitleStyleCatalog.shared.remember(style, forTitle: title) }
+            resolved[title] = style
+        }
+        let pending = Set(
+            posts.compactMap(\.userTitle)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && resolved[$0] == nil }
+        )
+        guard !pending.isEmpty else {
+            if resolved != titleStyles { titleStyles = resolved }
+            return
+        }
+
         for title in pending {
             if let style = await TitleStyleCatalog.shared.style(forTitle: title) {
                 resolved[title] = style
@@ -1243,6 +1411,11 @@ final class TopicStore {
     /// on screen is the server's, not a local guess at how it cooks.
     func saveEdit(postID: Int, raw: String) async -> Bool {
         guard let topicID else { return false }
+        // Read before the edit: an author's edit to a rule-hidden post goes
+        // back to the AI, and the reply says so instead of "saved".
+        let rejudges = postID == firstPostID
+            ? firstPostHidden?.rejudge == true
+            : comments.first { $0.id == postID }?.hidden?.rejudge == true
         do {
             try await client.updatePost(id: postID, raw: raw)
             if postID == firstPostID {
@@ -1254,7 +1427,7 @@ final class TopicStore {
             } else {
                 await replacePost(id: postID, topicID: topicID)
             }
-            ToastCenter.shared.show(AppString("已保存修改"))
+            ToastCenter.shared.show(rejudges ? AppString("已提交重新判定，通过后会自动恢复显示") : AppString("已保存修改"))
             return true
         } catch {
             ToastCenter.shared.showError(error)
@@ -1357,6 +1530,33 @@ final class TopicStore {
     }
 
     /// 关闭 / 重新开放. Applied locally first so the menu's label flips at once.
+    /// 设为精华. Staff only; a node moderator never sees the switch.
+    func setFeatured(_ on: Bool) async {
+        guard let topicID else { return }
+        isTopicFeatured = on
+        do {
+            try await client.setTopicFeatured(topicID: topicID, featured: on)
+            ToastCenter.shared.show(on ? AppString("已设为精华") : AppString("已取消精华"))
+        } catch {
+            isTopicFeatured = !on
+            ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// 移动到其他节点, then reload so the pill and permissions follow it.
+    func move(toNode slug: String, reason: String, note: String) async -> Bool {
+        guard let topicID else { return false }
+        do {
+            try await client.moveTopic(topicID: topicID, toNode: slug, reason: reason, note: note)
+            ToastCenter.shared.show(AppString("已移动到 n/\(slug)"))
+            await load(topicID: topicID)
+            return true
+        } catch {
+            ToastCenter.shared.showError(error)
+            return false
+        }
+    }
+
     func toggleClosed() async {
         guard let topicID else { return }
         let target = !isTopicClosed
@@ -1524,6 +1724,16 @@ final class TopicStore {
         }
     }
 
+
+    /// The hidden state of a post as this reader may see it.
+    func hiddenState(for post: TopicPost) -> PostHiddenState? {
+        if heldPostIDs.contains(post.id), post.hidden != false {
+            return PostHiddenState(reason: post.hiddenReason ?? "held", note: post.hiddenNote, rejudge: post.rejudge ?? false)
+        }
+        guard post.hidden == true else { return nil }
+        return PostHiddenState(reason: post.hiddenReason, note: post.hiddenNote, rejudge: post.rejudge ?? false)
+    }
+
     /// Accepts a reply as the best answer, or withdraws the current one. Once
     /// a topic has an answer it can only be withdrawn, not re-pointed, so the
     /// caller only ever offers one of the two.
@@ -1531,7 +1741,10 @@ final class TopicStore {
         let withdrawing = acceptedAnswerPostID == postID
         do {
             try await client.acceptAnswer(postID: postID, accepted: !withdrawing)
+            let reply = comments.first { $0.id == postID }
             acceptedAnswerPostID = withdrawing ? nil : postID
+            acceptedAnswerPostNumber = withdrawing ? nil : reply?.postNumber
+            acceptedAnswerUsername = withdrawing ? nil : reply?.author
             acceptedAnswerBy = withdrawing ? nil : "author"
             comments = buildNestedComments(from: nestedRoots)
             ToastCenter.shared.show(withdrawing ? AppString("已撤销采纳") : AppString("已采纳为最佳答案"))
@@ -1597,16 +1810,6 @@ final class TopicStore {
         }
     }
 
-    /// 打赏 — gives energy to a post via discourse-reward, then reloads so the
-    /// new reward total shows.
-    func giveReward(postID: Int, amount: Int, note: String?) async throws {
-        try await client.giveReward(postID: postID, amount: amount, note: note)
-        if let id = loadedID {
-            loadedID = nil
-            await load(topicID: id)
-        }
-    }
-
     /// 屏蔽作者 — through `BlockedUsersStore`, so the block also hides the
     /// author's rows in every list and tells the moderators about the post
     /// (guideline 1.2). Reloads afterwards so this reader sees it land here
@@ -1629,8 +1832,14 @@ final class TopicStore {
     }
 
     /// Repost — republishes this topic into another node via discourse-community.
-    func repost(topicID: Int, categoryID: Int, title: String) async throws {
-        try await client.repost(topicID: topicID, categoryID: categoryID, title: title)
+    /// Returns whether the repost was held for review.
+    @discardableResult
+    func repost(topicID: Int, categoryID: Int, title: String) async throws -> Bool {
+        let data = try await client.repost(topicID: topicID, categoryID: categoryID, title: title)
+        struct Created: Decodable { let held: Bool? }
+        let held = (try? NodelocJSON.decode(Created.self, from: data))?.held == true
+        if held { ToastCenter.shared.show(AppString("已提交，审核通过后显示")) }
+        return held
     }
 
     /// Discourse's `flair_url` is either an image path/URL or a bare Font
@@ -1713,6 +1922,7 @@ final class TopicStore {
                     editCount: max(0, (post.version ?? 1) - 1)
                 )
             )
+            result[result.count - 1].hidden = hiddenState(for: post)
 
             guard !childPosts.isEmpty else { return }
             let nextTrails = ancestorTrails + [!isLastSibling]

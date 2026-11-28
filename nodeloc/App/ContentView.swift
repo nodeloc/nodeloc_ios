@@ -47,7 +47,11 @@ struct ContentView: View {
         .foregroundStyle(Theme.text)
         .tint(Theme.accent)
         // Friendly failure notices for actions that have no other surface.
-        .overlay(alignment: .top) { ToastHost() }
+        // Both only while nothing is presented over the root: a cover or sheet
+        // shows its own (see `appPresentationHost`), since anything drawn here
+        // is underneath it.
+        .overlay(alignment: .top) { if BrowserState.shared.isTop(nil) { ToastHost() } }
+        .penaltyAlert(app: app, isActive: BrowserState.shared.isTop(nil))
         // Over everything, and only on a cold start: the app keeps loading
         // behind it, so the animation costs no time it wasn't already using.
         .overlay {
@@ -60,15 +64,27 @@ struct ContentView: View {
         // scheme here is all "深色/浅色" needs. `.auto` passes nil and follows
         // the system.
         .preferredColorScheme(preferences.colorMode.colorScheme)
-        // `Text` resolves its key against the environment's locale at render
-        // time, so overriding it here re-localizes everything below without a
-        // relaunch. Arabic and Persian also need the mirrored layout, which
-        // does not follow from the locale on its own.
-        .environment(\.locale, appLocale.locale)
-        .environment(\.layoutDirection, appLocale.layoutDirection)
         // The root's link handling, in-app browser and reference sheet. Every
         // cover below re-establishes its own — see `appPresentationHost`.
         .routesLinksInApp(app: app, browser: browser)
+        .sheet(item: Binding(
+            get: { BrowserState.shared.isTop(nil) ? app.resetPasswordToken : nil },
+            set: { app.resetPasswordToken = $0 }
+        )) { token in
+            NavigationStack { ResetPasswordPage(token: token.value) { app.resetPasswordToken = nil } }
+                .environment(app)
+        }
+        // The guest login prompt, when no cover is up (covers show their own).
+        .sheet(item: Binding(
+            get: { BrowserState.shared.isTop(nil) ? app.loginPrompt : nil },
+            set: { app.loginPrompt = $0 }
+        )) { context in
+            LoginPromptSheet(
+                context: context,
+                onLogin: { Task { try? await Task.sleep(for: .milliseconds(350)); presentAuth(app, mode: .login) } },
+                onSignup: { Task { try? await Task.sleep(for: .milliseconds(350)); presentAuth(app, mode: .signup) } }
+            )
+        }
         .fullScreenCover(isPresented: browserPresented) {
             if let url = browser.url {
                 BrowserView(url: url) { browser.close() }
@@ -97,9 +113,18 @@ struct ContentView: View {
             NodeDetailOverlay(node: node) { app.routedNodeSlug = nil }
                 .appPresentationHost(app: app)
         }
-        .fullScreenCover(item: cover($app.routedCustomFeed)) { target in
-            CustomFeedCover(target: target)
+        // The routed page stack: profiles, nodes, posts, custom feeds, apps and
+        // group inboxes opened from anywhere, one cover, one navigation stack —
+        // see `AppState.pageStack`.
+        .fullScreenCover(isPresented: Binding(
+            get: { !app.pageStack.isEmpty },
+            set: { if !$0 { app.pageStack.removeAll() } }
+        )) {
+            RoutedPageStack()
                 .appPresentationHost(app: app)
+                // Clear, so the stack's base shows the screen underneath and
+                // the first page arrives with a push, not a cover.
+                .presentationBackground(.clear)
         }
         // A badge tapped at the root. Half height rather than full screen:
         // following a reference is a glance sideways, and the sheet leaves the
@@ -115,6 +140,13 @@ struct ContentView: View {
                 return
             }
             let node = await NodeCatalog.shared.node(slug: slug)
+            // Off the pinned-sidebar column, a node goes onto the page stack
+            // like every other routed page.
+            if let node, !app.routedPageInColumn {
+                app.routedNodeSlug = nil
+                app.pushPage(.node(node))
+                return
+            }
             withAnimation(.overlayPush) { app.routedNode = node }
             // Unknown slug: fall back to the web page rather than doing nothing.
             if node == nil,
@@ -127,7 +159,11 @@ struct ContentView: View {
         .environment(browser)
         // The root's reference handler, matching the sheet above. Covers
         // override this with their own so the nearest one presents.
-        .environment(\.openPostReference, OpenPostReferenceAction { app.routedReference = $0 })
+        // A #tag opens its tag page on the stack (App-iOS-Tag); other
+        // references keep their sheet.
+        .environment(\.openPostReference, OpenPostReferenceAction { reference in
+            if reference.kind == .tag { app.pushPage(.tag(reference.slug)) } else { app.routedReference = reference }
+        })
         // Shared across every rendered post so inline emoji are fetched once.
         .environment(EmojiImageStore.shared)
         // Mute is a single app-wide preference, like Reddit's.
@@ -168,24 +204,33 @@ struct ContentView: View {
         #endif
         // Read once per launch, before either gated feature can be reached.
         .task { await FeatureFlags.shared.refresh() }
+        // Tag colours and icons, for the chips on topic rows and node pages.
+        .task { await TagLookStore.shared.loadIfNeeded() }
         // The forum's language preference wins over the device's, so pick it up
         // whenever a session appears — at launch and again after signing in.
         .task(id: app.authed) {
             guard app.authed else { return }
-            await appLocale.syncFromAccount()
+            // Independent, so run together. The locale and the block list both
+            // read your own profile; started at once, they share one request.
+            async let locale: Void = appLocale.syncFromAccount()
             // The account's own block list is authoritative: someone blocked on
             // the website should be hidden here too, and someone unblocked
             // there should come back. See `BlockedUsersStore.loadFromServer`.
-            await BlockedUsersStore.shared.loadFromServer()
+            async let blocks = BlockedUsersStore.shared.loadFromServer()
             // A device token issued before the session was restored has
             // nowhere to go; this is the retry. See `syncRegistration`.
-            await PushNotificationService.shared.syncRegistration()
+            async let push: Void = PushNotificationService.shared.syncRegistration()
+            _ = await (locale, blocks, push)
         }
-        // A tapped push banner routes exactly like a tapped in-app link.
+        // A tapped push banner routes exactly like a universal link: buffered
+        // until the app proper is on screen (a cold start from a banner lands
+        // while the splash is up and before `MainView` exists, so routing on
+        // the spot opened the post into nothing), and with any cover left from
+        // before cleared so the post doesn't open invisibly behind it.
         .task(id: push.routedURL) {
             guard let url = push.routedURL else { return }
             push.routedURL = nil
-            LinkRouter.open(url, app: app, browser: browser)
+            pendingLink = url
         }
         // A universal link — tapped in Telegram, Messages, Mail, anywhere.
         // `onOpenURL` is the entire entry point: SwiftUI hands universal links
@@ -193,7 +238,15 @@ struct ContentView: View {
         // `onContinueUserActivity` would never fire for one.
         //
         // Buffered rather than routed on the spot, see the task below.
-        .onOpenURL { url in pendingLink = url }
+        .onOpenURL { url in
+            // A reset link is for someone who can't sign in: open it at once,
+            // not after the app is past its welcome screen.
+            if case .resetPassword(let token) = LinkRouter.destination(for: url) {
+                app.resetPasswordToken = ResetPasswordToken(value: token)
+            } else {
+                pendingLink = url
+            }
+        }
         // Routed only once the app proper is on screen.
         //
         // A cold start from a link delivers the URL while the splash is still
@@ -214,8 +267,10 @@ struct ContentView: View {
             // Cleared before routing, so a link that wants one of these can
             // still set it.
             browser.close()
+            app.pageStack.removeAll()
             app.routedProfile = nil
             app.routedNodeSlug = nil
+            app.routedCustomFeed = nil
             app.routedReference = nil
             LinkRouter.open(url, app: app, browser: browser)
         }
@@ -229,6 +284,17 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.25), value: app.authed)
         .animation(.easeInOut(duration: 0.25), value: app.isGuest)
         .animation(.easeInOut(duration: 0.25), value: app.onboardingDone)
+        // `Text` resolves its key against the environment's locale at render
+        // time, so overriding it here re-localizes everything below without a
+        // relaunch. Arabic and Persian also need the mirrored layout, which
+        // does not follow from the locale on its own.
+        //
+        // Last in the chain on purpose: an environment value only reaches
+        // what it wraps, and the sheets and covers above are modifiers. Set
+        // before them, it stopped at the root screen — the composer, login,
+        // pages and every sheet opened from them kept the system language.
+        .environment(\.locale, appLocale.locale)
+        .environment(\.layoutDirection, appLocale.layoutDirection)
     }
 
     private var browserPresented: Binding<Bool> {
@@ -258,62 +324,6 @@ struct ContentView: View {
             get: { app.routedPageInColumn ? nil : source.wrappedValue },
             set: { source.wrappedValue = $0 }
         )
-    }
-}
-
-// MARK: - Custom feed cover
-
-/// The custom feed page, plus the reader for a post opened from it.
-///
-/// The reader lives *here*, inside the same cover, and not beside the feed's
-/// cover in `ContentView`. Two `fullScreenCover` modifiers on one view can only
-/// ever have one of them presented: with the feed showing, the reader's request
-/// was simply dropped, so tapping a post did nothing until the feed was closed —
-/// at which point the reader finally appeared. Presenting from within the cover
-/// makes it a child of the thing it opens over, which is what stacks.
-///
-/// `app.overlay` is not an option for the same old reason: it draws in
-/// `MainView`, underneath every cover.
-private struct CustomFeedCover: View {
-    @Environment(AppState.self) private var app
-    let target: CustomFeedTarget
-    @State private var openedPost: Post?
-    @Namespace private var readerNamespace
-
-    var body: some View {
-        CustomFeedView(
-            target: target,
-            onOpenPost: { post in
-                app.markTopicOpened(id: post.id)
-                app.selectedPost = post
-                openedPost = post
-            },
-            onOpenNode: { node in
-                app.routedCustomFeed = nil
-                app.openNode(slug: node.slug)
-            },
-            onDeleted: { app.routedCustomFeed = nil }
-        )
-        // In the tree, not a cover: the same reason `NodeDetailOverlay` draws
-        // its reader inline. A cover renders nothing behind itself, so the
-        // reader's swipe-to-dismiss shrank away over a blank rectangle rather
-        // than over this feed. Stacked *over* the page here, which also keeps
-        // the earlier fix intact — the reader is a child of the presentation
-        // that showed this page, so it is not a second sibling cover.
-        .overlay {
-            if openedPost != nil {
-                ZStack {
-                    Theme.bg.ignoresSafeArea()
-                        .opacity(1 - app.readerDismissProgress)
-                    PostDetailOverlay(
-                        postTransitionNamespace: readerNamespace,
-                        onClose: { openedPost = nil }
-                    )
-                }
-                .environment(\.mediaAutoplayEnabled, true)
-                .transition(.opacity)
-            }
-        }
     }
 }
 

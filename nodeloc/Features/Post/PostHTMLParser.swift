@@ -670,7 +670,12 @@ nonisolated enum PostHTMLParser {
             return [parseDetails(tokens, index: &index)]
 
         case "ul", "ol":
-            return [parseList(ordered: tag.name == "ol", tokens: tokens, index: &index)]
+            return [parseList(
+                ordered: tag.name == "ol",
+                start: tag.attributes["start"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? 1,
+                tokens: tokens,
+                index: &index
+            )]
 
         case "li":
             // A list item outside a list; treat its contents as loose blocks.
@@ -917,6 +922,7 @@ nonisolated enum PostHTMLParser {
 
     private static func parseList(
         ordered: Bool,
+        start: Int = 1,
         tokens: [HTMLToken],
         index: inout Int
     ) -> PostBlock {
@@ -930,7 +936,7 @@ nonisolated enum PostHTMLParser {
             case .tag(let tag):
                 if tag.isClosing, tag.name == listTag {
                     index += 1
-                    return .list(ordered: ordered, items: items)
+                    return .list(ordered: ordered, items: items, start: start)
                 }
                 if tag.isClosing {
                     index += 1
@@ -944,7 +950,7 @@ nonisolated enum PostHTMLParser {
                 index += 1
             }
         }
-        return .list(ordered: ordered, items: items)
+        return .list(ordered: ordered, items: items, start: start)
     }
 
     private static func parseTable(_ tokens: [HTMLToken], index: inout Int) -> PostBlock {
@@ -1321,12 +1327,21 @@ nonisolated enum PostHTMLParser {
         }
 
         // Collapse the newlines Discourse leaves between tags; they are source
-        // formatting, not content.
-        return result.map { inline in
-            if case .text(let value) = inline {
-                return .text(value.replacingOccurrences(of: "\n", with: " "))
+        // formatting, not content. Next to a `<br>` they are dropped outright,
+        // as a browser does: the markdown's `<br>\n` otherwise became a space
+        // at the start of every following line, which read as an indent
+        // (t/119604). Only HTML's collapsible whitespace goes — a full-width
+        // space the author typed is content and stays.
+        let collapsible: Set<Character> = [" ", "\t", "\n", "\r"]
+        return result.indices.map { index in
+            guard case .text(var value) = result[index] else { return result[index] }
+            if index > 0, case .lineBreak = result[index - 1] {
+                value = String(value.drop(while: { collapsible.contains($0) }))
             }
-            return inline
+            if index + 1 < result.count, case .lineBreak = result[index + 1] {
+                while let last = value.last, collapsible.contains(last) { value.removeLast() }
+            }
+            return .text(value.replacingOccurrences(of: "\n", with: " "))
         }
     }
 

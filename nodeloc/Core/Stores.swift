@@ -32,6 +32,14 @@ struct SidebarFeedSummary: Identifiable {
     let nodeCount: Int?
 }
 
+/// A tag found by search.
+struct SearchTagResult: Identifiable, Hashable {
+    let name: String
+    let label: String
+    let topicCount: Int
+    var id: String { name }
+}
+
 struct SidebarNodeSummary: Identifiable, Codable {
     let id: Int
     let name: String
@@ -140,6 +148,13 @@ actor TitleStyleCatalog {
     func style(forTitle title: String) async -> TitleStyle? {
         await loadIfNeeded()
         return styles[Self.slug(title)]
+    }
+
+    /// A style the v1 backend sent with a post (`author_title_style`). The
+    /// profile endpoint carries the title without its style, so the profile
+    /// finds it here once the person's title has been seen on a post.
+    func remember(_ style: TitleStyle, forTitle title: String) {
+        styles[Self.slug(title)] = style
     }
 
     private func loadIfNeeded() async {
@@ -378,6 +393,13 @@ final class NodeCatalog {
         return bySlug[cleaned.lowercased()]
     }
 
+    /// The same lookup without waiting: nil until the catalog has loaded. Lets
+    /// a list row draw its node avatar on the first frame once it has.
+    func cachedNode(slug: String) -> SidebarNodeSummary? {
+        let cleaned = slug.hasPrefix("n/") ? String(slug.dropFirst(2)) : slug
+        return bySlug[cleaned.lowercased()]
+    }
+
     private func loadIfNeeded() async {
         if let loadTask { return await loadTask.value }
         let task = Task {
@@ -558,6 +580,17 @@ final class SidebarStore {
     private static var cachedSnapshot: SidebarCacheSnapshot?
     private static let cacheDuration: TimeInterval = 300
 
+    /// Drops the five-minute snapshot so the next load reads the joined
+    /// nodes again — called when the reader joins or leaves one.
+    static func invalidateCache() { cachedSnapshot = nil }
+
+    /// Re-reads the drawer after a join or leave elsewhere.
+    func reload(isSignedIn: Bool) async {
+        Self.cachedSnapshot = nil
+        loaded = false
+        await load(isSignedIn: isSignedIn)
+    }
+
     private struct SidebarCacheSnapshot {
         let isSignedIn: Bool
         let cachedAt: Date
@@ -604,17 +637,24 @@ final class AppsDirectoryStore {
         }
     }
 
+    /// The last directory fetched this session: the page draws it at once on
+    /// reopen and refreshes underneath.
+    private static var cached: [DirectoryApp] = []
+
+    init() {
+        apps = Self.cached
+    }
+
     func load() async {
         guard !loaded else { return }
-        isLoading = true
+        isLoading = apps.isEmpty
         errorText = nil
-        defer {
-            isLoading = false
-            loaded = true
-        }
+        defer { isLoading = false }
 
         do {
             apps = try await client.appsDirectory()
+            Self.cached = apps
+            loaded = true
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -719,9 +759,18 @@ enum NodeReadingMode: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .compact: return "list.bullet"
+        case .compact: return "line.3.horizontal"
         case .expand: return "list.bullet.rectangle"
-        case .card: return "square.grid.2x2"
+        case .card: return "rectangle.grid.1x2"
+        }
+    }
+
+    /// The 列表样式 sheet's one-line description (design App-iOS-FeedView).
+    var detail: String {
+        switch self {
+        case .compact: return AppString("只有文字，不显示图片，一屏看得最多")
+        case .expand: return AppString("标题加右侧小图 · 默认")
+        case .card: return AppString("大图和摘要，一屏一到两条")
         }
     }
 }
@@ -896,18 +945,21 @@ final class NodeReadingModeStore {
     /// its own.
     var mode: NodeReadingMode {
         if let deviceChoice { return deviceChoice }
-        let isSignedIn = DiscourseAuth.shared.isAuthenticated
         // A saved account preference only means anything while there is an
         // account; after signing out it must stop applying, which falling
-        // through to the guest default handles without a sign-out hook.
-        if isSignedIn, let accountPreference { return accountPreference }
-        // Signed out there is no preference to honour and nothing to sync, so
-        // guests get the card list — the browsing-first view, and the one that
-        // shows what the community posts rather than a dense list of titles.
-        // Signed in, match the plugin's own fallback (`COMPACT` in
-        // community-view-mode.js) until the account's value arrives.
-        return isSignedIn ? .compact : .card
+        // through to the default handles without a sign-out hook. Reading
+        // `DiscourseAuth` (observable) redraws the lists on sign-in/out.
+        if DiscourseAuth.shared.isAuthenticated, let accountPreference { return accountPreference }
+        // Nothing chosen: the design's 展开 — title beside a small image — for
+        // everyone, on the home feed and node pages alike ("首页和节点页用同
+        // 一个样式", App-iOS-FeedView). Guests used to get 卡片 and signed-in
+        // readers 紧凑 here.
+        return .expand
     }
+
+    /// The home feed's mode — the same choice as `mode` now that the home
+    /// feed and the node pages share one style.
+    var homeMode: NodeReadingMode { mode }
 
     /// The reader picked a mode here; remember it and stop deferring to the account.
     func select(_ value: NodeReadingMode) {
@@ -935,6 +987,12 @@ final class NodeDetailStore {
     var colorHex = "009966"
     var logoURL: URL?
     var backgroundURL: URL?
+    /// The node's banner from its own endpoint (`banner_url` /
+    /// `banner_dark_url`). Kept apart from `backgroundURL`, which the
+    /// site-category mapping may reset, so the two loads can't overwrite each
+    /// other.
+    var bannerURL: URL?
+    var bannerDarkURL: URL?
     var memberCount: Int?
     var topicCount: Int?
     var postCount: Int?
@@ -946,6 +1004,12 @@ final class NodeDetailStore {
     /// for a node nobody has changed.
     var notificationLevel: NodeNotificationLevel = .regular
     var isUpdatingNotificationLevel = false
+    /// 免打扰 is the node block on the v1 backend; the page says so and offers
+    /// 取消屏蔽, as Android's does.
+    var isBlocked: Bool { DiscourseAuth.shared.isAuthenticated && notificationLevel == .muted }
+    var isUnblocking = false
+    /// The node's rules, from its own endpoint.
+    var rules: [NLNodeDetail.Rule] = []
 
     var posts: [Post] = []
 
@@ -1012,6 +1076,12 @@ final class NodeDetailStore {
         errorText = nil
         defer { isLoading = false }
 
+        // The node's own endpoint first and in parallel: it carries the
+        // banner and the online count, and used to wait behind site.json and
+        // the pins — the banner showed up seconds late, or not at all when
+        // those were slow.
+        async let detailCall: Void = loadDetail()
+
         // site.json carries the banner + member count that nodes.json omits,
         // and is the only place the parent slug (needed for the topic path)
         // is available.
@@ -1030,7 +1100,7 @@ final class NodeDetailStore {
         // The carousel is small and unpaged, so it is always refetched — it is
         // also what changes most often on a busy node.
         await loadPins()
-        await loadDetail()
+        await detailCall
 
         // Fresh cache: keep what we painted, skip the request entirely.
         if let cached, !cached.isStale { return }
@@ -1045,13 +1115,20 @@ final class NodeDetailStore {
         guard let detail = try? await client.nodeDetail(slug: slug) else { return }
         onlineCount = detail.onlineCount
         canModerate = detail.permissions?.moderate ?? false
+        rules = (detail.rules ?? []).filter { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }
+        // The node's banner only comes from its own endpoint (top-level
+        // `banner_url` / `banner_dark_url`, absolute URLs); the directory the
+        // page is opened from doesn't carry it. It was decoded but never
+        // applied, so every node showed the fallback gradient.
+        bannerURL = detail.bannerUrl.flatMap(URL.init(string:))
+        bannerDarkURL = detail.bannerDarkUrl.flatMap(URL.init(string:))
     }
 
     /// The pinned carousel. Readable signed out; a node that can't be seen
     /// answers 404, in which case the strip simply stays empty.
     private func loadPins() async {
         guard !slug.isEmpty else { return }
-        guard let response = try? await client.nodePins(slug: slug) else {
+        guard let (response, signature) = try? await client.nodePinsWithSignature(slug: slug) else {
             pinnedPosts = []
             return
         }
@@ -1059,8 +1136,38 @@ final class NodeDetailStore {
             (response.users ?? []).map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        pinnedPosts = response.topicList.topics.map {
+        let posts = response.topicList.topics.map {
             FeedMapper.post(topic: $0, usersByID: usersByID, client: client, category: selfCategory)
+        }
+        // Decided together with the posts, in the same update, so the
+        // section's first frame is already collapsed or expanded.
+        pinsSignature = signature
+        if !posts.isEmpty {
+            let stored = UserDefaults.standard.string(forKey: Self.pinsCollapsedKey(slug))
+            if let stored, stored != signature {
+                // Something was pinned, unpinned, reordered or edited since.
+                UserDefaults.standard.removeObject(forKey: Self.pinsCollapsedKey(slug))
+            }
+            pinsCollapsed = stored == signature
+        }
+        pinnedPosts = posts
+    }
+
+    /// 节点置顶 folded by the reader. Remembered on this device per node,
+    /// against the pins' signature at the time, and kept folded until the
+    /// pins change. Never sent to the server.
+    private(set) var pinsCollapsed = false
+    private var pinsSignature: String?
+
+    static func pinsCollapsedKey(_ slug: String) -> String { "nodeloc.pinsCollapsed.\(slug)" }
+
+    func setPinsCollapsed(_ collapsed: Bool) {
+        pinsCollapsed = collapsed
+        let key = Self.pinsCollapsedKey(slug)
+        if collapsed, let pinsSignature {
+            UserDefaults.standard.set(pinsSignature, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
         }
     }
 
@@ -1128,10 +1235,28 @@ final class NodeDetailStore {
                 ? try await client.leaveNode(categoryID: categoryID)
                 : try await client.joinNode(categoryID: categoryID)
             if let joined = response.joined { isJoined = joined }
+            NodeMembership.announce(id: categoryID, joined: isJoined)
         } catch {
             isJoined = wasJoined
             memberCount = (memberCount ?? 0) + (wasJoined ? 1 : -1)
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// Lifts the block. The level it had before isn't known until the
+    /// directory is read again, so the bell shows 常规 rather than a stale
+    /// 免打扰 that would keep the banner up.
+    func unblock() async {
+        guard !isUnblocking, !slug.isEmpty else { return }
+        isUnblocking = true
+        defer { isUnblocking = false }
+        do {
+            try await client.unblockNode(slug: slug)
+            notificationLevel = .regular
+            ToastCenter.shared.show(AppString("已取消屏蔽"))
+        } catch {
+            ToastCenter.shared.show((error as? LocalizedError)?.errorDescription ?? AppString("取消屏蔽失败，请稍后重试"))
         }
     }
 
@@ -1225,110 +1350,268 @@ final class NodeDetailStore {
 @MainActor
 @Observable
 final class NodeBrowseStore {
+    /// A section (分区): the chips under the search field.
+    struct Section: Identifiable, Codable, Equatable {
+        let id: Int
+        let slug: String
+        let name: String
+    }
+
+    /// A node on the square, with what the lists sort and group by.
+    struct Entry: Identifiable, Codable {
+        var node: SidebarNodeSummary
+        let sectionID: Int
+        let members: Int
+        var id: Int { node.id }
+    }
+
+    /// One headed group of cards under 全部.
+    struct Group: Identifiable {
+        let id: String
+        let title: String
+        let note: String
+        let entries: [Entry]
+    }
+
     private let client = DiscourseClient()
 
-    var recommended: [SidebarNodeSummary] = SidebarStore.fallbackNodes
-    var groups: [NodeGroupSummary] = []
-    var selectedGroup: NodeGroupSummary?
-    var groupNodes: [SidebarNodeSummary] = []
-    var groupPreviews: [Int: [SidebarNodeSummary]] = [:]
+    var sections: [Section] = []
+    var entries: [Entry] = []
+    /// False while the square shows only the directory's first page (a cold
+    /// launch, before the slow full list arrives).
+    var isComplete = false
     var isLoading = false
-    var isLoadingGroup = false
     var errorText: String?
+    /// Nodes the reader had joined when the lists were built. The groups leave
+    /// these out (as the web square does), and use this rather than the live
+    /// state so a card joined from a group stays put instead of vanishing.
+    private var joinedAtLoad: Set<Int> = []
     private var loaded = false
     private var hydratedFromCache = false
 
+    /// The server's answer for a search made before the full directory is in.
+    var remoteResults: [Entry] = []
+    var remoteTerm = ""
+    var isSearchingRemote = false
+
     /// True once there's real data to show (from cache or the network), so the
     /// view knows to skip the skeleton.
-    var hasContent: Bool { !groups.isEmpty }
+    var hasContent: Bool { !entries.isEmpty }
 
-    func load() async {
+    func load(force: Bool = false) async {
         // Node data barely changes, so show the last cached copy instantly and
         // refresh it quietly behind the scenes — the skeleton only appears on a
         // truly cold first launch.
         if !hydratedFromCache {
             hydratedFromCache = true
-            if let snapshot = NodeBrowseCache.load(), !snapshot.groups.isEmpty {
-                recommended = snapshot.recommended
-                groups = snapshot.groups
-                groupPreviews = snapshot.groupPreviews
+            if let snapshot = NodeBrowseCache.load(), !snapshot.entries.isEmpty {
+                sections = snapshot.sections
+                entries = snapshot.entries
+                joinedAtLoad = Set(entries.filter(\.node.isJoined).map(\.id))
+                isComplete = true
             }
         }
 
-        guard !loaded else { return }
-        let hadData = !groups.isEmpty
-        if !hadData { isLoading = true }
+        guard force || !loaded else { return }
+        if !hasContent { isLoading = true }
         errorText = nil
         defer { isLoading = false }
 
+        // `/api/v1/nodes` has taken 10–30 s; with nothing to show yet, the
+        // directory's first page (fast) draws the screen meanwhile.
+        var firstPage: Task<Void, Never>?
+        if !hasContent {
+            firstPage = Task { [client] in
+                guard let response = try? await client.nodeDirectoryFirstPage(), !Task.isCancelled else { return }
+                if !self.isComplete { self.show(response, complete: false) }
+            }
+        }
+
         do {
-            let response = try await client.sidebarNodes()
-            let nodes = response.recommended ?? response.communities ?? []
-            if !nodes.isEmpty {
-                recommended = nodes.map(NodeSummaryFactory.node)
-            }
-            groups = (response.grouped ?? [:])
-                .map { NodeSummaryFactory.group($0.value) }
-                .sorted { lhs, rhs in
-                    if lhs.totalCount == rhs.totalCount {
-                        return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-                    }
-                    return lhs.totalCount > rhs.totalCount
-                }
-            // Overwrite (not guard) so cached previews get refreshed too.
-            for group in groups.prefix(6) {
-                if let response = try? await client.nodeBrowse(parentCategoryID: group.id, perPage: 4) {
-                    groupPreviews[group.id] = (response.communities ?? response.recommended ?? [])
-                        .map(NodeSummaryFactory.node)
-                }
-            }
+            if force { try await client.loadNodes(force: true) }
+            let wasFresh = NodelocAdapterState.shared.nodesFresh
+            let response = try await client.categories(includeSubcategories: true)
+            firstPage?.cancel()
+            show(response, complete: true)
             loaded = true
-            NodeBrowseCache.save(
-                .init(recommended: recommended, groups: groups, groupPreviews: groupPreviews)
-            )
+            // A stale copy came back at once and a refresh is running behind
+            // it: show the refreshed list when it lands.
+            if !wasFresh, !force, await client.awaitNodesRefresh(),
+               let fresh = try? await client.categories(includeSubcategories: true) {
+                show(fresh, complete: true)
+            }
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            if recommended.isEmpty { recommended = SidebarStore.fallbackNodes }
         }
     }
 
-    func previewNodes(for group: NodeGroupSummary) -> [SidebarNodeSummary] {
-        groupPreviews[group.id] ?? []
-    }
-
-    func loadGroupPreview(_ group: NodeGroupSummary) async {
-        guard groupPreviews[group.id] == nil else { return }
-
-        do {
-            let response = try await client.nodeBrowse(parentCategoryID: group.id, perPage: 4)
-            groupPreviews[group.id] = (response.communities ?? response.recommended ?? []).map(NodeSummaryFactory.node)
-        } catch {
-            if groupPreviews[group.id] == nil {
-                groupPreviews[group.id] = []
+    private func show(_ response: CategoriesResponse, complete: Bool) {
+        let categories = response.categoryList.categories
+        sections = categories
+            .filter { !($0.subcategoryList ?? []).isEmpty }
+            .map { Section(id: $0.id, slug: $0.slug, name: $0.name) }
+        entries = categories.flatMap { section in
+            (section.subcategoryList ?? []).map {
+                Entry(node: NodeSummaryFactory.node($0), sectionID: section.id, members: $0.memberCount ?? 0)
             }
         }
-    }
-
-    func loadGroup(_ group: NodeGroupSummary) async {
-        if selectedGroup?.id == group.id && !groupNodes.isEmpty { return }
-        selectedGroup = group
-        groupNodes = []
-        isLoadingGroup = true
-        errorText = nil
-        defer { isLoadingGroup = false }
-
-        do {
-            let response = try await client.nodeBrowse(parentCategoryID: group.id)
-            groupNodes = (response.communities ?? response.recommended ?? []).map(NodeSummaryFactory.node)
-            groupPreviews[group.id] = Array(groupNodes.prefix(4))
-        } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        joinedAtLoad = Set(entries.filter(\.node.isJoined).map(\.id))
+        isComplete = complete
+        if complete {
+            NodeBrowseCache.save(.init(sections: sections, entries: entries))
         }
     }
 
-    func clearGroup() {
-        selectedGroup = nil
-        groupNodes = []
+    // MARK: Lists
+
+    /// 全部: 为你推荐 (signed in, from the sections of the joined nodes), 最受
+    /// 欢迎 (by members), and 新节点 when there's nothing to recommend — the
+    /// web square's groups, built from the directory because the API has no
+    /// similarity or weekly-visitor data. Each holds up to 12, none joined.
+    func groups(signedIn: Bool) -> [Group] {
+        let open = entries.filter { !joinedAtLoad.contains($0.id) }
+        var result: [Group] = []
+        if signedIn {
+            let weight = Dictionary(grouping: entries.filter { joinedAtLoad.contains($0.id) }, by: \.sectionID)
+                .mapValues(\.count)
+            let picks = open
+                .filter { weight[$0.sectionID] != nil }
+                .sorted { (weight[$0.sectionID] ?? 0, $0.members, -$0.id) > (weight[$1.sectionID] ?? 0, $1.members, -$1.id) }
+            if !picks.isEmpty {
+                result.append(Group(id: "recommended", title: AppString("为你推荐"), note: AppString("根据你加入的节点"), entries: Array(picks.prefix(12))))
+            }
+        }
+        let popular = Array(open.sorted { ($0.members, -$0.id) > ($1.members, -$1.id) }.prefix(12))
+        if !popular.isEmpty {
+            result.append(Group(id: "popular", title: AppString("最受欢迎"), note: AppString("按成员数排名"), entries: popular))
+        }
+        if !result.contains(where: { $0.id == "recommended" }) {
+            let shown = Set(popular.map(\.id))
+            let fresh = open
+                .filter { $0.members >= 2 && !shown.contains($0.id) }
+                .sorted { $0.id > $1.id }
+            if !fresh.isEmpty {
+                result.append(Group(id: "fresh", title: AppString("新节点"), note: AppString("最近创建"), entries: Array(fresh.prefix(12))))
+            }
+        }
+        return result
+    }
+
+    /// A section's nodes, most members first.
+    func entries(in section: Section) -> [Entry] {
+        entries.filter { $0.sectionID == section.id }.sorted { ($0.members, -$0.id) > ($1.members, -$1.id) }
+    }
+
+    /// Name, slug or description containing the term, most members first.
+    /// Searched on the device once the whole directory is here; before that
+    /// the server's answer (`searchRemote`) is used.
+    func localResults(for term: String) -> [Entry] {
+        entries
+            .filter {
+                $0.node.name.localizedCaseInsensitiveContains(term)
+                    || $0.node.slug.localizedCaseInsensitiveContains(term)
+                    || $0.node.description.localizedCaseInsensitiveContains(term)
+            }
+            .sorted { ($0.members, -$0.id) > ($1.members, -$1.id) }
+    }
+
+    func searchRemote(_ term: String) async {
+        guard term != remoteTerm || remoteResults.isEmpty else { return }
+        isSearchingRemote = true
+        defer { isSearchingRemote = false }
+        do {
+            let found = try await client.searchNodes(term: term)
+            guard !Task.isCancelled else { return }
+            remoteTerm = term
+            remoteResults = found.map {
+                Entry(node: NodeSummaryFactory.node($0), sectionID: $0.parentCategoryId ?? 0, members: $0.memberCount ?? 0)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            remoteTerm = term
+            remoteResults = []
+        }
+    }
+
+    /// Node ids with a join or leave in flight, so a card's button shows a
+    /// spinner and can't be tapped twice.
+    var togglingJoin: Set<Int> = []
+
+    /// The card's 加入 / 退出: the same `PUT`/`DELETE
+    /// /api/v1/nodes/{slug}/membership` as the node page. Flips at once,
+    /// rolls back with a toast if the server says no.
+    func toggleJoin(_ node: SidebarNodeSummary) async {
+        guard !togglingJoin.contains(node.id) else { return }
+        togglingJoin.insert(node.id)
+        defer { togglingJoin.remove(node.id) }
+
+        let wasJoined = isJoined(node)
+        apply(id: node.id, joined: !wasJoined)
+        do {
+            let response = wasJoined
+                ? try await client.leaveNode(categoryID: node.id)
+                : try await client.joinNode(categoryID: node.id)
+            let joined = response.joined ?? !wasJoined
+            apply(id: node.id, joined: joined)
+            NodeMembership.announce(id: node.id, joined: joined)
+        } catch {
+            apply(id: node.id, joined: wasJoined)
+            ToastCenter.shared.showError(error)
+        }
+    }
+
+    /// The current joined state of a card's node (the copy in this store may
+    /// be newer than the summary the card was drawn from).
+    func isJoined(_ node: SidebarNodeSummary) -> Bool {
+        (entries.first { $0.id == node.id } ?? remoteResults.first { $0.id == node.id })?.node.isJoined ?? node.isJoined
+    }
+
+    /// Writes a joined state into every list holding that node, and into the
+    /// on-disk snapshot so a relaunch doesn't show the old button.
+    func apply(id: Int, joined: Bool) {
+        func patch(_ list: [Entry]) -> [Entry] {
+            list.map { entry in
+                guard entry.id == id, entry.node.isJoined != joined else { return entry }
+                var copy = entry
+                copy.node = entry.node.withJoined(joined)
+                return copy
+            }
+        }
+        entries = patch(entries)
+        remoteResults = patch(remoteResults)
+        if isComplete {
+            NodeBrowseCache.save(.init(sections: sections, entries: entries))
+        }
+    }
+}
+
+/// A join or leave, from the node page or a directory card. Whoever shows
+/// joined state (the directory, the drawer) listens and catches up.
+enum NodeMembership {
+    static let didChange = Notification.Name("NodelocNodeMembershipDidChange")
+
+    @MainActor
+    static func announce(id: Int, joined: Bool) {
+        SidebarStore.invalidateCache()
+        NotificationCenter.default.post(name: didChange, object: nil, userInfo: ["id": id, "joined": joined])
+    }
+}
+
+extension SidebarNodeSummary {
+    /// A copy with the joined flag flipped, and the member count moved by one
+    /// when it is a plain number (a rounded "1.5k" is left alone).
+    func withJoined(_ joined: Bool) -> SidebarNodeSummary {
+        var count = memberCount
+        if let value = Int(memberCount) {
+            count = String(max(0, value + (joined ? 1 : -1)))
+        }
+        var copy = SidebarNodeSummary(
+            id: id, name: name, slug: slug, description: description, memberCount: count,
+            colorHex: colorHex, logoURL: logoURL, isCreator: isCreator, isJoined: joined, url: url
+        )
+        copy.iconName = iconName
+        copy.emoji = emoji
+        return copy
     }
 }
 
@@ -1336,14 +1619,13 @@ final class NodeBrowseStore {
 /// one JSON blob in the caches directory (no database, per the app's design).
 private enum NodeBrowseCache {
     struct Snapshot: Codable {
-        let recommended: [SidebarNodeSummary]
-        let groups: [NodeGroupSummary]
-        let groupPreviews: [Int: [SidebarNodeSummary]]
+        let sections: [NodeBrowseStore.Section]
+        let entries: [NodeBrowseStore.Entry]
     }
 
     private static var fileURL: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("node-browse.json")
+            .appendingPathComponent("node-square.json")
     }
 
     static func load() -> Snapshot? {
@@ -1388,18 +1670,42 @@ final class CreateNodeStore {
             errorText = AppString("无法加载上级节点，请稍后重试。")
             return
         }
-        parentCategories = source
-            .filter { $0.parentCategoryId == nil }
+        var sections = source.filter { $0.parentCategoryId == nil }
+        // Only sections that take new nodes (`open_for_nodes`). If that list
+        // can't be read, all are shown and the server still refuses a closed one.
+        // The server's own list (`GET /api/v1/node-parents`): the sections it
+        // will accept a new node under for this account. If it can't be read,
+        // nothing is offered — listing every section put up ones the server
+        // then refused.
+        guard let open = try? await client.createNodeParentSlugs(candidates: sections.map(\.slug)) else {
+            errorText = AppString("无法加载上级节点，请稍后重试。")
+            return
+        }
+        sections = sections.filter { open.contains($0.slug.lowercased()) }
+        if sections.isEmpty {
+            errorText = AppString("暂时没有开放创建节点的分类。")
+            return
+        }
+        parentCategories = sections
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if let selected = selectedParentID, !parentCategories.contains(where: { $0.id == selected }) {
+            selectedParentID = nil
+        }
         selectedParentID = selectedParentID ?? parentCategories.first?.id
     }
+
+    /// The server's refusal per input, from a 422.
+    var fieldErrors: [String: String] = [:]
 
     func create(
         name: String,
         slug: String,
         description: String,
         colorHex: String,
-        parentCategoryID: Int?
+        parentCategoryID: Int?,
+        visibility: String? = nil,
+        topicPolicy: String? = nil,
+        rules: [(title: String, description: String)] = []
     ) async -> Bool {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSlug = slug.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1420,12 +1726,17 @@ final class CreateNodeStore {
                 slug: trimmedSlug,
                 description: trimmedDescription,
                 colorHex: colorHex,
-                parentCategoryID: parentCategoryID
+                parentCategoryID: parentCategoryID,
+                visibility: visibility,
+                topicPolicy: topicPolicy,
+                rules: rules
             )
+            fieldErrors = [:]
             createdNode = response.category.map(NodeSummaryFactory.node)
             return true
         } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            fieldErrors = ServerFieldErrors.last()
+            errorText = fieldErrors.isEmpty ? (error as? LocalizedError)?.errorDescription ?? error.localizedDescription : nil
             return false
         }
     }
@@ -1507,6 +1818,9 @@ actor ComposeUploadQueue {
 @MainActor
 @Observable
 final class ComposeStore {
+    /// The server draft this post continues (草稿箱 › 继续编辑), sent as
+    /// `draft_key` so the draft leaves the list once the topic is posted.
+    var draftKey: String?
     private let client = DiscourseClient()
 
     var nodeOptions: [ComposeNodeOption] = []
@@ -1659,7 +1973,8 @@ final class ComposeStore {
         body: String,
         node: SidebarNodeSummary?,
         redEnvelope: RedEnvelopeDraft?,
-        lottery: LotteryDraft?
+        lottery: LotteryDraft?,
+        tags: [String] = []
     ) async -> SubmitOutcome {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1685,13 +2000,19 @@ final class ComposeStore {
             created = try await client.createTopic(
                 title: trimmedTitle,
                 raw: trimmedBody.isEmpty ? trimmedTitle : trimmedBody,
-                categoryID: community.id
+                categoryID: community.id,
+                tags: tags,
+                draftKey: draftKey
             )
         } catch {
             errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             return .failed
         }
         hasPublished = true
+        // Held for review: published only once a moderator approves it.
+        if created.held == true {
+            ToastCenter.shared.show(AppString("已提交，审核通过后显示"))
+        }
 
         // The topic exists from here on; nothing below may report `.failed`.
         // Both records attach to what was just created — the envelope by topic
@@ -1931,6 +2252,7 @@ final class SearchStore {
     var userResults: [SearchUserResult] = []
     var nodeResults: [SearchNodeResult] = []
     var appResults: [DirectoryApp] = []
+    var tagResults: [SearchTagResult] = []
     var isSearching = false
     private var loadedCategories = false
     private var categoriesByID: [Int: DiscourseCategory] = [:]
@@ -2028,6 +2350,11 @@ final class SearchStore {
             let apps = await matchingApps(term)
             guard currentRequestID == requestID else { return }
             appResults = apps
+
+        case .tags:
+            let found = (try? await client.searchTags(term)) ?? []
+            guard currentRequestID == requestID else { return }
+            tagResults = found
         }
 
         if currentRequestID == requestID {
@@ -2036,18 +2363,25 @@ final class SearchStore {
     }
 
     private func clearResults() {
+        // A slow response for the old query must not refill the list.
+        currentRequestID = UUID()
         results = []
         mediaResults = []
         userResults = []
         nodeResults = []
         appResults = []
+        tagResults = []
         isSearching = false
     }
 
     /// Topics, joined to the matching post for the excerpt and author —
     /// search topics carry neither (no `excerpt`, no `image_url`, no posters).
+    /// 按相关度 (nil) or 按时间 (`new`).
+    var sort: String?
+
     private func topics(term: String, filters: String? = nil) async -> [Post] {
-        guard let response = try? await client.search(term, filters: filters) else { return [] }
+        guard let response = try? await client.search(term, filters: filters, sort: sort) else { return [] }
+        let highlights = SearchHighlight.latest
         let postsByTopic = Dictionary(
             (response.posts ?? []).map { ($0.topicId ?? 0, $0) },
             uniquingKeysWith: { first, _ in first }
@@ -2056,7 +2390,7 @@ final class SearchStore {
             let category = topic.categoryId.flatMap { categoriesByID[$0] }
             let match = postsByTopic[topic.id]
             let author = match?.username
-            return Post(
+            var post = Post(
                 id: topic.id,
                 node: category.map { "n/\($0.slug)" } ?? "n/nodeloc",
                 avatarLetter: String((author ?? category?.name ?? topic.title).prefix(1)).uppercased(),
@@ -2086,6 +2420,9 @@ final class SearchStore {
                 authorName: match?.name,
                 tags: (topic.tags ?? []).compactMap(\.name)
             )
+            post.highlightedTitle = highlights[topic.id]?.title
+            post.highlightedExcerpt = highlights[topic.id]?.blurb
+            return post
         }
     }
 
@@ -2159,54 +2496,30 @@ private enum ChatListMapper {
     }
 
     static func chats(from response: ChatChannelsResponse) -> [Chat] {
-        var items: [ChannelItem] = []
-        for (index, channel) in response.allChannels.enumerated() {
-            items.append(
-                ChannelItem(
-                    originalIndex: index,
-                    channel: channel,
-                    tracking: response.tracking?.state(for: channel.id)
-                )
-            )
+        // Each channel's activity date is worked out once, then one stable
+        // sort: the old insertion sort re-parsed both dates on every
+        // comparison — O(n²) date parses on the main thread, ~190ms at launch
+        // with a long channel list.
+        let items = response.allChannels.enumerated().map { index, channel in
+            ChannelItem(originalIndex: index, channel: channel, tracking: response.tracking?.state(for: channel.id))
         }
-
-        var sortedItems: [ChannelItem] = []
-        for item in items {
-            var inserted = false
-            for index in sortedItems.indices {
-                if isMoreRecent(item, than: sortedItems[index]) {
-                    sortedItems.insert(item, at: index)
-                    inserted = true
-                    break
-                }
+        let dates = items.map { activityDate(for: $0.channel, tracking: $0.tracking) }
+        let sortedItems = items.indices.sorted { a, b in
+            switch (dates[a], dates[b]) {
+            case let (left?, right?):
+                if left == right { return items[a].originalIndex < items[b].originalIndex }
+                return left > right
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return items[a].originalIndex < items[b].originalIndex
             }
-            if !inserted {
-                sortedItems.append(item)
-            }
-        }
+        }.map { items[$0] }
 
         var mappedChats: [Chat] = []
         for (displayIndex, item) in sortedItems.enumerated() {
             mappedChats.append(chat(from: item.channel, tracking: item.tracking, displayIndex: displayIndex))
         }
         return mappedChats
-    }
-
-    private static func isMoreRecent(_ lhs: ChannelItem, than rhs: ChannelItem) -> Bool {
-        let leftDate = activityDate(for: lhs.channel, tracking: lhs.tracking)
-        let rightDate = activityDate(for: rhs.channel, tracking: rhs.tracking)
-
-        switch (leftDate, rightDate) {
-        case let (left?, right?):
-            if left == right { return lhs.originalIndex < rhs.originalIndex }
-            return left > right
-        case (_?, nil):
-            return true
-        case (nil, _?):
-            return false
-        case (nil, nil):
-            return lhs.originalIndex < rhs.originalIndex
-        }
     }
 
     static func chat(from channel: ChatChannel, displayIndex: Int) -> Chat {
@@ -2950,6 +3263,21 @@ enum NotificationRouting {
     static func url(for notification: DiscourseNotification) -> URL? {
         let base = DiscourseConfig.baseURL
 
+        // System and moderation notifications say where they go in
+        // `data.path` (site-relative only). A moderation path to a node's
+        // queue carries the item as `?item=` so the queue can open it.
+        if let path = notification.data?.path, path.hasPrefix("/"), !path.hasPrefix("//") {
+            var target = path
+            if let item = notification.data?.itemId, !target.contains("item=") {
+                if let hash = target.firstIndex(of: "#") {
+                    target.insert(contentsOf: (target.contains("?") ? "&" : "?") + "item=\(item)", at: hash)
+                } else {
+                    target += (target.contains("?") ? "&" : "?") + "item=\(item)"
+                }
+            }
+            if let url = URL(string: target, relativeTo: base)?.absoluteURL { return url }
+        }
+
         if let topicID = notification.topicId {
             let slug = notification.slug ?? "topic"
             var path = "t/\(slug)/\(topicID)"
@@ -2968,6 +3296,15 @@ enum NotificationRouting {
         }
         if let group = data?.groupName, let username = data?.username {
             return base.appending(path: "u/\(username)/messages/group/\(group)")
+        }
+        // 关注了你: the follower's profile.
+        if notification.notificationType == 800, let username = data?.username {
+            return base.appending(path: "u/\(username)")
+        }
+        // A moderation notification with only an item (no path, no post):
+        // the site queue on that item.
+        if let item = data?.itemId {
+            return URL(string: "/review?item=\(item)", relativeTo: base)?.absoluteURL
         }
         return nil
     }
@@ -3043,7 +3380,8 @@ enum NotificationFormatter {
             text: text(for: notification, kind: kind),
             time: DiscourseFormat.relative(notification.createdAt),
             unread: !notification.read,
-            url: NotificationRouting.url(for: notification)
+            url: NotificationRouting.url(for: notification),
+            isModeration: notification.data?.moderation ?? false
         )
     }
 }
@@ -3376,35 +3714,18 @@ final class MessageCenterStore {
         errorText = nil
         defer { isLoading = false }
 
-        // Unread notification count rides along on the current user, as does
-        // the list of groups with a message inbox (for the PM filter). The PM
-        // count is derived from the conversation list below so it matches the
-        // rows' own unread dots.
-        if let current = try? await client.currentUser().currentUser {
-            unreadNotifications = current.unreadNotifications ?? 0
-            messageGroups = (current.groups ?? [])
-                .filter { $0.hasMessages == true }
-                .map(\.name)
-        }
-
-        do {
-            let response = try await client.notifications()
-            notifications = response.notifications.map(NotificationFormatter.appNotification(from:))
-        } catch {
-            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-
-        if let username = DiscourseAuth.shared.username {
-            do {
-                let response = try await client.privateMessages(username: username)
-                conversations = Self.conversations(from: response, client: client)
-                unreadPrivateMessages = conversations.filter(\.unread).count
-            } catch {
-                if errorText == nil {
-                    errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                }
-            }
-        }
+        // The five lists are independent. They used to be fetched one after
+        // another (about a dozen round trips, the current user alone being
+        // four), which held the Messages badge back at launch; now they go
+        // out together and land in the same order as before.
+        let username = DiscourseAuth.shared.username
+        async let currentCall = try? client.currentUser().currentUser
+        async let notificationsCall = Self.capture { try await client.notifications() }
+        async let messagesCall: Result<PrivateMessagesResponse, Error>? = username == nil
+            ? nil
+            : Self.capture { try await client.privateMessages(username: username!) }
+        async let channelsCall = Self.capture { try await client.chatChannelsWithRaw() }
+        async let threadsCall = Self.capture { try await client.currentUserChatThreads() }
 
         // The stored list renders before the request goes out. Opening 消息
         // used to be a spinner until the network answered, for data that had
@@ -3424,8 +3745,38 @@ final class MessageCenterStore {
             }
         }
 
-        do {
-            let (response, raw) = try await client.chatChannelsWithRaw()
+        // Unread notification count rides along on the current user, as does
+        // the list of groups with a message inbox (for the PM filter). The PM
+        // count is derived from the conversation list below so it matches the
+        // rows' own unread dots.
+        if let current = await currentCall {
+            unreadNotifications = current.unreadNotifications ?? 0
+            messageGroups = (current.groups ?? [])
+                .filter { $0.hasMessages == true }
+                .map(\.name)
+        }
+
+        switch await notificationsCall {
+        case .success(let response):
+            notifications = response.notifications.map(NotificationFormatter.appNotification(from:))
+        case .failure(let error):
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        switch await messagesCall {
+        case .success(let response):
+            conversations = Self.conversations(from: response, client: client)
+            unreadPrivateMessages = conversations.filter(\.unread).count
+        case .failure(let error):
+            if errorText == nil {
+                errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
+        case nil:
+            break
+        }
+
+        switch await channelsCall {
+        case .success(let (response, raw)):
             chats = ChatListMapper.chats(from: response)
             unreadChat = chats.reduce(0) { $0 + $1.threadUnreadCount + ($1.unread ? 1 : 0) }
             watchChannels()
@@ -3433,8 +3784,10 @@ final class MessageCenterStore {
                 raw,
                 key: ChatStorage.PayloadKey.chatChannels
             )
-            await warmChatHistory()
-        } catch {
+            // Speculative history for offline reading: not awaited, so it
+            // never holds up the list.
+            Task { await self.warmChatHistory() }
+        case .failure(let error):
             // A stored list is already up; reporting a failed refresh over the
             // top of it would be noise, not information.
             if errorText == nil, chats.isEmpty {
@@ -3442,10 +3795,10 @@ final class MessageCenterStore {
             }
         }
 
-        do {
-            let response = try await client.currentUserChatThreads()
+        switch await threadsCall {
+        case .success(let response):
             threads = ChatThreadMapper.threads(from: response)
-        } catch {
+        case .failure(let error):
             if errorText == nil {
                 errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
@@ -3454,10 +3807,15 @@ final class MessageCenterStore {
         loaded = true
     }
 
+    /// An async throwing call as a value, so several can run as `async let`.
+    private static func capture<T>(_ body: () async throws -> T) async -> Result<T, Error> {
+        do { return .success(try await body()) } catch { return .failure(error) }
+    }
+
     /// Maps a PM list into conversation rows: the counterpart is whoever on the
     /// thread isn't the current user, its avatar resolved from the top-level
     /// `users`, and unread is last-read trailing the highest post.
-    private static func conversations(
+    static func conversations(
         from response: PrivateMessagesResponse,
         client: DiscourseClient
     ) -> [PMConversation] {
@@ -3544,7 +3902,14 @@ final class NotificationsStore {
 
     var items: [AppNotification] = []
     var isLoading = false
+    var errorText: String?
     private var loaded = false
+
+    /// Refetches even after a successful load (pull-to-refresh, retry).
+    func reload() async {
+        loaded = false
+        await load()
+    }
 
     func load() async {
         guard DiscourseAuth.shared.isAuthenticated else {
@@ -3556,10 +3921,12 @@ final class NotificationsStore {
         do {
             let response = try await client.notifications()
             items = response.notifications.map(NotificationFormatter.appNotification(from:))
+            errorText = nil
             loaded = true
         } catch {
-            // Keep whatever is shown; the overlay's empty state covers a
-            // first load that produced nothing.
+            // Keep whatever is shown; the overlay shows the error with a
+            // retry only when there's nothing else on screen.
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         isLoading = false
     }
@@ -3597,6 +3964,8 @@ final class PublicProfileStore {
     var avatarURL: URL?
     var backgroundURL: URL?
     var title: String?
+    /// 段位 name, separate from the 头衔 since v1.
+    var tierName: String?
     var bio = ""
     var joined = ""
     var lastSeen = ""
@@ -3606,12 +3975,42 @@ final class PublicProfileStore {
     var roles: [ProfileRole] = []
     var badges: [String] = []
     var stats: [ProfileStat] = []
-    /// 常去节点, resolved against `NodeCatalog` so they carry the node's real
-    /// logo and colour. The summary endpoint alone can't: `top_categories` is
-    /// only id/name/color/slug/counts, with no `uploaded_logo`.
+    /// 常去节点: the nodes of their latest posts, busiest first, resolved
+    /// against `NodeCatalog` for the real logo and colour. The backend keeps
+    /// node memberships private, so this is what it exposes about someone else.
     var topCategories: [SidebarNodeSummary] = []
+    /// 管理的节点, resolved the same way so the chips carry a logo.
+    var ownedNodeSummaries: [SidebarNodeSummary] = []
+    /// The achievements they picked to show (at most three), and their 声望 —
+    /// nil when they hid it (显示等级与声望 off) or it hasn't loaded.
+    var showcase: [AchievementItem] = []
+    var reputation: Int?
+    /// Their 能量, from the board or the hover card (`userEnergy`); nil until
+    /// one of them answers.
+    var energy: UserEnergy?
+    /// 贡献: topics and replies together, as Android and the web count it.
+    var contribution: Int?
     var isLoading = false
     var errorText: String?
+    /// Lists to refetch in place when next shown, set by a refresh.
+    private var staleTabs: Set<ProfileStore.ProfileTab> = []
+
+    /// What the page shows; see `ProfileStore.Phase`.
+    private(set) var phase: ProfileStore.Phase = .loading
+
+    /// `load` with a 15 s ceiling and a definite outcome — see
+    /// `ProfileStore.loadPage`.
+    func loadPage(target: UserProfileTarget, force: Bool = false) async {
+        if case .failed = phase { phase = .loading }
+        let finished = await withTimeout(seconds: 15) {
+            await self.load(target: target, force: force)
+        }
+        if phase != .loaded || (errorText != nil && displayName.isEmpty) {
+            phase = .failed(
+                !finished ? AppString("加载超时，请检查网络后重试") : (errorText ?? AppString("加载失败"))
+            )
+        }
+    }
 
     /// Group flair (资质) and discourse-follow state.
     var flair: UserFlair?
@@ -3624,9 +4023,14 @@ final class PublicProfileStore {
     var isFollowing = false
     var isTogglingFollow = false
 
-    /// The viewer's 通知方式 for this person, and whether a change is in flight.
-    var notificationLevel: UserNotificationLevel = .normal
-    var isUpdatingNotificationLevel = false
+    /// Whether the viewer has blocked this person (`viewer_blocked`). The
+    /// backend's one per-user control: it hides their content and stops their
+    /// notifications and chats, so it stands in for 免打扰 too.
+    var isBlocked = false
+    var isUpdatingBlock = false
+    /// Whether a chat can be started, and the server's reason when it can't.
+    var canMessage = true
+    var messageNote: String?
 
     /// Admin-designed 头衔 style from discourse-custom-badge.
     var titleStyle: TitleStyle?
@@ -3637,7 +4041,7 @@ final class PublicProfileStore {
     /// 能量 total from discourse-points-service.
     var pointsTotal: Int?
     var pointsHistory: [PointsHistoryEntry] = []
-    private var pointsLoaded = false
+    private(set) var pointsLoaded = false
 
     /// Cached activity items per tab, mirroring ProfileStore.
     var actionItems: [ProfileStore.ProfileTab: [UserActionItem]] = [:]
@@ -3662,7 +4066,8 @@ final class PublicProfileStore {
             return
         }
 
-        guard actionItems[tab] == nil else { return }
+        let isStale = staleTabs.contains(tab)
+        guard actionItems[tab] == nil || isStale else { return }
         loadingTab = tab
         failedTabs.remove(tab)
         defer { if loadingTab == tab { loadingTab = nil } }
@@ -3670,6 +4075,7 @@ final class PublicProfileStore {
         do {
             let response = try await client.userActions(username: username, filter: filter)
             actionItems[tab] = response.userActions
+            staleTabs.remove(tab)
             setHasMore(response.userActions.count, for: tab)
         } catch {
             // Deliberately *not* `actionItems[tab] = []`. That poisoned the
@@ -3678,7 +4084,7 @@ final class PublicProfileStore {
             // switching away and back wouldn't retry it. And an empty array is
             // indistinguishable from a genuinely empty tab, so the screen said
             // "还没有主题" about a request that had failed.
-            failedTabs.insert(tab)
+            if actionItems[tab] == nil { failedTabs.insert(tab) }
         }
     }
 
@@ -3742,42 +4148,28 @@ final class PublicProfileStore {
         }
     }
 
-    /// Sets 通知方式 for this person. Applied locally first so the menu's
-    /// checkmark answers immediately, rolled back if the write fails.
-    func setNotificationLevel(_ level: UserNotificationLevel) async {
-        guard !isUpdatingNotificationLevel, !username.isEmpty, level != notificationLevel else { return }
-        isUpdatingNotificationLevel = true
-        defer { isUpdatingNotificationLevel = false }
+    /// 屏蔽 / 取消屏蔽. Goes through `BlockedUsersStore` so feeds hide (or
+    /// show) their posts at once, the same as a block from a post.
+    func setBlocked(_ blocked: Bool) async {
+        guard !isUpdatingBlock, !username.isEmpty, blocked != isBlocked else { return }
+        isUpdatingBlock = true
+        defer { isUpdatingBlock = false }
 
-        let previous = notificationLevel
-        notificationLevel = level
-
-        do {
-            try await client.setUserNotificationLevel(
-                username: username,
-                level: level.rawValue,
-                expiringAt: level.expiry
-            )
-            // The cached payload still carries the old flags, so a re-open
-            // would show the previous level.
-            Self.cache.removeValue(forKey: username)
-        } catch {
-            notificationLevel = previous
-            ToastCenter.shared.showError(error)
+        if blocked {
+            await BlockedUsersStore.shared.blockAndConfirm(username: username, reportingPostID: nil)
+            isBlocked = true
+            canMessage = false
+        } else {
+            guard await BlockedUsersStore.shared.unblock(username: username) else {
+                ToastCenter.shared.show(AppString("取消屏蔽失败，请稍后重试"))
+                return
+            }
+            isBlocked = false
+            ToastCenter.shared.show(AppString("已取消屏蔽 @\(username)"))
         }
-    }
-
-    /// Sends a 私信. Returns whether it went through, so the sheet can stay
-    /// open with the draft intact on failure.
-    func sendPrivateMessage(title: String, body: String) async -> Bool {
-        guard !username.isEmpty else { return false }
-        do {
-            try await client.createPrivateMessage(recipient: username, title: title, raw: body)
-            return true
-        } catch {
-            ToastCenter.shared.showError(error)
-            return false
-        }
+        // The cached payload still carries the old relation, so a re-open
+        // would show the previous state; `can_message` also depends on it.
+        Self.cache.removeValue(forKey: username)
     }
 
     /// Decoded profile payloads, shared across every screen that opens a
@@ -3787,6 +4179,9 @@ final class PublicProfileStore {
         let user: UserResponse
         let summary: UserSummaryResponse?
         let pointsTotal: Int?
+        let showcase: NLUserShowcase?
+        let frequentNodes: [UserFrequentNode]?
+        let energy: UserEnergy?
     }
 
     static let cache = ResponseCache<CachedProfile>(ttl: 300, limit: 40)
@@ -3797,22 +4192,37 @@ final class PublicProfileStore {
         // The 用户组 chips are named from the site's translations, so the bundle
         // has to be in hand before `apply(response:)` builds them.
         await DiscourseLocale.shared.preload()
+        // A refresh of the same person keeps everything on screen and swaps
+        // values as they arrive; clearing here flashed the page (the node
+        // cards and the list dropped out for a moment). Only a different
+        // person starts from blank.
+        let samePerson = username.caseInsensitiveCompare(target.username) == .orderedSame && phase == .loaded
         username = target.username
-        displayName = target.displayName ?? target.username
-        initial = target.initial
-        avatarURL = target.avatarURL
-        topCategories = []
-        actionItems = [:]
-        tabsWithMore = []
+        if !samePerson {
+            displayName = target.displayName ?? target.username
+            initial = target.initial
+            avatarURL = target.avatarURL
+            topCategories = []
+            ownedNodeSummaries = []
+            showcase = []
+            reputation = nil
+            energy = nil
+            contribution = nil
+            actionItems = [:]
+            tabsWithMore = []
+            pointsHistory = []
+            pointsLoaded = false
+        } else {
+            staleTabs = Set(actionItems.keys)
+        }
         failedTabs = []
-        pointsHistory = []
-        pointsLoaded = false
 
         // Paint from cache first, even if stale: a profile you just viewed
         // should appear instantly rather than behind a spinner.
         let cached = Self.cache.staleValue(forKey: target.username)
         if let cached {
             applyCached(cached.value)
+            phase = .loaded
             if !cached.isStale, !force { return }
         }
 
@@ -3826,6 +4236,9 @@ final class PublicProfileStore {
         async let profileCall = client.user(target.username)
         async let summaryCall: UserSummaryResponse? = try? await client.userSummary(target.username)
         async let pointsCall: PointsScoresResponse? = try? await client.pointsTotal(username: target.username)
+        async let showcaseCall: NLUserShowcase? = try? await client.userShowcase(username: target.username)
+        async let nodesCall: [UserFrequentNode]? = try? await client.userFrequentNodes(username: target.username)
+        async let energyCall: UserEnergy? = await client.userEnergy(username: target.username)
 
         var loadedUser: UserResponse?
         do {
@@ -3861,6 +4274,15 @@ final class PublicProfileStore {
             }
         }
 
+        let loadedShowcase = await showcaseCall
+        if let loadedShowcase { applyShowcase(loadedShowcase) }
+        let loadedNodes = await nodesCall
+        let frequent = ownedFirst(loadedNodes ?? [])
+        if !frequent.isEmpty { topCategories = await resolveNodes(frequent) }
+        ownedNodeSummaries = await resolveOwned(ownedNodes)
+        let loadedEnergy = await energyCall
+        if let loadedEnergy { energy = loadedEnergy }
+
         // 能量 total leads the stat row.
         let loadedPoints = await pointsCall?.totalScores
         if let total = loadedPoints {
@@ -3874,7 +4296,14 @@ final class PublicProfileStore {
 
         if let loadedUser {
             Self.cache.insert(
-                CachedProfile(user: loadedUser, summary: loadedSummary, pointsTotal: loadedPoints),
+                CachedProfile(
+                    user: loadedUser,
+                    summary: loadedSummary,
+                    pointsTotal: loadedPoints,
+                    showcase: loadedShowcase,
+                    frequentNodes: loadedNodes,
+                    energy: loadedEnergy
+                ),
                 forKey: target.username
             )
         }
@@ -3906,6 +4335,15 @@ final class PublicProfileStore {
         if let total = cached.pointsTotal {
             pointsTotal = total
         }
+        if let showcase = cached.showcase { applyShowcase(showcase) }
+        if let energy = cached.energy { self.energy = energy }
+        let nodes = ownedFirst(cached.frequentNodes ?? [])
+        if !nodes.isEmpty {
+            topCategories = nodes.map(fallbackNode)
+            Task { topCategories = await resolveNodes(nodes) }
+        }
+        let owned = ownedNodes
+        Task { ownedNodeSummaries = await resolveOwned(owned) }
         rebuildStats()
         if let title, !title.isEmpty {
             Task { titleStyle = await TitleStyleCatalog.shared.style(forTitle: title) }
@@ -3927,6 +4365,59 @@ final class PublicProfileStore {
             }
         }
         return nodes
+    }
+
+    private func applyShowcase(_ loaded: NLUserShowcase) {
+        showcase = loaded.showcase
+        reputation = loaded.reputation
+    }
+
+    /// The nodes they own ahead of the ones they post in, as Android orders
+    /// 常去节点: a member's own node is where they are.
+    private func ownedFirst(_ nodes: [UserFrequentNode]) -> [UserFrequentNode] {
+        let owned = ownedNodes.map { UserFrequentNode(slug: $0.slug.lowercased(), name: $0.name, count: 0) }
+        let ownedSlugs = Set(owned.map(\.slug))
+        return owned + nodes.filter { !ownedSlugs.contains($0.slug) }
+    }
+
+    /// 常去节点 from the catalog by slug; a node it doesn't list (restricted)
+    /// keeps the name the posts gave.
+    private func resolveNodes(_ nodes: [UserFrequentNode]) async -> [SidebarNodeSummary] {
+        var resolved: [SidebarNodeSummary] = []
+        for node in nodes {
+            resolved.append(await NodeCatalog.shared.node(slug: node.slug) ?? fallbackNode(node))
+        }
+        return resolved
+    }
+
+    private func resolveOwned(_ nodes: [UserProfile.OwnedNode]) async -> [SidebarNodeSummary] {
+        var resolved: [SidebarNodeSummary] = []
+        for node in nodes {
+            resolved.append(
+                await NodeCatalog.shared.node(slug: node.slug)
+                    ?? fallbackNode(slug: node.slug, name: node.name)
+            )
+        }
+        return resolved
+    }
+
+    private func fallbackNode(_ node: UserFrequentNode) -> SidebarNodeSummary {
+        fallbackNode(slug: node.slug, name: node.name)
+    }
+
+    private func fallbackNode(slug: String, name: String) -> SidebarNodeSummary {
+        SidebarNodeSummary(
+            id: abs(slug.hashValue),
+            name: name,
+            slug: slug,
+            description: "n/\(slug)",
+            memberCount: "",
+            colorHex: "009966",
+            logoURL: nil,
+            isCreator: false,
+            isJoined: false,
+            url: "/n/\(slug)"
+        )
     }
 
     private func fallbackNode(_ category: SummaryCategory) -> SidebarNodeSummary {
@@ -3962,6 +4453,7 @@ final class PublicProfileStore {
     private var coreStats: (likes: String, topics: String, posts: String)?
 
     private func apply(response: UserResponse) {
+        phase = .loaded
         let user = response.user
         username = user.username
         displayName = user.name?.isEmpty == false ? user.name! : user.username
@@ -3969,6 +4461,7 @@ final class PublicProfileStore {
         avatarURL = user.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 240) } ?? avatarURL
         backgroundURL = resolvedURL(user.profileBackgroundUploadUrl ?? user.cardBackgroundUploadUrl)
         title = user.title
+        tierName = user.tierName
         bio = DiscourseFormat.plainText(user.bioRaw ?? user.bioExcerpt)
         joined = formattedJoined(user.createdAt)
         lastSeen = formattedLastSeen(user.lastSeenAt)
@@ -3989,12 +4482,20 @@ final class PublicProfileStore {
         followerCount = user.totalFollowers
         achievementCount = user.achievementCount
         ownedNodes = user.ownedNodes ?? []
+        // Named chips at once; `resolveOwned` swaps in logos when the catalog
+        // answers. Kept when the set is unchanged so a refresh doesn't flash.
+        if ownedNodeSummaries.map(\.slug) != ownedNodes.map(\.slug) {
+            ownedNodeSummaries = ownedNodes.map { fallbackNode(slug: $0.slug, name: $0.name) }
+        }
         canFollow = user.canFollow ?? false
         isFollowing = user.isFollowed ?? false
-        // Absent flags mean 常规: the serializer only includes them for a
-        // signed-in viewer looking at somebody else.
-        notificationLevel = UserNotificationLevel(ignored: user.ignored, muted: user.muted)
+        // `ignored` is `viewer_blocked`; false for guests and yourself.
+        isBlocked = user.ignored == true
+        canMessage = user.canMessage ?? true
+        messageNote = user.messageNote
         accountAge = formattedAge(user.createdAt)
+        contribution = (user.topicCount == nil && user.postCount == nil)
+            ? nil : (user.topicCount ?? 0) + (user.postCount ?? 0)
         coreStats = (
             compactCount(user.likesReceived),
             compactCount(user.topicCount),
@@ -4034,15 +4535,34 @@ final class PublicProfileStore {
     }
 
     private func formattedJoined(_ value: String?) -> String {
-        guard let date = DiscourseFormat.date(value) else { return "Joined recently" }
+        guard let date = DiscourseFormat.date(value) else { return AppString("最近加入") }
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMM yyyy"
-        return "Joined \(formatter.string(from: date))"
+        formatter.locale = AppLanguage.resolved.locale
+        // A template, not a pattern: "yyyy年M月" only reads correctly in
+        // Chinese, whereas `yMMM` lets each language order and punctuate the
+        // year and month its own way. The surrounding word is a separate
+        // translatable string for the same reason.
+        formatter.setLocalizedDateFormatFromTemplate("yMMM")
+        return AppString("\(formatter.string(from: date)) 加入")
     }
 
     private func formattedLastSeen(_ value: String?) -> String {
         let relative = DiscourseFormat.relative(value)
-        return relative.isEmpty ? "Public profile" : "Active \(relative) ago"
+        guard !relative.isEmpty else { return AppString("公开资料") }
+        if relative == "now" { return AppString("刚刚在线") }
+        return AppString("最近活跃 \(localizedDuration(relative))前")
+    }
+
+    private func localizedDuration(_ value: String) -> String {
+        if value.hasSuffix("mo"), let number = Int(value.dropLast(2)) { return AppString("\(number) 个月") }
+        guard let unit = value.last, let number = Int(value.dropLast()) else { return value }
+        switch unit {
+        case "m": return AppString("\(number) 分钟")
+        case "h": return AppString("\(number) 小时")
+        case "d": return AppString("\(number) 天")
+        case "w": return AppString("\(number) 周")
+        default: return value
+        }
     }
 
     private func compactCount(_ value: Int?) -> String {
@@ -4143,13 +4663,15 @@ final class ChatConversationStore {
         guard !mine.isEmpty else { return [] }
 
         let me = ProfileTabAvatarStore.shared
+        // One formatter for the whole list, not one per message.
+        let iso = ISO8601DateFormatter()
         return mine.enumerated().map { offset, item in
             ChatConversationMessage(
                 id: -(offset + 1),
                 authorName: me.displayName.isEmpty ? me.username : me.displayName,
                 username: me.username,
                 text: item.body,
-                time: DiscourseFormat.relative(ISO8601DateFormatter().string(from: item.createdAt)),
+                time: DiscourseFormat.relative(iso.string(from: item.createdAt)),
                 avatarLetter: me.initial,
                 variant: me.variant,
                 avatarURL: me.avatarURL,
@@ -5063,6 +5585,8 @@ final class ProfileStore {
     var avatarURL: URL?
     var backgroundURL: URL?
     var title: String?
+    /// 段位 name, separate from the 头衔 since v1.
+    var tierName: String?
     var bio = ""
     var joined = ""
     var lastSeen = ""
@@ -5194,6 +5718,17 @@ final class ProfileStore {
         return formatter.string(from: Date())
     }
 
+    /// Re-reads today's 签到 for whoever is signed in now: called when the
+    /// day turns over, when the app comes back, and when the account changes,
+    /// so yesterday's check-in never shows as today's.
+    func refreshCheckInDay() {
+        guard let username = DiscourseAuth.shared.username else {
+            hasCheckedInToday = false
+            return
+        }
+        hasCheckedInToday = Self.checkedIn(username: username)
+    }
+
     private static func checkedIn(username: String) -> Bool {
         UserDefaults.standard.string(forKey: checkInKey(username: username)) == today()
     }
@@ -5219,17 +5754,39 @@ final class ProfileStore {
     var errorText: String?
     private var loaded = false
     private var loadedUsername: String?
-    /// Whether there is anything real on screen — from the network *or* from
-    /// last launch's snapshot. Distinct from `loaded`, which means the network
-    /// has answered: a snapshot gives content without being loaded.
-    private(set) var hasContent = false
-
-    /// First open of this account with nothing to draw yet, so the page should
-    /// show its skeleton rather than a screenful of `--` placeholders.
+    /// What the page shows — the one thing `ProfileView` switches on.
     ///
-    /// False as soon as a snapshot renders, which is the point of keeping one:
-    /// a returning reader sees their profile, not a shimmer.
-    var isShowingSkeleton: Bool { isLoading && !hasContent }
+    /// - `loading`: nothing to draw yet → skeleton.
+    /// - `loaded`: drawable, possibly partial (the signed-in name before the
+    ///   network answers, or last launch's snapshot) → the page; the rest
+    ///   fills in behind it.
+    /// - `failed`: nothing to draw and the load gave up → error + 重试.
+    ///
+    /// Replaces `hasContent` / `loadFailed` / `isShowingSkeleton`, which the
+    /// view combined differently in different places.
+    enum Phase: Equatable {
+        case loading
+        case loaded
+        case failed(String)
+    }
+
+    private(set) var phase: Phase = .loading
+
+    /// Anything real on screen — from the network, a snapshot, or the session.
+    private var hasContent: Bool { phase == .loaded }
+
+    /// The page's entry point: `load` with a 15 s ceiling and a definite
+    /// outcome. A slow or hung request used to leave the page waiting forever.
+    func loadPage(isAppAuthed: Bool, force: Bool = false) async {
+        if case .failed = phase { phase = .loading }
+        let finished = await withTimeout(seconds: 15) {
+            await self.load(isAppAuthed: isAppAuthed, force: force)
+        }
+        guard phase != .loaded else { return }
+        phase = .failed(
+            !finished ? AppString("加载超时，请检查网络后重试") : (errorText ?? AppString("加载失败"))
+        )
+    }
 
     /// `force` is for pull-to-refresh, which must ignore the loaded guard.
     func load(isAppAuthed: Bool = false, force: Bool = false) async {
@@ -5258,6 +5815,8 @@ final class ProfileStore {
             // Genuinely unknown — the server couldn't be reached. Placeholders,
             // but `loaded` stays false so returning to the tab tries again.
             if !earlySnapshot { seed(username: "") }
+            // Ends the skeleton: without a name there's nothing to wait for.
+            errorText = AppString("加载失败")
             loaded = false
             loadedUsername = nil
             return
@@ -5283,7 +5842,12 @@ final class ProfileStore {
         // Only reseed when actually about to fetch, and never over a snapshot —
         // seeding is what puts placeholders up, which is the flash the cache
         // exists to remove.
-        if !force, !renderedFromCache { seed(username: username) }
+        if !force, !renderedFromCache {
+            seed(username: username)
+            // The signed-in name is known, so draw the page now and let the
+            // network fill in the rest — a skeleton here was just a wait.
+            phase = .loaded
+        }
 
         // A cache hit means the screen is already complete, so the refresh
         // behind it shouldn't drive a spinner.
@@ -5299,12 +5863,13 @@ final class ProfileStore {
         }
 
         // A manual refresh should renew the tab lists too, not just the header.
+        // A manual refresh renews the lists in place: each is marked stale
+        // and refetched when shown, keeping its rows until the new page
+        // lands (see `staleTabs`).
         if force {
-            actionItems = [:]
-            // Or a tab that had been paged to its end would stay ended.
-            tabsWithMore = []
+            staleTabs = Set(actionItems.keys)
+            if pointsLoaded { staleTabs.insert(.energy) }
             failedTabs = []
-            pointsLoaded = false
         }
 
         // Admin-designed 头衔 styling from discourse-custom-badge.
@@ -5466,11 +6031,14 @@ final class ProfileStore {
         guard !username.isEmpty else { return }
 
         guard let filter = tab.filter else {
+            // A stale 能量 history is refetched with the old rows still shown.
+            if staleTabs.remove(tab) != nil { pointsLoaded = false }
             await loadPoints()
             return
         }
 
-        guard actionItems[tab] == nil else { return }
+        let isStale = staleTabs.contains(tab)
+        guard actionItems[tab] == nil || isStale else { return }
 
         loadingTab = tab
         failedTabs.remove(tab)
@@ -5479,13 +6047,19 @@ final class ProfileStore {
         do {
             let response = try await client.userActions(username: username, filter: filter)
             actionItems[tab] = response.userActions
+            staleTabs.remove(tab)
             setHasMore(response.userActions.count, for: tab)
         } catch {
-            // Leaves the tab unloaded rather than caching an empty array — see
-            // `PublicProfileStore.loadTab` for why that mattered.
-            failedTabs.insert(tab)
+            // A failed refresh keeps the rows it had. Only a list that was
+            // never loaded becomes a failure — and stays unloaded rather than
+            // caching an empty array (see `PublicProfileStore.loadTab`).
+            if actionItems[tab] == nil { failedTabs.insert(tab) }
         }
     }
+
+    /// Lists to refetch in place the next time they're shown — set by a
+    /// refresh instead of clearing them, which flashed the page.
+    private var staleTabs: Set<ProfileTab> = []
 
     /// Appends the next page of a tab. Mirrors `PublicProfileStore.loadMore`;
     /// the two stores keep separate copies because they load different headers
@@ -5541,13 +6115,14 @@ final class ProfileStore {
 
     private func applyGuest() {
         // The guest screen is a finished screen, not a loading one.
-        hasContent = true
+        phase = .loaded
         username = "guest"
         displayName = AppString("访客")
         initial = AppString("访")
         avatarURL = nil
         backgroundURL = nil
         title = nil
+        tierName = nil
         bio = AppString("登录后可以同步你的 NodeLoc 资料、徽章和发帖数据。")
         joined = AppString("未登录")
         lastSeen = AppString("访客模式")
@@ -5583,7 +6158,7 @@ final class ProfileStore {
 
     private func seed(username: String) {
         // Placeholders, not content — this is the state the skeleton covers.
-        hasContent = false
+        phase = .loading
         isGuest = false
         self.username = username
         displayName = username
@@ -5591,6 +6166,7 @@ final class ProfileStore {
         avatarURL = nil
         backgroundURL = nil
         title = nil
+        tierName = nil
         bio = ""
         joined = ""
         lastSeen = ""
@@ -5614,14 +6190,21 @@ final class ProfileStore {
     private func apply(response: UserResponse) {
         // Real values from here on, so the skeleton gives way — whether these
         // came from the network or off disk.
-        hasContent = true
+        phase = .loaded
         let user = response.user
+        // Same person (a refresh, or the network after a snapshot): keep the
+        // lists and 能量 on screen and mark them for a refetch in place.
+        // Clearing them here is what flashed the page on pull-to-refresh —
+        // the lists dropped to skeleton rows and the 能量 stat vanished for a
+        // moment.
+        let sameUser = !username.isEmpty && username.caseInsensitiveCompare(user.username) == .orderedSame
         username = user.username
         displayName = user.name?.isEmpty == false ? user.name! : user.username
         initial = String(displayName.prefix(1)).uppercased()
         avatarURL = user.avatarTemplate.flatMap { client.avatarURL(template: $0, size: 240) }
         backgroundURL = resolvedURL(user.profileBackgroundUploadUrl ?? user.cardBackgroundUploadUrl)
         title = user.title
+        tierName = user.tierName
         bio = DiscourseFormat.plainText(user.bioRaw ?? user.bioExcerpt)
         joined = formattedJoined(user.createdAt)
         lastSeen = formattedLastSeen(user.lastSeenAt)
@@ -5641,11 +6224,17 @@ final class ProfileStore {
             resolveImage: { resolvedURL($0) }
         )
         followerCount = user.totalFollowers
-        actionItems = [:]
+        if sameUser {
+            staleTabs = Set(actionItems.keys)
+            if pointsLoaded { staleTabs.insert(.energy) }
+        } else {
+            actionItems = [:]
+            staleTabs = []
+            pointsHistory = []
+            pointsTotal = nil
+            pointsLoaded = false
+        }
         loadingTab = nil
-        pointsHistory = []
-        pointsTotal = nil
-        pointsLoaded = false
         coreStats = (
             compactCount(user.likesReceived),
             compactCount(user.topicCount),
@@ -5814,5 +6403,43 @@ final class VoteFaces {
         // The path takes the name verbatim: "+1" is a filename, not an escape.
         DiscourseConfig.baseURL
             .appending(path: "images/emoji/unicode/\(name).png")
+    }
+}
+
+
+/// Runs `operation`, giving up after `seconds`. Returns whether it finished;
+/// on timeout the operation is cancelled and left to wind down on its own.
+///
+/// Not a task group: a group waits for every child before returning, so an
+/// operation that didn't notice the cancellation (a request mid-flight, a
+/// shared preload) kept the caller waiting past the deadline — the profile
+/// sat on its skeleton long after the 15 s were up.
+@MainActor
+func withTimeout(seconds: Double, _ operation: @escaping @MainActor () async -> Void) async -> Bool {
+    let work = Task { @MainActor in await operation() }
+    let gate = TimeoutGate()
+    return await withCheckedContinuation { continuation in
+        Task { @MainActor in
+            await work.value
+            if gate.open() { continuation.resume(returning: true) }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(seconds))
+            if gate.open() {
+                work.cancel()
+                continuation.resume(returning: false)
+            }
+        }
+    }
+}
+
+/// Lets exactly one of the two racers resume the continuation.
+@MainActor
+private final class TimeoutGate {
+    private var isOpen = true
+    func open() -> Bool {
+        guard isOpen else { return false }
+        isOpen = false
+        return true
     }
 }

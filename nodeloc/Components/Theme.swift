@@ -71,6 +71,60 @@ enum Theme {
     static let success = Color(light: 0x009900, dark: 0x4ADB84)
     static let love = Color(light: 0xFA6C8D, dark: 0xFF7A9A)
 
+    // MARK: Profile / node page roles
+    /// Neutral chip and secondary-button fill (#E5EBEE).
+    static let chip = Color(light: 0xE5EBEE, dark: 0x262D2A)
+    /// Opaque 1pt rule under rows and tab strips (#DCE3E6).
+    static let hairline = Color(light: 0xDCE3E6, dark: 0x2A312E)
+    /// Secondary body text (#2A3C42) and muted meta text (#576F76).
+    static let textSecondary = Color(light: 0x2A3C42, dark: 0xC4CBC7)
+    static let textMuted = Color(light: 0x576F76, dark: 0x9AA39F)
+    /// Placeholders, disabled labels and tertiary glyphs.
+    static let textFaint = Color(light: 0x8BA2AD, dark: 0x6B7571)
+    /// The one filled-button green and the label that sits on it. Darker than
+    /// `accent` in dark mode, where the mint accent made white labels unreadable.
+    static let accentFill = Color(light: 0x007A52, dark: 0x1E8F67)
+    static let onAccent = Color.white
+    /// The profile banner when the user has no image of their own.
+    static let profileBanner = Color(light: 0x0B1F18, dark: 0x12352A)
+    /// Tier and role chips beside a profile's name.
+    static let tierChipFill = Color(light: 0xEEF5FF, dark: 0x1A2638)
+    static let tierChipText = Color(light: 0x1E4E9A, dark: 0x9CC0FF)
+    static let roleChipFill = Color(light: 0xE3F4EC, dark: 0x133D31)
+    static let roleChipText = Color(light: 0x00573B, dark: 0x7BEBC5)
+    static let tierChipBorder = Color(light: 0xA9C8FF, dark: 0x2D4366)
+    static let roleChipBorder = Color(light: 0xA9D9C3, dark: 0x1F5A45)
+    /// 头衔 pill: the web's `.levelpill` (`--level-bg` / `--level-fg`).
+    static let titleChipFill = Color(light: 0xFFF1DF, dark: 0x2E261D)
+    static let titleChipText = Color(light: 0x6B3D00, dark: 0xF2C9A8)
+    /// The pinned-topics card (home and node page), #EBF5EF in the design.
+    static let pinnedCard = Color(light: 0xEBF5EF, dark: 0x15241E)
+    /// The 置顶 chip on that card: white at 75% over the tint.
+    static let pinnedChip = Color(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.75, darkAlpha: 0.08)
+    /// The home feed's one-line announcement strip: #FFF1E4 fill, #7A3E00
+    /// label, #8A5A2B title and counter.
+    static let announceStrip = Color(light: 0xFFF1E4, dark: 0x2E2318)
+    static let announceStripText = Color(light: 0x7A3E00, dark: 0xF5C9A0)
+    static let announceStripMuted = Color(light: 0x8A5A2B, dark: 0xCFA982)
+    /// The moderators-only "N 人举报 · 去处理" strip under a feed row.
+    static let modStrip = Color(light: 0xFFEFD6, dark: 0x33270F)
+    static let modStripText = Color(light: 0x8A5200, dark: 0xF5C37A)
+    // Reputation sources (声望来源 bar, ledger dots): 被赞 uses `accent500`.
+    static let repAccept = Color(light: 0x0E7490, dark: 0x38BDD8)
+    static let repFeatured = Color(light: 0x6D28D9, dark: 0xA78BFA)
+    static let repAchievement = Color(light: 0xB7791F, dark: 0xE0A64A)
+    static let repTask = Color(light: 0x8BA2AD, dark: 0x6B7F88)
+    /// The node page's default banner gradient, #004730 → #007A52.
+    static let nodeBannerStart = Color(hex: 0x004730)
+    static let nodeBannerEnd = Color(hex: 0x007A52)
+    /// Text-cursor and active-formatting blue in the composer and sign-in fields.
+    static let editTint = Color(light: 0x3366FF, dark: 0x7EA7FF)
+    /// The media editors' primary action (image editor's update button, the
+    /// trimmer's GIF toggle). Carries a white label in both modes.
+    static let mediaAction = Color(light: 0x1B6BFF, dark: 0x2F78FF)
+    /// The video trimmer's selected-range frame and handles.
+    static let trimSelection = Color(hex: 0xF5C518)
+
     // MARK: Neutral ramp
     static let neutral100 = Color(light: 0xFFFFFF, dark: 0xF7FAF8)
     static let neutral200 = Color(light: 0xF6F8F9, dark: 0xEEF2EF)
@@ -113,6 +167,14 @@ enum Theme {
     static let radiusSm: CGFloat = 4
     static let radiusMd: CGFloat = 8
     static let radiusLg: CGFloat = 14
+
+    // The corner scale: 8 / 12 / 16, plus capsules. Use these, not literals.
+    static let cornerSmall: CGFloat = 8
+    static let cornerMedium: CGFloat = 12
+    static let cornerLarge: CGFloat = 16
+
+    /// Horizontal page inset, everywhere.
+    static let pagePadding: CGFloat = 16
 
     // MARK: Feed media
     //

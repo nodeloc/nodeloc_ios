@@ -13,6 +13,7 @@
 //
 
 import Foundation
+import SwiftUI
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -39,13 +40,13 @@ struct DiscourseClient {
 
     // MARK: Request helpers
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+    func get<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
         let data = try await http.send("GET", path, query: query)
         return try NodelocJSON.decode(T.self, from: data)
     }
 
     @discardableResult
-    private func send(_ method: String, _ path: String, json: [String: Any]? = nil, query: [URLQueryItem] = [], headers: [String: String] = [:]) async throws -> Data {
+    func send(_ method: String, _ path: String, json: [String: Any]? = nil, query: [URLQueryItem] = [], headers: [String: String] = [:]) async throws -> Data {
         try await http.send(method, path, query: query, body: json.map { .json($0) } ?? .none, headers: headers)
     }
 
@@ -54,7 +55,7 @@ struct DiscourseClient {
         return try NodelocJSON.decode(T.self, from: data)
     }
 
-    private static func shaped<T: Decodable>(_ object: Any) throws -> T {
+    static func shaped<T: Decodable>(_ object: Any) throws -> T {
         try NodelocJSON.decode(T.self, object: object)
     }
 
@@ -71,10 +72,86 @@ struct DiscourseClient {
     @discardableResult
     func loadNodes(force: Bool = false) async throws -> [NLNode] {
         if !force, state.nodesFresh { return state.allNodes }
-        let list: NLNodeList = try await get("api/v1/nodes")
+        // `/api/v1/nodes` is the full directory (~160 KB) and has been seen
+        // taking 10–30 s to answer. Everything that maps a node slug waits on
+        // it — the home feed sat on its skeleton that whole time — so a stale
+        // copy (this session's, or the last launch's from disk) is used at
+        // once and the refresh happens behind it.
+        if !force {
+            // ~160 KB of JSON: read and decoded off the main thread.
+            if state.allNodes.isEmpty,
+               let cached = await Task.detached(priority: .userInitiated, operation: { NodeDirectoryDiskCache.load() }).value,
+               state.allNodes.isEmpty {
+                state.seed(nodes: cached)
+            }
+            if !state.allNodes.isEmpty {
+                refreshNodesInBackground()
+                return state.allNodes
+            }
+        }
+        return try await fetchNodes()
+    }
+
+    private func fetchNodes() async throws -> [NLNode] {
+        // Several callers can miss the cache at once on a first launch; they
+        // share one download of the directory.
+        if let running = NodelocAdapterState.nodesFetch {
+            return try await running.value
+        }
+        let client = self
+        let task = Task { try await client.fetchNodesNow() }
+        NodelocAdapterState.nodesFetch = task
+        defer { NodelocAdapterState.nodesFetch = nil }
+        return try await task.value
+    }
+
+    private func fetchNodesNow() async throws -> [NLNode] {
+        let data = try await http.send("GET", "api/v1/nodes")
+        // Decoding the full directory and writing it to disk took the main
+        // thread for most of a second at launch, holding up every other
+        // response (the first feed page among them).
+        let list = try await Task.detached(priority: .userInitiated) { () throws -> NLNodeList in
+            let list = try NodelocJSON.decode(NLNodeList.self, from: data)
+            NodeDirectoryDiskCache.save(data)
+            return list
+        }.value
         state.store(nodes: list.nodes)
-        await loadMyNodes()
+        // Joined/muted state: awaited only the first time (roles and bells
+        // are shaped from it); a refresh updates it behind the directory.
+        if state.myNodes.isEmpty {
+            await loadMyNodes()
+        } else {
+            let client = self
+            Task { await client.loadMyNodes() }
+        }
         return list.nodes
+    }
+
+    private func refreshNodesInBackground() {
+        guard !state.isRefreshingNodes else { return }
+        state.isRefreshingNodes = true
+        let client = self
+        Task {
+            _ = try? await client.fetchNodes()
+            NodelocAdapterState.shared.isRefreshingNodes = false
+        }
+    }
+
+    /// The reader's relation to nodes, as the server has it, and the shared
+    /// state updated from it.
+    func myNodes() async throws -> NLMyNodes {
+        let mine: NLMyNodes = try await get("api/v1/me/nodes")
+        state.myNodes = Dictionary(mine.joined.map { ($0.slug, $0) }, uniquingKeysWith: { first, _ in first })
+        state.mutedNodes = Set(mine.muted ?? [])
+        state.favoriteNodes = (mine.favorites ?? []).map(\.slug)
+        return mine
+    }
+
+    /// 收藏 / 取消收藏 a node (`PUT` / `DELETE /api/v1/nodes/{slug}/favorite`).
+    @discardableResult
+    func setNodeFavorite(slug: String, favorite: Bool) async throws -> Data {
+        let path = "api/v1/nodes/\(Self.pathEscape(slug))/favorite"
+        return favorite ? try await send("PUT", path) : try await send("DELETE", path)
     }
 
     /// Which nodes the reader joined (with role and bell), favorited, muted.
@@ -115,9 +192,17 @@ struct DiscourseClient {
             query.append(URLQueryItem(name: "cursor", value: cursor))
         }
         _ = try? await loadNodes()
-        let result: NLTopicPage = try await get(path, query: query)
+        // Decoded off the main thread: a page of topics is the biggest
+        // routine answer, and decoding it on main was the hitch each time a
+        // feed loaded its next page.
+        let result = try await Self.decodeTopicPage(try await http.send("GET", path, query: query))
         state.setCursor(result.nextCursor, list: key, page: page + 1)
         return result
+    }
+
+    @concurrent
+    nonisolated private static func decodeTopicPage(_ data: Data) async throws -> NLTopicPage {
+        try NodelocJSON.decode(NLTopicPage.self, from: data)
     }
 
     private static func hasMore(_ page: NLTopicPage) -> Bool {
@@ -159,6 +244,12 @@ struct DiscourseClient {
             result = try await topicPage(
                 list: "fresh", page: page,
                 query: [URLQueryItem(name: "sort", value: "fresh")]
+            )
+        case .following:
+            // The joined nodes only; cursor-paged like latest.
+            result = try await topicPage(
+                list: "following", page: page,
+                query: [URLQueryItem(name: "joined", value: "1")]
             )
         }
         var object = DiscourseShape.latest(result.topics, hasMore: Self.hasMore(result))
@@ -207,6 +298,29 @@ struct DiscourseClient {
         return (shaped, result.nextOffset)
     }
 
+    /// `GET /api/v1/search?type=tags`: tags whose name matches.
+    func searchTags(_ term: String) async throws -> [SearchTagResult] {
+        struct Envelope: Decodable {
+            struct Tag: Decodable { let name: String; let label: String?; let topicCount: Int? }
+            let tags: [Tag]?
+        }
+        let found: Envelope = try await get("api/v1/search", query: [
+            URLQueryItem(name: "q", value: term),
+            URLQueryItem(name: "type", value: "tags"),
+        ])
+        return (found.tags ?? []).map { SearchTagResult(name: $0.name, label: $0.label ?? $0.name, topicCount: $0.topicCount ?? 0) }
+    }
+
+    /// The author's own topics (`GET /api/v1/users/{u}/topics`), newest first,
+    /// for the reader's 同一作者.
+    func authorTopics(username: String, limit: Int = 20) async throws -> LatestResponse {
+        let page: NLTopicPage = try await get(
+            "api/v1/users/\(Self.pathEscape(username))/topics",
+            query: [URLQueryItem(name: "limit", value: String(limit))]
+        )
+        return try Self.shaped(DiscourseShape.latest(page.topics, hasMore: false))
+    }
+
     // MARK: Penalties and the watch list
 
     /// Silences or suspends someone site-wide.
@@ -224,11 +338,15 @@ struct DiscourseClient {
         reason: String,
         hours: Int? = nil,
         deleteRecentHours: Int = 0,
-        notify: Bool = true
+        notify: Bool = true,
+        onConflict: String? = nil
     ) async throws -> Data {
-        var body: [String: Any] = ["type": type, "reason": reason, "notify": notify]
-        if let hours { body["hours"] = hours }
+        // The server reads `kind` and `days` (0 is permanent); `type` and
+        // `hours` were never fields and were refused as unknown.
+        var body: [String: Any] = ["kind": type, "reason": reason, "notify": notify]
+        body["days"] = hours.map { max(0, $0 / 24) } ?? 0
         if deleteRecentHours > 0 { body["delete_recent_hours"] = min(deleteRecentHours, 720) }
+        if let onConflict { body["on_conflict"] = onConflict }
         return try await send("POST", "api/v1/admin/users/\(id)/penalties", json: body)
     }
 
@@ -241,11 +359,13 @@ struct DiscourseClient {
         type: String,
         reason: String,
         days: Int? = nil,
-        deleteRecentHours: Int = 0
+        deleteRecentHours: Int = 0,
+        onConflict: String? = nil
     ) async throws -> Data {
-        var body: [String: Any] = ["username": username, "type": type, "reason": reason]
+        var body: [String: Any] = ["username": username, "kind": type, "reason": reason]
         if let days { body["days"] = days }
         if deleteRecentHours > 0 { body["delete_recent_hours"] = min(deleteRecentHours, 720) }
+        if let onConflict { body["on_conflict"] = onConflict }
         return try await send("POST", "api/v1/nodes/\(slug)/restrictions", json: body)
     }
 
@@ -422,6 +542,34 @@ struct DiscourseClient {
         return response.appeal
     }
 
+    /// The penalties of an account that can't sign in (login said 403
+    /// `suspended`), with the same username and password. 401 wrong password,
+    /// 409 `not_suspended`, 10 an hour per address.
+    func lookupRestrictions(login: String, password: String) async throws -> [NLRestrictions.Restriction] {
+        let response: NLRestrictions = try await sendDecoding(
+            "POST", "api/v1/restrictions/lookup", json: ["login": login, "password": password]
+        )
+        return response.restrictions
+    }
+
+    /// Appeals a penalty with the account's username and password, for an
+    /// account that can't sign in.
+    @discardableResult
+    func appealRestriction(
+        login: String,
+        password: String,
+        kind: String,
+        id: Int,
+        reason: AppealReason,
+        text: String
+    ) async throws -> NLRestrictions.Appeal {
+        let response: NLAppealEnvelope = try await sendDecoding(
+            "POST", "api/v1/restrictions/\(kind)/\(id)/appeal",
+            json: ["login": login, "password": password, "reason": reason.rawValue, "text": text]
+        )
+        return response.appeal
+    }
+
     /// Appeal a deleted or hidden post — or, when the whole topic went, the
     /// topic. Only its author may, only once per removal, and only inside the
     /// seven-day window (409 `appeal_expired` after that).
@@ -518,9 +666,11 @@ struct DiscourseClient {
         let slug = try await nodeSlug(categoryID: categoryID)
         let scoped = Self.scopedSort(sort)
         let result = try await topicPage(
-            list: "node:\(slug):\(scoped ?? "latest")",
+            list: "node:\(slug):\(sort == "featured" ? "featured" : (scoped ?? "latest"))",
             page: page,
-            query: [URLQueryItem(name: "node", value: slug)] + Self.sortQuery(scoped),
+            // 精华 is a filter on the latest list (`featured=1`), not a sort.
+            query: [URLQueryItem(name: "node", value: slug)] + Self.sortQuery(scoped)
+                + (sort == "featured" ? [URLQueryItem(name: "featured", value: "1")] : []),
             // `hot` and `rising` page by offset; `latest` and `fresh` by cursor.
             offsetPaged: scoped == "hot" || scoped == "rising"
         )
@@ -576,10 +726,13 @@ struct DiscourseClient {
                 "lottery_enabled": true,
             ] as [String: Any],
         ]
-        if let providers = try? await authProviders() {
+        // Independent calls: asked for together rather than one after the other.
+        async let providersCall = try? authProviders()
+        async let tiersCall: NLTiers? = try? get("api/v1/tiers")
+        if let providers = await providersCall {
             object["auth_providers"] = providers.map { ["name": $0.name, "custom_url": DiscourseShape.value($0.url)] as [String: Any] }
         }
-        if let tiers: NLTiers = try? await get("api/v1/tiers") {
+        if let tiers = await tiersCall {
             object["trust_levels"] = Dictionary(tiers.tiers.map { ($0.name, $0.level) }, uniquingKeysWith: { first, _ in first })
         }
         return try Self.shaped(object)
@@ -601,6 +754,7 @@ struct DiscourseClient {
     func joinNode(categoryID: Int) async throws -> NodeMembershipResponse {
         let slug = try await nodeSlug(categoryID: categoryID)
         try await send("PUT", "api/v1/nodes/\(slug)/membership")
+        state.setJoined(slug: slug, joined: true)
         state.invalidateNodes()
         await loadMyNodes()
         return try Self.shaped(["success": true, "joined": true])
@@ -609,9 +763,32 @@ struct DiscourseClient {
     func leaveNode(categoryID: Int) async throws -> NodeMembershipResponse {
         let slug = try await nodeSlug(categoryID: categoryID)
         try await send("DELETE", "api/v1/nodes/\(slug)/membership")
+        state.setJoined(slug: slug, joined: false)
         state.invalidateNodes()
         await loadMyNodes()
         return try Self.shaped(["success": true, "joined": false])
+    }
+
+    /// The sections a new node may go under, out of `candidates` (slugs):
+    /// `GET /api/v1/node-parents` lists only sections with `open_for_nodes`
+    /// (all of them for node admins). It answers at most 10 rows, so when the
+    /// first page is full each section it didn't name is asked for by slug.
+    func createNodeParentSlugs(candidates: [String]) async throws -> Set<String> {
+        struct Options: Decodable {
+            struct Option: Decodable { let slug: String }
+            let nodes: [Option]
+        }
+        let first: Options = try await get("api/v1/node-parents")
+        var open = Set(first.nodes.map { $0.slug.lowercased() })
+        guard first.nodes.count >= 10 else { return open }
+        let rest = candidates.filter { !open.contains($0.lowercased()) }
+        for slug in rest {
+            let page: Options? = try? await get("api/v1/node-parents", query: [URLQueryItem(name: "q", value: slug)])
+            if page?.nodes.contains(where: { $0.slug.caseInsensitiveCompare(slug) == .orderedSame }) == true {
+                open.insert(slug.lowercased())
+            }
+        }
+        return open
     }
 
     func setCategoryNotification(categoryID: Int, level: Int) async throws -> Data {
@@ -619,6 +796,13 @@ struct DiscourseClient {
         let data = try await send("PUT", "api/v1/nodes/\(slug)/notification", json: ["level": DiscourseShape.nodeLevel(fromDiscourse: level)])
         await loadMyNodes()
         return data
+    }
+
+    /// `DELETE /api/v1/nodes/{slug}/block`. The bell's 免打扰 *is* this block
+    /// on the v1 backend, so lifting it leaves the member's earlier level.
+    func unblockNode(slug: String) async throws {
+        try await send("DELETE", "api/v1/nodes/\(Self.pathEscape(slug))/block")
+        await loadMyNodes()
     }
 
     func setTopicNotification(topicID: Int, level: Int) async throws -> Data {
@@ -637,11 +821,33 @@ struct DiscourseClient {
         return try Self.shaped(["category_list": ["categories": categories]])
     }
 
-    /// The drawer's node list: the nodes the reader joined.
+    /// The drawer's node list (the nodes the reader joined), plus what the
+    /// node directory reads: the biggest nodes as `recommended` and one
+    /// bucket per section as `grouped`. Without those two the directory fell
+    /// back to its built-in sample nodes, whose made-up member counts
+    /// ("3.5k") disagreed with the node page's real one.
     func sidebarNodes() async throws -> SidebarCommunitiesResponse {
         let nodes = try await loadNodes()
         let mine = nodes.filter { ($0.joined == true || state.myNodes[$0.slug] != nil) && $0.parentId != nil }
-        return try Self.shaped(["communities": mine.map { DiscourseShape.category($0, isMine: $0.ownerId == state.me?.id) }])
+        let leaves = nodes.filter { $0.parentId != nil }
+        let recommended = leaves
+            .sorted { ($0.memberCount ?? 0) > ($1.memberCount ?? 0) }
+            .prefix(8)
+        var grouped: [String: Any] = [:]
+        for section in nodes where section.parentId == nil {
+            let count = leaves.filter { $0.parentId == section.id }.count
+            guard count > 0 else { continue }
+            grouped[String(section.id)] = [
+                "category": DiscourseShape.category(section),
+                "total_count": count,
+                "has_more": count > 4,
+            ] as [String: Any]
+        }
+        return try Self.shaped([
+            "communities": mine.map { DiscourseShape.category($0, isMine: $0.ownerId == state.me?.id) },
+            "recommended": recommended.map { DiscourseShape.category($0) },
+            "grouped": grouped,
+        ])
     }
 
     func nodeBrowse(parentCategoryID: Int, page: Int = 0, perPage: Int? = nil) async throws -> SidebarCommunitiesResponse {
@@ -653,6 +859,46 @@ struct DiscourseClient {
             "communities": slice.map { DiscourseShape.category($0) },
             "meta": ["total": all.count, "page": page, "per_page": size, "has_more": (page + 1) * size < all.count] as [String: Any],
         ])
+    }
+
+    /// `GET /api/v1/nodes?page=1&limit=100`: the first page of the directory
+    /// (every section, then nodes section by section), which answers in under
+    /// a second where the full list has taken 10–30 s. The nodes tab draws
+    /// its first screen from it on a launch with no cached directory. Shaped
+    /// like `categories(includeSubcategories: true)`; not folded into the
+    /// cached directory, which would then look complete when it isn't.
+    func nodeDirectoryFirstPage() async throws -> CategoriesResponse {
+        let page: NLNodeList = try await get("api/v1/nodes", query: [
+            URLQueryItem(name: "page", value: "1"), URLQueryItem(name: "limit", value: "100"),
+        ])
+        let categories = page.nodes.filter { $0.parentId == nil }.map { section in
+            DiscourseShape.category(section, children: page.nodes.filter { $0.parentId == section.id })
+        }
+        return try Self.shaped(["category_list": ["categories": categories]])
+    }
+
+    /// `GET /api/v1/nodes?q=…&limit=…`: the server's node search (name, slug
+    /// and description, best match first), sections left out.
+    func searchNodes(term: String, limit: Int = 30) async throws -> [DiscourseCategory] {
+        let page: NLNodeList = try await get("api/v1/nodes", query: [
+            URLQueryItem(name: "q", value: term), URLQueryItem(name: "limit", value: String(limit)),
+        ])
+        let response: SidebarCommunitiesResponse = try Self.shaped([
+            "communities": page.nodes.filter { $0.parentId != nil }.map { DiscourseShape.category($0) },
+        ])
+        return response.communities ?? []
+    }
+
+    /// Waits out a directory refresh that `loadNodes` started behind a stale
+    /// copy (rather than asking `/api/v1/nodes` a second time) and says
+    /// whether the directory is fresh now.
+    func awaitNodesRefresh() async -> Bool {
+        var waited = 0
+        while state.isRefreshingNodes, waited < 600, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(100))
+            waited += 1
+        }
+        return state.nodesFresh
     }
 
     /// No visit history on the server; the reader's own nodes stand in.
@@ -677,10 +923,13 @@ struct DiscourseClient {
         slug: String,
         description: String,
         colorHex: String?,
-        parentCategoryID: Int
+        parentCategoryID: Int,
+        visibility: String? = nil,
+        topicPolicy: String? = nil,
+        rules: [(title: String, description: String)] = []
     ) async throws -> CreateCommunityResponse {
         let parent = try await nodeSlug(categoryID: parentCategoryID)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "parent": parent,
             "slug": slug,
             "name": name,
@@ -688,17 +937,39 @@ struct DiscourseClient {
             "color": colorHex ?? "",
             "open_for_nodes": false,
         ]
+        // Optional; left out, the server keeps its defaults (public, anyone).
+        if let visibility { body["visibility"] = visibility }
+        if let topicPolicy { body["topic_policy"] = topicPolicy }
+        if !rules.isEmpty {
+            body["rules"] = rules.map { ["title": $0.title, "description": $0.description] }
+        }
         let created: NLNodeEnvelope = try await sendDecoding("POST", "api/v1/nodes", json: body)
         state.merge(node: created.node)
         state.invalidateNodes()
         return try Self.shaped(["category": DiscourseShape.category(created.node, isMine: true)])
     }
 
+    /// What the reader may do and how far (`GET /api/v1/me/permissions`):
+    /// `nodes.create`, and limits such as `nodes.max_owned` (-1 = unlimited).
+    func myPermissions() async throws -> NLMyPermissions {
+        try await get("api/v1/me/permissions")
+    }
+
     // MARK: Custom feeds
 
     func customFeeds() async throws -> CustomFeedsResponse {
         let list: NLCustomFeeds = try await get("api/v1/custom-feeds")
-        return try Self.shaped(["custom_feeds": list.feeds.map(DiscourseShape.customFeed)])
+        // The list is the reader's own feeds, and its items are summaries
+        // (id, name, color, public, node_count): no `owner`, no `mine`. The
+        // sidebar keys a feed by its owner, so every row was dropped — the
+        // reader's feeds never showed. Fill both in from who is asking.
+        let me = auth.username
+        return try Self.shaped(["custom_feeds": list.feeds.map { feed -> DiscourseShape.Object in
+            var object = DiscourseShape.customFeed(feed)
+            if feed.owner == nil, let me { object["username"] = me }
+            if feed.mine == nil { object["can_edit"] = true }
+            return object
+        }])
     }
 
     /// The backend lists only the reader's own feeds.
@@ -719,12 +990,14 @@ struct DiscourseClient {
     func customFeedTopics(
         username: String,
         slug: String,
-        page: Int = 0
+        page: Int = 0,
+        sort: String = "hot"
     ) async throws -> CategoryTopicsResponse {
+        // `hot` pages by offset, `new` by cursor (feed.md).
         let result = try await topicPage(
-            list: "feed:\(slug)", page: page,
-            query: [URLQueryItem(name: "sort", value: "hot")],
-            path: "api/v1/custom-feeds/\(slug)/topics", offsetPaged: true
+            list: "feed:\(slug):\(sort)", page: page,
+            query: [URLQueryItem(name: "sort", value: sort)],
+            path: "api/v1/custom-feeds/\(slug)/topics", offsetPaged: sort == "hot"
         )
         return try Self.shaped(DiscourseShape.latest(result.topics, hasMore: Self.hasMore(result)))
     }
@@ -855,21 +1128,36 @@ struct DiscourseClient {
     /// Polls are marked in the HTML; lottery and red envelope come only when
     /// the topic says it has one.
     private func topicExtras(topicID: Int, topic: NLTopicDetail.Topic, posts: [NLPost]) async -> (polls: [Int: [NLPoll]], lottery: NLLottery?, redEnvelope: NLRedEnvelope?) {
+        // Polls, the lottery and the red envelope are independent calls that
+        // all hold up the reader; they used to go out one after another.
+        let pollPosts = posts.filter { $0.html.contains("class=\"poll\"") }.map(\.id)
+        let lotteryPostID = (topic.hasLottery ?? true)
+            ? posts.first(where: { $0.postNumber == 1 })?.id
+            : nil
+        let wantsEnvelope = topic.hasRedEnvelope ?? true
+
+        async let lotteryCall: NLLottery? = {
+            guard let lotteryPostID else { return nil }
+            return (try? await get("api/v1/posts/\(lotteryPostID)/lottery") as NLLotteryEnvelope)?.lottery
+        }()
+        async let envelopeCall: NLRedEnvelope? = {
+            guard wantsEnvelope else { return nil }
+            return (try? await get("api/v1/topics/\(topicID)/red-envelope") as NLRedEnvelopeEnvelope)?.redEnvelope
+        }()
+
         var polls: [Int: [NLPoll]] = [:]
-        for post in posts where post.html.contains("class=\"poll\"") {
-            if let list: NLPolls = try? await get("api/v1/posts/\(post.id)/polls") {
-                polls[post.id] = list.polls
+        await withTaskGroup(of: (Int, [NLPoll]?).self) { group in
+            for postID in pollPosts {
+                group.addTask {
+                    let list: NLPolls? = try? await self.get("api/v1/posts/\(postID)/polls")
+                    return (postID, list?.polls)
+                }
+            }
+            for await (postID, list) in group {
+                if let list { polls[postID] = list }
             }
         }
-        var lottery: NLLottery?
-        if topic.hasLottery ?? true, let first = posts.first(where: { $0.postNumber == 1 }) {
-            lottery = (try? await get("api/v1/posts/\(first.id)/lottery") as NLLotteryEnvelope)?.lottery
-        }
-        var envelope: NLRedEnvelope?
-        if topic.hasRedEnvelope ?? true {
-            envelope = (try? await get("api/v1/topics/\(topicID)/red-envelope") as NLRedEnvelopeEnvelope)?.redEnvelope
-        }
-        return (polls, lottery, envelope)
+        return (polls, await lotteryCall, await envelopeCall)
     }
 
     private static func replySort(_ sort: String) -> String {
@@ -984,19 +1272,21 @@ struct DiscourseClient {
         ])
     }
 
-    func createTopic(title: String, raw: String, categoryID: Int) async throws -> CreatePostResponse {
+    func createTopic(title: String, raw: String, categoryID: Int, tags: [String] = [], draftKey: String? = nil) async throws -> CreatePostResponse {
         let slug = try await nodeSlug(categoryID: categoryID)
-        let created: NLCreatedTopic = try await sendDecoding("POST", "api/v1/topics", json: [
-            "node": slug, "title": title, "raw": raw,
-        ])
-        return try Self.shaped(["id": DiscourseShape.value(created.post?.id), "topic_id": created.topic.id, "post_number": 1])
+        var body: [String: Any] = ["node": slug, "title": title, "raw": raw]
+        if !tags.isEmpty { body["tags"] = tags }
+        // A draft continued from 草稿箱: the server deletes it once posted.
+        if let draftKey { body["draft_key"] = draftKey }
+        let created: NLCreatedTopic = try await sendDecoding("POST", "api/v1/topics", json: body)
+        return try Self.shaped(["id": DiscourseShape.value(created.post?.id), "topic_id": created.topic.id, "post_number": 1, "held": created.held ?? false])
     }
 
     func reply(topicID: Int, raw: String, replyToPostNumber: Int? = nil) async throws -> CreatePostResponse {
         var body: [String: Any] = ["raw": raw]
         if let replyToPostNumber, replyToPostNumber > 1 { body["reply_to_post_number"] = replyToPostNumber }
         let created: NLCreatedReply = try await sendDecoding("POST", "api/v1/topics/\(topicID)/posts", json: body)
-        return try Self.shaped(["id": created.post.id, "topic_id": topicID, "post_number": created.post.postNumber])
+        return try Self.shaped(["id": created.post.id, "topic_id": topicID, "post_number": created.post.postNumber, "held": created.held ?? false])
     }
 
     func updatePost(id: Int, raw: String, editReason: String? = nil) async throws -> Data {
@@ -1064,6 +1354,11 @@ struct DiscourseClient {
     /// settings, so they change without an app release; "其他" is appended by
     /// the server and always last.
     func moderationReasons() async throws -> [String] {
+        try await moderationReasonList().map(\.value)
+    }
+
+    /// The same list with its keys, labels and which one is 「其他」.
+    func moderationReasonList() async throws -> [NLReason] {
         let response: NLModerationReasons = try await get("api/v1/moderation/reasons")
         return response.reasons
     }
@@ -1211,10 +1506,6 @@ struct DiscourseClient {
         return data
     }
 
-    func giveReward(postID: Int, amount: Int, note: String? = nil) async throws -> Data {
-        try await send("POST", "api/v1/posts/\(postID)/tips", json: ["amount": amount, "note": note ?? ""])
-    }
-
     func flag(
         id: Int,
         typeID: Int,
@@ -1245,16 +1536,19 @@ struct DiscourseClient {
         return poll
     }
 
-    func votePoll(postID: Int, pollName: String, options: [String]) async throws -> PollVoteResponse {
-        let poll = try await poll(postID: postID, name: pollName)
+    /// `pollID`, when the caller has it, saves looking the poll up first.
+    func votePoll(postID: Int, pollName: String, options: [String], pollID: Int? = nil) async throws -> PollVoteResponse {
+        let id: Int
+        if let pollID { id = pollID } else { id = try await poll(postID: postID, name: pollName).id }
         let ids = options.compactMap(Int.init)
-        let updated: NLPollEnvelope = try await sendDecoding("PUT", "api/v1/polls/\(poll.id)/votes", json: ["option_ids": ids])
+        let updated: NLPollEnvelope = try await sendDecoding("PUT", "api/v1/polls/\(id)/votes", json: ["option_ids": ids])
         return try Self.shaped(["poll": DiscourseShape.poll(updated.poll), "vote": options])
     }
 
-    func removePollVote(postID: Int, pollName: String) async throws -> PollVoteResponse {
-        let poll = try await poll(postID: postID, name: pollName)
-        let updated: NLPollEnvelope = try await sendDecoding("PUT", "api/v1/polls/\(poll.id)/votes", json: ["option_ids": [Int]()])
+    func removePollVote(postID: Int, pollName: String, pollID: Int? = nil) async throws -> PollVoteResponse {
+        let id: Int
+        if let pollID { id = pollID } else { id = try await poll(postID: postID, name: pollName).id }
+        let updated: NLPollEnvelope = try await sendDecoding("PUT", "api/v1/polls/\(id)/votes", json: ["option_ids": [Int]()])
         return try Self.shaped(["poll": DiscourseShape.poll(updated.poll), "vote": [String]()])
     }
 
@@ -1263,10 +1557,41 @@ struct DiscourseClient {
         quantity: Int,
         isRandom: Bool
     ) async throws -> LotteryActionResponse {
-        try await send("POST", "api/v1/lotteries/\(lotteryID)/tickets",
-                       json: ["tickets": quantity, "random": isRandom],
-                       headers: ["Idempotency-Key": UUID().uuidString])
-        return try Self.shaped(["success": true])
+        // `{"tickets": n}` is the viewer's total after the purchase.
+        let data = try await send("POST", "api/v1/lotteries/\(lotteryID)/tickets",
+                                  json: ["tickets": quantity, "random": isRandom],
+                                  headers: ["Idempotency-Key": UUID().uuidString])
+        let total = (try? NodelocJSON.decode(NLLotteryTickets.self, from: data))?.tickets
+        return try Self.shaped(["success": true, "tickets": DiscourseShape.value(total)])
+    }
+
+    /// `GET /api/v1/posts/{id}/lottery` on its own, for a refresh after buying.
+    func lottery(postID: Int, isOwner: Bool) async throws -> PostLottery {
+        let envelope: NLLotteryEnvelope = try await get("api/v1/posts/\(postID)/lottery")
+        return try Self.shaped(DiscourseShape.lottery(envelope.lottery, isOwner: isOwner))
+    }
+
+    /// `GET /api/v1/lotteries/{id}/participants` — everyone, most tickets first.
+    func lotteryParticipants(lotteryID: Int) async throws -> LotteryParticipantsResponse {
+        let list: NLLotteryParticipants = try await get("api/v1/lotteries/\(lotteryID)/participants")
+        return try Self.shaped([
+            "participants": list.participants.map { holder -> [String: Any] in
+                [
+                    "username": holder.username,
+                    "avatar_template": DiscourseShape.value(holder.avatarUrl),
+                    "tickets": DiscourseShape.value(holder.tickets),
+                    "joined_at": DiscourseShape.time(holder.joinedAt),
+                ]
+            },
+            "participant_count": DiscourseShape.value(list.participantCount),
+            "ticket_count": DiscourseShape.value(list.ticketCount),
+        ])
+    }
+
+    /// `DELETE /api/v1/lotteries/{id}` — admins only; closes it and refunds
+    /// every ticket.
+    func cancelLottery(lotteryID: Int) async throws {
+        try await send("DELETE", "api/v1/lotteries/\(lotteryID)")
     }
 
     func createRedEnvelope(topicID: Int, totalPoints: Int, totalCount: Int) async throws -> RedEnvelopeResponse {
@@ -1285,7 +1610,7 @@ struct DiscourseClient {
         let body: [String: Any] = [
             "title": draft.title,
             "draw_at": NLDate.format(drawAt),
-            "min_tickets": 1,
+            "min_tickets": draft.minTicketsPerUser,
             "max_tickets": draft.maxTicketsPerUser,
             "min_participants": draft.minParticipants,
             "max_participants": draft.parsedMaxParticipants ?? 0,
@@ -1305,10 +1630,35 @@ struct DiscourseClient {
     /// The server's search: posts (one per topic for the topic list), users,
     /// nodes. Users and nodes fall back to their own lookups on a server
     /// without it.
-    func search(_ term: String, filters: String? = nil) async throws -> SearchResponse {
+    func search(_ term: String, filters: String? = nil, sort: String? = nil) async throws -> SearchResponse {
         _ = try? await loadNodes()
         var object: [String: Any] = [:]
-        if let results: NLSearchResults = try? await get("api/v1/search", query: [URLQueryItem(name: "q", value: term)]) {
+        // The node page seeds the field with "#slug ". The backend scopes by
+        // the `node` parameter, not by text, so lift the prefix into it.
+        var queryTerm = term
+        var queryItems: [URLQueryItem] = []
+        if term.hasPrefix("#"), let space = term.firstIndex(of: " ") {
+            let slug = String(term[term.index(after: term.startIndex)..<space])
+            let rest = String(term[space...]).trimmingCharacters(in: .whitespaces)
+            // The backend refuses an empty q, so "#slug" alone stays as typed.
+            if !slug.isEmpty, !rest.isEmpty {
+                queryItems.append(URLQueryItem(name: "node", value: slug))
+                queryTerm = rest
+            }
+        }
+        queryItems.insert(URLQueryItem(name: "q", value: queryTerm), at: 0)
+        if let sort { queryItems.append(URLQueryItem(name: "sort", value: sort)) }
+        if let results: NLSearchResults = try? await get("api/v1/search", query: queryItems) {
+            // The matched words, kept apart from the plain titles every other
+            // screen uses (see `SearchHighlight`).
+            var highlights: [Int: SearchHighlight.Marked] = [:]
+            for hit in results.posts ?? [] where highlights[hit.topicId] == nil {
+                highlights[hit.topicId] = SearchHighlight.Marked(
+                    title: hit.titleHtml.map(SearchHighlight.marked),
+                    blurb: hit.folded == true ? nil : hit.blurb.map(SearchHighlight.marked)
+                )
+            }
+            SearchHighlight.latest = highlights
             var topics: [[String: Any]] = []
             var posts: [[String: Any]] = []
             var seenTopics = Set<Int>()
@@ -1498,6 +1848,10 @@ struct DiscourseClient {
                     "topic_id": topic.id,
                     "post_number": 1,
                     "post_id": DiscourseShape.value(topic.firstPostId),
+                    // The topic list carries these; the replies list doesn't.
+                    "vote_score": DiscourseShape.value(topic.voteScore),
+                    "reply_count": DiscourseShape.value(topic.replyCount),
+                    "image_url": DiscourseShape.value(topic.imageUrl),
                 ]
             }
         case 5:
@@ -1651,9 +2005,11 @@ struct DiscourseClient {
         let avatar = me.user.avatarUrl.flatMap { $0.isEmpty ? nil : $0 }
         state.myAvatar = avatar
         state.remember(username: me.user.username, id: me.user.id, avatar: avatar)
-        let notifications = try? await get("api/v1/notifications", query: [URLQueryItem(name: "limit", value: "1")]) as NLNotifications
-        let chat = try? await get("api/v1/chat/unread") as NLUnread
-        let balance = try? await get("api/v1/points") as NLPointsBalance
+        // Three independent counts: asked for together, not one by one.
+        async let notificationsCall = try? get("api/v1/notifications", query: [URLQueryItem(name: "limit", value: "1")]) as NLNotifications
+        async let chatCall = try? get("api/v1/chat/unread") as NLUnread
+        async let balanceCall = try? get("api/v1/points") as NLPointsBalance
+        let (notifications, chat, balance) = await (notificationsCall, chatCall, balanceCall)
         return try Self.shaped(DiscourseShape.currentUser(
             me.user,
             avatar: avatar,
@@ -1675,6 +2031,20 @@ struct DiscourseClient {
     func resendActivationEmail(username: String) async throws -> Data {
         guard username.contains("@") else { throw DiscourseError.unsupported }
         return try await send("POST", "api/v1/auth/verify-email/resend", json: ["email": username])
+    }
+
+    /// `PUT /api/v1/auth/password-reset` `{token, password}` — the token from
+    /// the emailed link (one hour, single use). Doesn't sign in.
+    func resetPassword(token: String, password: String) async throws {
+        _ = try await send("PUT", "api/v1/auth/password-reset", json: ["token": token, "password": password])
+    }
+
+    /// `POST /api/v1/auth/password-reset` `{email, captcha}` → 204, always
+    /// "sent" once the captcha passes, registered or not.
+    func requestPasswordReset(email: String, captcha: String?) async throws {
+        var body: [String: Any] = ["email": email]
+        if let captcha, !captcha.isEmpty { body["captcha"] = captcha }
+        _ = try await send("POST", "api/v1/auth/password-reset", json: body)
     }
 
     func requestPasswordReset(login: String) async throws -> Data {
@@ -1806,14 +2176,22 @@ struct DiscourseClient {
         try Self.shaped(["error": AppString("请在网页版的账号安全设置中重新生成备用码")])
     }
 
-    /// Self-deletion needs the password (social-only accounts send their
-    /// username, as the server specifies).
-    func deleteAccount(username: String, password: String) async throws -> Data {
-        try await send("POST", "api/v1/me/deletion", json: ["password": password])
+    /// `GET /api/v1/me/groups` — the groups whose 头衔 you may wear.
+    func myGroups() async throws -> NLMyGroups {
+        try await get("api/v1/me/groups")
     }
 
-    func deleteAccount(username: String) async throws -> Data {
-        try await deleteAccount(username: username, password: username)
+    /// `PUT /api/v1/me/primary-group {"group_id": n}` → 204; 0 wears none.
+    func setPrimaryGroup(_ groupID: Int) async throws {
+        try await send("PUT", "api/v1/me/primary-group", json: ["group_id": groupID])
+    }
+
+    /// `POST /api/v1/me/deletion {"password": …}` → 204. `password` is the
+    /// current password, or the username for an account without one
+    /// (`/me/account` `has_password == false`). 422 wrong secret, 403 staff.
+    @discardableResult
+    func deleteAccount(password: String) async throws -> Data {
+        try await send("POST", "api/v1/me/deletion", json: ["password": password])
     }
 
     func featureFlags() async throws -> FeatureFlagConfig {
@@ -2177,21 +2555,30 @@ struct DiscourseClient {
     }
 
     /// Site emoji, grouped by pack. Standard emoji are typed as characters.
-    func emojis() async throws -> [String: [DiscourseEmoji]] {
+    ///
+    /// An array, not a dictionary keyed by pack name: the server lists packs in
+    /// the order the admin arranged them, and the pickers show them that way.
+    func emojis() async throws -> [EmojiPack] {
         let response: NLEmojis = try await get("api/v1/emojis")
-        var groups: [String: [DiscourseEmoji]] = [:]
+        var packs: [EmojiPack] = []
         for pack in response.packs ?? [] where pack.enabled != false {
             let name = pack.name ?? AppString("站点表情")
-            groups[name, default: []].append(contentsOf: pack.emojis.map {
+            let emojis = pack.emojis.map {
                 DiscourseEmoji(name: $0.code, url: $0.url, group: name, tonable: nil, createdBy: nil, searchAliases: $0.name.map { [$0] })
-            })
-        }
-        if groups.isEmpty, let flat = response.emojis {
-            groups[AppString("站点表情")] = flat.keys.sorted().map {
-                DiscourseEmoji(name: $0, url: flat[$0], group: nil, tonable: nil, createdBy: nil, searchAliases: nil)
+            }
+            // Two packs sharing a display name still read as one group.
+            if let index = packs.firstIndex(where: { $0.name == name }) {
+                packs[index] = EmojiPack(name: name, emojis: packs[index].emojis + emojis)
+            } else {
+                packs.append(EmojiPack(name: name, emojis: emojis))
             }
         }
-        return groups
+        if packs.isEmpty, let flat = response.emojis {
+            packs = [EmojiPack(name: AppString("站点表情"), emojis: flat.keys.sorted().map {
+                DiscourseEmoji(name: $0, url: flat[$0], group: nil, tonable: nil, createdBy: nil, searchAliases: nil)
+            })]
+        }
+        return packs
     }
 
     func klipySearch(query: String, pos: String? = nil) async throws -> KlipySearchResponse {
@@ -2232,5 +2619,173 @@ struct DiscourseClient {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#")
         return segment.addingPercentEncoding(withAllowedCharacters: allowed) ?? segment
+    }
+}
+
+// MARK: - Node access, channels, drafts
+//
+// First written from the design before the API spec was available; now
+// matched to the backend: node/manage_handlers.go (access),
+// channel/handlers.go (channels) and content/handlers.go (drafts).
+
+extension DiscourseClient {
+    // Node access list
+
+    /// The list and the groups the viewer may put on it. Owner or site staff
+    /// only; a node category has no list (400 `not_joinable`).
+    func nodeAccess(slug: String) async throws -> NLNodeAccess {
+        try await get("api/v1/nodes/\(Self.pathEscape(slug))/access")
+    }
+
+    /// Replaces the whole list; answers 204, so read it back with `nodeAccess`.
+    func updateNodeAccess(slug: String, entries: [NLNodeAccess.Entry]) async throws {
+        try await send(
+            "PUT", "api/v1/nodes/\(Self.pathEscape(slug))/access",
+            json: ["entries": entries.map { ["subject": $0.subject, "level": $0.level] as [String: Any] }]
+        )
+    }
+
+    // Node channels
+
+    func nodeChannels(slug: String) async throws -> [NLNodeChannels.Channel] {
+        let answer: NLNodeChannels = try await get("api/v1/nodes/\(Self.pathEscape(slug))/channels")
+        return answer.channels
+    }
+
+    /// `kind` is `rss`, `youtube`, `telegram` or `bilibili`; `source` is a
+    /// link (or @name / UID) the server inspects before saving — a source it
+    /// can't read is 422 `channel_problem`.
+    @discardableResult
+    func addNodeChannel(slug: String, kind: String, source: String) async throws -> Data {
+        try await send("POST", "api/v1/nodes/\(Self.pathEscape(slug))/channels", json: ["kind": kind, "source": source])
+    }
+
+    /// The update replaces every setting (missing ones fall back to defaults,
+    /// and a missing `enabled` means on), so this sends the channel's current
+    /// values back with only `enabled` changed.
+    @discardableResult
+    func setNodeChannelPaused(slug: String, channel: NLNodeChannels.Channel, paused: Bool) async throws -> Data {
+        var body: [String: Any] = ["enabled": !paused]
+        if let name = channel.name { body["name"] = name }
+        if let postAs = channel.postAs { body["post_as"] = postAs }
+        if let prefix = channel.titlePrefix { body["title_prefix"] = prefix }
+        if let tags = channel.tags { body["tags"] = tags }
+        if let limit = channel.dailyLimit { body["daily_limit"] = limit }
+        if let review = channel.review { body["review"] = review }
+        if let embed = channel.embed { body["embed"] = embed }
+        if let minutes = channel.pollMinutes, minutes > 0 { body["poll_minutes"] = minutes }
+        return try await send("PUT", "api/v1/nodes/\(Self.pathEscape(slug))/channels/\(channel.id)", json: body)
+    }
+
+    /// 立即同步 / 重试: checks the source now. Answers 200 with a `problem`
+    /// when it still can't read it; the reloaded card shows the error.
+    @discardableResult
+    func retryNodeChannel(slug: String, id: Int) async throws -> Data {
+        try await send("POST", "api/v1/nodes/\(Self.pathEscape(slug))/channels/\(id)/sync")
+    }
+
+    @discardableResult
+    func removeNodeChannel(slug: String, id: Int) async throws -> Data {
+        try await send("DELETE", "api/v1/nodes/\(Self.pathEscape(slug))/channels/\(id)")
+    }
+
+    // Drafts
+
+    func drafts() async throws -> NLDrafts {
+        try await get("api/v1/drafts")
+    }
+
+    /// Drafts are keyed by where they were written (`topic:12`,
+    /// `new_topic:…`), not by a numeric id.
+    @discardableResult
+    func deleteDraft(key: String) async throws -> Data {
+        try await send("DELETE", "api/v1/drafts/\(Self.pathEscape(key))")
+    }
+
+    /// `POST /api/v1/drafts/delete {"keys"}` — several at once.
+    @discardableResult
+    func deleteDrafts(keys: [String]) async throws -> Data {
+        try await send("POST", "api/v1/drafts/delete", json: ["keys": keys])
+    }
+
+    /// Settles a held-back save: `held` takes the other device's version,
+    /// `current` keeps the one on the server.
+    @discardableResult
+    func resolveDraftConflict(key: String, use: String) async throws -> Data {
+        try await send("POST", "api/v1/drafts/\(Self.pathEscape(key))/conflict", json: ["use": use])
+    }
+}
+
+/// The last node directory this device received, so a cold launch doesn't
+/// wait on `/api/v1/nodes` before showing anything.
+nonisolated enum NodeDirectoryDiskCache {
+    private static var url: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appending(path: "node-directory.json")
+    }
+
+    static func load() -> [NLNode]? {
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return (try? NodelocJSON.decode(NLNodeList.self, from: data))?.nodes
+    }
+
+    static func save(_ data: Data) {
+        guard let url else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}
+
+// MARK: - Moderation dashboard
+
+extension DiscourseClient {
+    /// The nodes the reader owns or moderates, with their pending counts —
+    /// the dashboard's node chips. Read from `/api/v1/me/nodes`, which only
+    /// attaches `pending` to nodes the reader can manage.
+    func managedNodes() async throws -> [NLManagedNodes.Node] {
+        let mine: NLManagedNodes = try await get("api/v1/me/nodes")
+        return mine.joined.filter { $0.pending != nil }
+    }
+}
+
+
+/// The server wraps matched words in `<mark>` (`title_html`, `blurb`). They
+/// travel as two private-use characters around each match, and are drawn
+/// bold in the accent — never as markup.
+nonisolated enum SearchHighlight {
+    struct Marked: Sendable {
+        let title: String?
+        let blurb: String?
+    }
+
+    static let open: Character = "\u{E000}"
+    static let close: Character = "\u{E001}"
+    nonisolated(unsafe) static var latest: [Int: Marked] = [:]
+
+    static func marked(_ html: String) -> String {
+        let swapped = html
+            .replacingOccurrences(of: "<mark>", with: String(open))
+            .replacingOccurrences(of: "</mark>", with: String(close))
+        return DiscourseFormat.plainText(swapped)
+    }
+
+    static func attributed(_ text: String, tint: Color) -> AttributedString {
+        var out = AttributedString()
+        var inside = false
+        var run = ""
+        func flush() {
+            guard !run.isEmpty else { return }
+            var piece = AttributedString(run)
+            if inside {
+                piece.foregroundColor = tint
+                piece.inlinePresentationIntent = .stronglyEmphasized
+            }
+            out += piece
+            run = ""
+        }
+        for character in text {
+            if character == open { flush(); inside = true } else if character == close { flush(); inside = false } else { run.append(character) }
+        }
+        flush()
+        return out
     }
 }

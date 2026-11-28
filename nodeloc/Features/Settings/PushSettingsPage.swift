@@ -32,8 +32,8 @@ struct PushSettingsPage: View {
         VStack(spacing: 0) {
             header
 
-            ScrollView {
-                VStack(spacing: 0) {
+            Form {
+                Group {
                     SettingsSection(title: AppString("推送"), footer: masterFooter) {
                         SettingsToggleRow(
                             title: AppString("允许推送通知"),
@@ -62,7 +62,6 @@ struct PushSettingsPage: View {
                         }
                     }
                 }
-                .padding(.bottom, 32)
             }
             .scrollIndicators(.hidden)
         }
@@ -73,22 +72,7 @@ struct PushSettingsPage: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-
-            Text("推送通知").font(Theme.body(15, weight: .medium))
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
+        SettingsBar(title: AppString("推送通知"), onClose: onClose)
     }
 
     private var masterFooter: String {

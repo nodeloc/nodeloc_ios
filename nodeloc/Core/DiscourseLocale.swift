@@ -38,8 +38,14 @@ final class DiscourseLocale {
 
     /// Fetches the bundle once per session. Callers that need a string
     /// synchronously (a view model building labels) await this first.
+    private var didAttempt = false
+
     func preload() async {
-        guard strings.isEmpty else { return }
+        // Once per launch even when it found nothing: on the NodeLoc backend
+        // these bundles 404 after ~2.6 s each, and every profile load used to
+        // pay that again before it could start.
+        guard strings.isEmpty, !didAttempt else { return }
+        didAttempt = true
         if let loadTask { return await loadTask.value }
         let task = Task { await load() }
         loadTask = task

@@ -122,15 +122,14 @@ final class EmojiCatalog {
         apply(payload: payload)
     }
 
-    private func apply(payload: [String: [DiscourseEmoji]]) {
+    private func apply(payload: [EmojiPack]) {
+        let byKey = Dictionary(payload.map { ($0.name, $0.emojis) }, uniquingKeysWith: +)
+        // Custom first, in the server's pack order (the admin's arrangement):
+        // on this site they're the ones people actually reach for.
+        let customKeys = payload.map(\.name).filter { !Self.standardOrder.contains($0) }
 
-        let customKeys = payload.keys
-            .filter { !Self.standardOrder.contains($0) }
-            .sorted()
-
-        // Custom first: on this site they're the ones people actually reach for.
         groups = (customKeys + Self.standardOrder).compactMap { key in
-            guard let emojis = payload[key], !emojis.isEmpty else { return nil }
+            guard let emojis = byKey[key], !emojis.isEmpty else { return nil }
             let isCustom = !Self.standardOrder.contains(key)
             return Group(
                 key: key,
@@ -221,7 +220,7 @@ struct EmojiPickerSheet: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.45))
+                .foregroundStyle(Theme.textFaint)
             TextField(
                 DiscourseLocale.shared.string("emoji_picker.filter_placeholder") ?? AppString("搜索表情"),
                 text: $searchText
@@ -233,7 +232,7 @@ struct EmojiPickerSheet: View {
                 Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 15))
-                        .foregroundStyle(Theme.muted(0.35))
+                        .foregroundStyle(Theme.textFaint)
                 }
                 .buttonStyle(.pressableIcon)
             }
@@ -256,10 +255,10 @@ struct EmojiPickerSheet: View {
                     } label: {
                         Text(group.title)
                             .font(Theme.body(13, weight: .semibold))
-                            .foregroundStyle(isSelected ? Theme.bg : Theme.muted(0.6))
+                            .foregroundStyle(isSelected ? Theme.onAccent : Theme.textMuted)
                             .padding(.horizontal, 12)
                             .frame(height: 30)
-                            .background(isSelected ? Theme.accent : Theme.surface, in: Capsule())
+                            .background(isSelected ? Theme.accentFill : Theme.surface, in: Capsule())
                     }
                     .buttonStyle(.pressable)
                 }
@@ -306,7 +305,7 @@ private struct EmojiImage: View {
         CachedRemoteImage(url: emoji.url.flatMap { nodelocSiteURL($0) }) { image in
             image.resizable().scaledToFit()
         } placeholder: {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                 .fill(Theme.surface)
         }
         .frame(width: 32, height: 32)
@@ -333,10 +332,12 @@ enum EmojiDiskCache {
     private static var fileURL: URL? {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         else { return nil }
-        return caches.appending(path: "emoji-catalog.json")
+        // v2: an ordered pack list. The v1 file was a dictionary that lost the
+        // order; it simply fails to decode and gets refetched once.
+        return caches.appending(path: "emoji-catalog-v2.json")
     }
 
-    static func load(maxAge: TimeInterval) -> [String: [DiscourseEmoji]]? {
+    static func load(maxAge: TimeInterval) -> [EmojiPack]? {
         guard let url = fileURL,
               let attributes = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
               let modified = attributes.contentModificationDate
@@ -344,10 +345,10 @@ enum EmojiDiskCache {
 
         guard maxAge.isInfinite || Date().timeIntervalSince(modified) < maxAge else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode([String: [DiscourseEmoji]].self, from: data)
+        return try? JSONDecoder().decode([EmojiPack].self, from: data)
     }
 
-    static func store(_ payload: [String: [DiscourseEmoji]]) {
+    static func store(_ payload: [EmojiPack]) {
         guard let url = fileURL, let data = try? JSONEncoder().encode(payload) else { return }
         try? data.write(to: url, options: .atomic)
     }

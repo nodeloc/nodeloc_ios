@@ -29,7 +29,15 @@ struct AuthView: View {
     /// Set to a view id to scroll it into view on the next layout pass.
     @State private var scrollTarget: String?
     @State private var isBusy = false
+    /// The server-driven 人机验证 widget, when a submit needs a token.
+    @State private var captchaGate = CaptchaGate()
+    @State private var showsRegister = false
+    @State private var showsForgot = false
     @State private var errorText: String?
+    /// Login said the account is suspended: the message, and the
+    /// credentials the account status page reads with.
+    @State private var suspendedMessage: String?
+    @State private var suspendedCredentials: AccountStatusStore.Credentials?
     @State private var isResendingActivation = false
     @State private var didResendActivation = false
     /// The site's required custom profile fields, from `site.json`.
@@ -81,8 +89,82 @@ struct AuthView: View {
         .onChange(of: app.authMode) { _, _ in
             resetMessages()
         }
+        .captchaGate(captchaGate)
+        .sheet(isPresented: $showsForgot) {
+            NavigationStack {
+                ForgotPasswordPage(initialEmail: loginIdentifier) { showsForgot = false }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button { showsForgot = false } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel(AppString("关闭"))
+                        }
+                    }
+            }
+            .tint(Theme.accent)
+        }
+        .fullScreenCover(isPresented: $showsRegister) {
+            NavigationStack {
+                RegisterPage(
+                    onLogin: {
+                        showsRegister = false
+                        app.authMode = .login
+                        stage = .credentials
+                    },
+                    onSignedIn: {
+                        showsRegister = false
+                        completeAuth()
+                    },
+                    onPending: { message in
+                        showsRegister = false
+                        stage = .activation(message)
+                    },
+                    providers: webProviders,
+                    onProvider: { provider in
+                        Task {
+                            do {
+                                try await DiscourseLogin.shared.loginWithSystemBrowser(provider: provider.name)
+                                showsRegister = false
+                                completeAuth()
+                            } catch {}
+                        }
+                    },
+                    onPasskey: {
+                        Task {
+                            do {
+                                try await DiscourseLogin.shared.loginWithPasskey()
+                                showsRegister = false
+                                completeAuth()
+                            } catch {}
+                        }
+                    }
+                )
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button { showsRegister = false } label: { Image(systemName: "xmark") }
+                            .accessibilityLabel(AppString("关闭"))
+                    }
+                }
+            }
+            .tint(Theme.accent)
+        }
         .task { await loadSocialProviders() }
         .task { await userFields.load() }
+        .fullScreenCover(item: Binding(
+            get: { suspendedCredentials.map { SuspendedCredentialsBox(credentials: $0) } },
+            set: { if $0 == nil { suspendedCredentials = nil } }
+        )) { box in
+            // Its own stack here (it's a cover, not a pushed page): the
+            // system bar with a close button.
+            NavigationStack {
+                AccountStatusPage(credentials: box.credentials) { suspendedCredentials = nil }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button { suspendedCredentials = nil } label: { Image(systemName: "xmark") }
+                                .accessibilityLabel(AppString("关闭"))
+                        }
+                    }
+            }
+        }
         .sheet(item: $activeProvider) { provider in
             SocialLoginView(
                 provider: provider,
@@ -156,8 +238,11 @@ struct AuthView: View {
 
             VStack(spacing: 14) {
                 Button {
+                    // The one sign-up page (App-iOS-Register), the same the
+                    // in-app login sheet opens; its own provider row replaces
+                    // the method sheet for signing up.
                     app.authMode = .signup
-                    stage = .methods
+                    showsRegister = true
                 } label: {
                     Text("Get Started")
                         .frame(maxWidth: .infinity)
@@ -171,7 +256,7 @@ struct AuthView: View {
                     Text("I already have an account")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(AuthOutlinePillStyle())
+                .buttonStyle(AuthNeutralPillStyle())
 
                 Button("Browse as guest") { app.isGuest = true }
                     .font(Theme.body(13, weight: .semibold))
@@ -249,17 +334,15 @@ struct AuthView: View {
                     // login form. On Discourse a provider button registers you
                     // anyway if you have no account, so "continue" is true in
                     // both modes.
-                    if let fallback = webProviders.first {
-                        Button {
-                            signInWithSystemBrowser(fallingBackTo: fallback)
-                        } label: {
-                            AuthButtonLabel(title: AppString("使用其他方式继续")) {
-                                AuthButtonSymbol(name: "globe")
-                            }
-                        }
-                        .buttonStyle(SocialAuthButtonStyle(filled: false))
-                        .disabled(isBusy)
-                    }
+                    // Each provider straight to its own sign-in, the same row
+                    // as the sign-up page, and the passkey beside them.
+                    SocialIconRow(
+                        providers: webProviders,
+                        onProvider: { provider in signInWithSystemBrowser(fallingBackTo: provider, provider: provider.name) },
+                        onPasskey: { signInWithPasskey() }
+                    )
+                    .disabled(isBusy)
+                    .padding(.top, 4)
                 }
 
                 termsText
@@ -347,7 +430,7 @@ struct AuthView: View {
                             HStack {
                                 Text("此账号已开启两步验证")
                                     .font(Theme.body(13))
-                                    .foregroundStyle(Theme.muted(0.6))
+                                    .foregroundStyle(Theme.textMuted)
                                 Spacer(minLength: 8)
                                 Button(usingBackupCode ? AppString("使用验证器") : AppString("使用备用码")) {
                                     usingBackupCode.toggle()
@@ -373,10 +456,35 @@ struct AuthView: View {
                         // `authed || isGuest`, which is false for precisely the
                         // person following a login link.
                         authSmallPill("Forgot password?") {
-                            openWebsite(path: "password-reset")
+                            showsForgot = true
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 26)
+                    }
+
+                    // In the page, under the fields and 忘记密码 — not pinned
+                    // above the keyboard.
+                    Button {
+                        submit()
+                    } label: {
+                        if isBusy {
+                            ProgressView()
+                                .tint(Theme.neutral600)
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Text(app.authMode == .login ? "Continue" : "Create account")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(AuthPrimaryPillStyle(disabled: !canSubmit))
+                    .disabled(isBusy || !canSubmit)
+                    .padding(.top, 22)
+
+                    if let suspendedMessage {
+                        SuspendedLoginNotice(message: suspendedMessage) {
+                            suspendedCredentials = .init(login: loginIdentifier, password: password)
+                        }
+                        .padding(.top, 18)
                     }
 
                     if let errorText {
@@ -413,42 +521,15 @@ struct AuthView: View {
             }
             }
 
-            Button {
-                submit()
-            } label: {
-                if isBusy {
-                    ProgressView()
-                        .tint(Theme.neutral600)
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Text(app.authMode == .login ? "Continue" : "Create account")
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            .buttonStyle(AuthPrimaryPillStyle(disabled: !canSubmit))
-            .disabled(isBusy || !canSubmit)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
         }
     }
 
+    /// ✕ when login was opened on its own, ‹ when it sits behind 注册's steps.
     private var credentialsHeader: some View {
-        HStack {
-            Button {
-                resetMessages()
-                stage = .methods
-            } label: {
-                Image(systemName: app.authMode == .login ? "xmark" : "chevron.left")
-                    .font(.system(size: 25, weight: .regular))
-                    .foregroundStyle(Theme.text.opacity(0.76))
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.pressable)
-
-            Spacer()
+        PageHeader(title: "", leading: app.authMode == .login ? .close : .back) {
+            resetMessages()
+            stage = .methods
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 8)
     }
 
     private func authSmallPill(_ title: LocalizedStringKey, action: @escaping () -> Void) -> some View {
@@ -478,20 +559,7 @@ struct AuthView: View {
 
     private func activationScreen(_ message: String) -> some View {
         VStack(spacing: 0) {
-            HStack {
-                Button {
-                    stage = .credentials
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 25, weight: .regular))
-                        .foregroundStyle(Theme.text)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.pressable)
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 8)
+            PageHeader(title: "") { stage = .credentials }
 
             Spacer(minLength: 34)
 
@@ -537,7 +605,7 @@ struct AuthView: View {
             if didResendActivation {
                 Text("Sent again. If it still doesn't arrive, the address may be unreachable — try signing up with another one.")
                     .font(Theme.body(14))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 38)
                     .padding(.top, 10)
@@ -568,14 +636,29 @@ struct AuthView: View {
     /// session opens on, and that page carries all of them. One extra tap than
     /// the old in-app web view, in exchange for not retyping a password —
     /// and the old view is still the fallback if this can't complete.
-    private func signInWithSystemBrowser(fallingBackTo provider: SocialAuthProvider) {
+    private func signInWithPasskey() {
         guard !isBusy else { return }
         isBusy = true
         resetMessages()
         Task {
             defer { isBusy = false }
             do {
-                try await DiscourseLogin.shared.loginWithSystemBrowser()
+                try await DiscourseLogin.shared.loginWithPasskey()
+                completeAuth()
+            } catch {
+                // Cancelled, or no passkey on this device: stay on the page.
+            }
+        }
+    }
+
+    private func signInWithSystemBrowser(fallingBackTo provider: SocialAuthProvider, provider name: String? = nil) {
+        guard !isBusy else { return }
+        isBusy = true
+        resetMessages()
+        Task {
+            defer { isBusy = false }
+            do {
+                try await DiscourseLogin.shared.loginWithSystemBrowser(provider: name)
                 completeAuth()
             } catch SocialAuthError.cancelled {
                 // Backing out of the sheet is a choice, not a failure.
@@ -637,7 +720,8 @@ struct AuthView: View {
                 switch app.authMode {
                 case .login:
                     let token = otpCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                    try await DiscourseLogin.shared.login(
+                    try await CaptchaLogin.login(
+                        gate: captchaGate,
                         identifier: loginIdentifier,
                         password: password,
                         secondFactorToken: needsSecondFactor && !token.isEmpty ? token : nil,
@@ -659,6 +743,10 @@ struct AuthView: View {
                         stage = .activation(message)
                     }
                 }
+            } catch is CancellationError {
+                // Closed the 人机验证 widget: nothing sent, nothing to say.
+            } catch AuthError.suspended(let message) {
+                suspendedMessage = message
             } catch AuthError.secondFactorRequired {
                 needsSecondFactor = true
                 otpFocused = true
@@ -747,6 +835,7 @@ struct AuthView: View {
     private func resetMessages() {
         errorText = nil
         noticeText = nil
+        suspendedMessage = nil
     }
 
     private func completeAuth() {
@@ -785,6 +874,17 @@ enum AuthLegalCopy {
         parse(AppString(
             "继续操作即表示您同意我们的[用户协议](\(tosURL))并确认已了解[隐私政策](\(privacyURL))。"
         ))
+    }
+
+    /// App-iOS-Register's checkbox line: terms, privacy and the community rules.
+    static var registerAgreement: AttributedString {
+        parse(AppString(
+            "我已阅读并同意[服务条款](\(tosURL))和[隐私政策](\(privacyURL))，也会遵守[社区规范](\(guidelinesURL))"
+        ))
+    }
+
+    private static var guidelinesURL: String {
+        DiscourseConfig.baseURL.appending(path: "guidelines").absoluteString
     }
 
     private static var tosURL: String {
@@ -906,7 +1006,9 @@ struct AuthFieldCapsule: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 16)
-            .frame(height: 64)
+            // 50pt (was 64): the same height as the primary button and the
+            // other sign-in buttons on every auth page.
+            .frame(height: AuthMetrics.controlHeight)
             .background(Theme.neutral300.opacity(0.8), in: Capsule())
             .overlay {
                 Capsule()
@@ -931,6 +1033,8 @@ struct AuthInputField: View {
     /// Optional, so callers that never move focus don't have to own a
     /// `FocusState` just to use the field.
     var focus: FocusState<Bool>.Binding?
+    /// A glyph at the leading edge (App-iOS-Register's fields carry one).
+    var leadingSymbol: String? = nil
 
     /// The field's own focus, so tapping the capsule can put the caret in it
     /// whether or not the caller supplied a binding — only one of the six call
@@ -947,7 +1051,8 @@ struct AuthInputField: View {
         contentType: UITextContentType? = nil,
         submitLabel: SubmitLabel = .return,
         onSubmit: (() -> Void)? = nil,
-        focus: FocusState<Bool>.Binding? = nil
+        focus: FocusState<Bool>.Binding? = nil,
+        leadingSymbol: String? = nil
     ) {
         self.placeholder = placeholder
         self._text = text
@@ -957,10 +1062,17 @@ struct AuthInputField: View {
         self.submitLabel = submitLabel
         self.onSubmit = onSubmit
         self.focus = focus
+        self.leadingSymbol = leadingSymbol
     }
 
     var body: some View {
         HStack(spacing: 8) {
+            if let leadingSymbol {
+                Image(systemName: leadingSymbol)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 22)
+            }
             Group {
                 if secure, !isRevealed {
                     SecureField(placeholder, text: $text)
@@ -968,9 +1080,9 @@ struct AuthInputField: View {
                     TextField(placeholder, text: $text)
                 }
             }
-            .font(Theme.body(18))
+            .font(Theme.body(16))
             .textFieldStyle(.plain)
-            .tint(Color(hex: 0x3366FF))
+            .tint(Theme.editTint)
             .keyboardType(keyboard)
             .textContentType(contentType)
             .submitLabel(submitLabel)
@@ -1033,30 +1145,36 @@ struct AuthInputField: View {
     }
 }
 
+/// One height for the fields and buttons of every auth page.
+enum AuthMetrics {
+    static let controlHeight: CGFloat = 50
+}
+
 struct AuthPrimaryPillStyle: ButtonStyle {
     var disabled = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(Theme.heading(17, weight: .semibold))
+            .font(Theme.heading(16, weight: .semibold))
             .foregroundStyle(disabled ? Theme.neutral500 : Theme.bg)
-            .padding(.vertical, 16)
             .padding(.horizontal, 20)
+            .frame(height: AuthMetrics.controlHeight)
             .background(disabled ? Theme.neutral300 : Theme.text, in: Capsule())
             .opacity(configuration.isPressed && !disabled ? 0.82 : 1)
             .contentShape(Capsule())
     }
 }
 
-private struct AuthOutlinePillStyle: ButtonStyle {
+/// The quieter partner to `AuthPrimaryPillStyle`: the neutral chip fill and
+/// ink text, same height, no border — a grey outline read as disabled.
+private struct AuthNeutralPillStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(Theme.heading(17, weight: .semibold))
+            .font(Theme.heading(16, weight: .semibold))
             .foregroundStyle(Theme.text)
-            .padding(.vertical, 15)
             .padding(.horizontal, 20)
-            .background(Theme.bg, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.text.opacity(0.46), lineWidth: 1.2))
+            .frame(height: AuthMetrics.controlHeight)
+            .background(Theme.chip, in: Capsule())
             .opacity(configuration.isPressed ? 0.72 : 1)
             .contentShape(Capsule())
     }

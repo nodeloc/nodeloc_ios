@@ -30,7 +30,9 @@ final class CustomFeedStore {
     /// rather than at the next fetch, and reading the blocked set here is what
     /// makes SwiftUI redraw the list the moment it changes (guideline 1.2).
     var visiblePosts: [Post] { BlockedUsersStore.shared.visible(posts) }
-    var isLoading = false
+    /// True until the first load ends, so the page opens on the spinner rather
+    /// than flashing "找不到这个 Custom Feed" ahead of the request.
+    var isLoading = true
     var isLoadingMore = false
     var errorText: String?
     /// Another page is available (the list carried a `more_topics_url`).
@@ -53,6 +55,9 @@ final class CustomFeedStore {
 
     var canEdit: Bool { feed?.canEdit == true }
 
+    /// 热门 (`hot`) or 最新 (`new`).
+    var sort = "hot"
+
     /// Loads once. Re-entrant for the same feed so returning to it doesn't
     /// refetch what is already on screen.
     func loadIfNeeded(username: String, slug: String) async {
@@ -69,7 +74,7 @@ final class CustomFeedStore {
         defer { isLoading = false }
 
         async let feedCall = client.customFeed(username: username, slug: slug)
-        async let topicsCall = client.customFeedTopics(username: username, slug: slug)
+        async let topicsCall = client.customFeedTopics(username: username, slug: slug, sort: sort)
         async let siteCall: SiteResponse? = await SiteResources.shared.siteResponse()
 
         // The header is the part worth an error: without it there is no page.
@@ -112,7 +117,8 @@ final class CustomFeedStore {
             let response = try await client.customFeedTopics(
                 username: username,
                 slug: slug,
-                page: page + 1
+                page: page + 1,
+                sort: sort
             )
             page += 1
             for user in response.users ?? [] { usersByID[user.id] = user }

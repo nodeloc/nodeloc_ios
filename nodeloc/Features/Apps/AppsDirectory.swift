@@ -10,104 +10,323 @@ import WebKit
 
 // MARK: - Apps
 
-/// Grid of published apps from the discourse-apps directory.
+/// Grid of published apps from the discourse-apps directory. A page on the
+/// routed page stack (`RoutedPage.Kind.appsDirectory`).
 struct AppsDirectoryOverlay: View {
     @Environment(AppState.self) private var app
     @State private var store = AppsDirectoryStore()
+    @State private var searching = false
+    /// Decides the ‹: the system's once pushed, this page's own at the root.
+    var navigation: PageNavigation = .stackRoot
+    var onClose: () -> Void = {}
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
-    ]
+    // 小游戏和应用 (App-iOS-Apps): the games most played this week as large
+    // cards, then every game, applet and bot as rows. Data: GET
+    // /apps/directory.json (`kind`, `active_users`, logo, description).
+
+    private var games: [DirectoryApp] {
+        store.visibleApps.filter { $0.kind == "game" || $0.kind == nil }
+            .sorted { ($0.activeUsers ?? 0) > ($1.activeUsers ?? 0) }
+    }
+    private var applets: [DirectoryApp] { store.visibleApps.filter { $0.kind == "applet" } }
+    private var bots: [DirectoryApp] { store.visibleApps.filter { $0.kind == "bot" } }
+
+    // 开始 runs the game here, without its detail page; the age prompt and
+    // this game's consent still come first, exactly as on the detail page.
+    @State private var launch: GameLaunch?
+    @State private var showAgeGate = false
+    @State private var consentFor: GameLaunch?
+    @State private var startingID: Int?
+
+    private struct GameLaunch: Identifiable {
+        let item: DirectoryApp
+        let installID: Int
+        var id: Int { installID }
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        page
+            .fullScreenCover(item: $launch) { target in
+                AppWebViewOverlay(
+                    app: target.item,
+                    installID: target.installID,
+                    url: DiscourseClient().appWebviewURL(installID: target.installID)
+                ) { launch = nil }
+            }
+            .sheet(isPresented: $showAgeGate) { MiniAppAgeGateSheet() }
+            .sheet(item: $consentFor) { pending in
+                MiniAppConsentSheet(app: pending.item) {
+                    MiniAppGate.recordConsent(for: pending.item.slug)
+                    consentFor = nil
+                    launch = pending
+                }
+            }
+    }
 
-            ScrollView {
+    /// Starts a game from the list. Anything that can't run here (not a web
+    /// game, mini apps switched off, no install found) opens its page instead.
+    private func start(_ item: DirectoryApp) {
+        guard item.isWebview, FeatureFlags.shared.miniAppsEnabled else { app.openApp(item); return }
+        startingID = item.id
+        Task {
+            defer { startingID = nil }
+            guard let installID = await AppDetailOverlay.resolveInstallID(for: item) else {
+                app.openApp(item)
+                return
+            }
+            guard MiniAppGate.isAgeSatisfied else { showAgeGate = true; return }
+            let pending = GameLaunch(item: item, installID: installID)
+            guard MiniAppGate.hasConsented(to: item.slug) else { consentFor = pending; return }
+            launch = pending
+        }
+    }
+
+    private var page: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                Text(AppString("发现更多游戏"))
+                    .font(Theme.body(28, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+
+                if searching {
+                    searchField.padding(.horizontal, 16)
+                }
+
                 if store.isLoading && store.apps.isEmpty {
-                    ProgressView().tint(Theme.accent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 60)
+                    skeleton
                 } else if store.visibleApps.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "square.grid.2x2")
                             .font(.system(size: 26, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.35))
+                            .foregroundStyle(Theme.textFaint)
                         Text(store.errorText ?? AppString("没有找到应用"))
                             .font(Theme.body(13))
-                            .foregroundStyle(Theme.muted(0.5))
+                            .foregroundStyle(Theme.textMuted)
+                            .multilineTextAlignment(.center)
+                        if store.errorText != nil {
+                            Button(AppString("重试")) { Task { await reload() } }
+                                .font(Theme.body(13, weight: .semibold))
+                                .foregroundStyle(Theme.accent700)
+                        }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 60)
                 } else {
-                    LazyVGrid(columns: columns, spacing: 18) {
-                        ForEach(store.visibleApps) { item in
-                            Button {
-                                app.selectedApp = item
-                                withAnimation(.quick) {
-                                    app.overlay = .appDetail
+                    if !games.isEmpty, store.query.isEmpty {
+                        sectionHeader(AppString("热门游戏"), note: AppString("按近 7 天玩的人数"))
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 12) {
+                                ForEach(games.prefix(8)) { item in
+                                    GameCard(app: item, isStarting: startingID == item.id) { start(item) }
                                 }
-                            } label: {
-                                AppTile(app: item)
                             }
-                            .buttonStyle(.pressable)
+                            .padding(.horizontal, 16)
                         }
+                        .scrollIndicators(.hidden)
+                        Divider().overlay(Theme.divider).padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 40)
+                    rows(AppString("全部游戏"), store.query.isEmpty ? Array(games.dropFirst(8)) : games, games: true)
+                    rows(AppString("小程序"), applets)
+                    rows(AppString("机器人"), bots)
                 }
             }
-            .scrollIndicators(.hidden)
+            .padding(.bottom, 40)
         }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        .refreshable { await reload() }
         .background(Theme.bg.ignoresSafeArea())
+        .navigationTitle(AppString("小游戏和应用"))
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if navigation.drawsBackButton {
+                ToolbarItem(placement: .topBarLeading) {
+                    PageBackButton(action: onClose)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    withAnimation(.snappy) { searching.toggle() }
+                    if !searching { store.query = "" }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .accessibilityLabel(AppString("搜索应用"))
+            }
+        }
+        .inPageNavigation(navigation)
         .task { await store.load() }
     }
 
-    private var header: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Button { closeOverlay(app) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.text)
-                        .frame(width: 34, height: 34)
-                }
-                .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
+    /// The store loads once per instance, so a retry starts from a fresh one
+    /// (keeping what was typed into the search field).
+    private func reload() async {
+        let fresh = AppsDirectoryStore()
+        fresh.query = store.query
+        await fresh.load()
+        store = fresh
+    }
 
-                Spacer()
-
-                Text("应用")
-                    .font(Theme.heading(18, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-
-                Spacer()
-
-                Color.clear.frame(width: 34, height: 34)
-            }
-
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Theme.muted(0.45))
-                TextField("搜索应用", text: Binding(
-                    get: { store.query },
-                    set: { store.query = $0 }
-                ))
-                .font(Theme.body(14))
-                .foregroundStyle(Theme.text)
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.textFaint)
+            TextField(AppString("搜索应用"), text: Binding(get: { store.query }, set: { store.query = $0 }))
+                .font(Theme.body(15))
                 .autocorrectionDisabled()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 44)
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
+    }
+
+    private func sectionHeader(_ title: String, note: String?) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(Theme.body(19, weight: .bold)).foregroundStyle(Theme.text)
+            Spacer()
+            if let note {
+                Label(note, systemImage: "info.circle")
+                    .font(Theme.body(13))
+                    .foregroundStyle(Theme.textMuted)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(Theme.surface, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private func rows(_ title: String, _ items: [DirectoryApp], games: Bool = false) -> some View {
+        if !items.isEmpty {
+            sectionHeader(title, note: nil)
+            VStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { Divider().overlay(Theme.divider).padding(.leading, 76) }
+                    // A game's 开始 runs it; tapping the row still opens its page.
+                    AppRow(
+                        app: item,
+                        buttonTitle: games ? AppString("开始") : AppString("打开"),
+                        isStarting: startingID == item.id,
+                        onButton: { if games { start(item) } else { app.openApp(item) } }
+                    ) { app.openApp(item) }
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var skeleton: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ForEach(["a", "b"], id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 20).fill(Theme.chip).frame(width: 150, height: 250)
+                }
+            }
+            ForEach(["c", "d", "e"], id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 12).fill(Theme.chip).frame(height: 56)
+            }
+        }
+        .padding(.horizontal, 16)
+        .skeletonPulsing()
+    }
+}
+
+/// A game in the carousel: its mark on a soft wash of its colour, name, the
+/// line about it, how many play it, and 开始.
+private struct GameCard: View {
+    let app: DirectoryApp
+    var isStarting = false
+    let onStart: () -> Void
+
+    private var tint: Color {
+        let palette: [Color] = [Color(hex: 0xE8772E), Color(hex: 0x5B3FC4), Color(hex: 0x1F3A68), Color(hex: 0x0B7285), Color(hex: 0xB4530B)]
+        return palette[abs(app.id) % palette.count]
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            AppLogo(app: app, size: 72, cornerRadius: 36)
+                .padding(.top, 4)
+            Text(app.name)
+                .font(Theme.body(17, weight: .bold))
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+            Text(app.description ?? " ")
+                .font(Theme.body(13))
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .frame(height: 36, alignment: .top)
+            Divider().overlay(Theme.divider)
+            if let users = app.activeUsers {
+                Label(AppString("\(users) 人在玩"), systemImage: "person.2")
+                    .font(Theme.body(13, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+            }
+            Button(action: onStart) {
+                Group {
+                    if isStarting { ProgressView().tint(Theme.bg) } else { Text(AppString("开始")) }
+                }
+                    .font(Theme.body(15, weight: .bold))
+                    .foregroundStyle(Theme.bg)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background(Theme.text, in: Capsule())
+            }
+            .buttonStyle(.pressable)
+        }
+        .padding(14)
+        .frame(width: 160)
+        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+/// One applet, bot or further game as a row.
+private struct AppRow: View {
+    let app: DirectoryApp
+    var buttonTitle = AppString("打开")
+    var isStarting = false
+    var onButton: (() -> Void)? = nil
+    let onOpen: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            AppLogo(app: app, size: 52, cornerRadius: 14)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(app.name)
+                    .font(Theme.body(16, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                if let description = app.description, !description.isEmpty {
+                    Text(description)
+                        .font(Theme.body(13))
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
+                if let users = app.activeUsers, users > 0 {
+                    Text(AppString("\(users) 人在用"))
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.textFaint)
+                }
+            }
+            Spacer(minLength: 6)
+            Button(action: onButton ?? onOpen) {
+                Group {
+                    if isStarting { ProgressView().controlSize(.small) } else { Text(buttonTitle) }
+                }
+                    .font(Theme.body(14, weight: .bold))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 16)
+                    .frame(height: 34)
+                    .background(Theme.chip, in: Capsule())
+            }
+            .buttonStyle(.pressable)
+        }
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
     }
 }
 
@@ -117,7 +336,7 @@ private struct AppTile: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            AppLogo(app: app, size: 64, cornerRadius: 16)
+            AppLogo(app: app, size: 64, cornerRadius: Theme.cornerLarge)
 
             Text(app.name)
                 .font(Theme.body(12, weight: .semibold))
@@ -129,7 +348,7 @@ private struct AppTile: View {
             if let installs = app.installsCount {
                 Text("\(installs) 次安装")
                     .font(Theme.body(10))
-                    .foregroundStyle(Theme.muted(0.48))
+                    .foregroundStyle(Theme.textFaint)
                     .lineLimit(1)
             }
         }
@@ -139,10 +358,17 @@ private struct AppTile: View {
 }
 
 /// App logo with a lettered fallback.
-/// App detail: metadata plus entry points to play or to discuss.
+/// App detail: metadata plus entry points to play or to discuss. A page on
+/// the routed page stack (`RoutedPage.Kind.app`), so `/apps/<slug>` opens it
+/// from anywhere, a pushed topic included.
 struct AppDetailOverlay: View {
     @Environment(AppState.self) private var app
-    @State private var store = AppsDirectoryStore()
+    let slug: String
+    var navigation: PageNavigation = .stackRoot
+    var onClose: () -> Void = {}
+    /// The app, from the opener or fetched by slug.
+    @State private var item: DirectoryApp?
+    @State private var loadFailed = false
     @State private var installID: Int?
     @State private var isResolving = true
     @State private var webviewTarget: WebviewTarget?
@@ -160,11 +386,30 @@ struct AppDetailOverlay: View {
 
     private let client = DiscourseClient()
 
-    private var item: DirectoryApp? { app.selectedApp }
+    init(
+        slug: String,
+        preloaded: DirectoryApp? = nil,
+        navigation: PageNavigation = .stackRoot,
+        onClose: @escaping () -> Void = {}
+    ) {
+        self.slug = slug
+        self.navigation = navigation
+        self.onClose = onClose
+        _item = State(initialValue: preloaded)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            if item == nil {
+                Group {
+                    if loadFailed {
+                        EmptyStateView(icon: "square.grid.2x2", message: AppString("没有找到应用"))
+                    } else {
+                        ProgressView().tint(Theme.accent)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
             if let item {
                 ScrollView {
@@ -200,7 +445,28 @@ struct AppDetailOverlay: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
-        .task(id: item?.id) { await resolveInstall() }
+        .navigationTitle(item?.name ?? "")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if navigation.drawsBackButton {
+                ToolbarItem(placement: .topBarLeading) {
+                    PageBackButton(action: onClose)
+                }
+            }
+        }
+        .inPageNavigation(navigation)
+        .task {
+            guard item == nil else { return }
+            if let fetched = try? await client.app(slug: slug).directoryApp {
+                item = fetched
+            } else {
+                loadFailed = true
+            }
+        }
+        .task(id: item?.id) {
+            await resolveInstall()
+            if item != nil { autoStartIfAsked() }
+        }
         .fullScreenCover(item: $webviewTarget) { target in
             if let item {
                 AppWebViewOverlay(
@@ -236,36 +502,9 @@ struct AppDetailOverlay: View {
         )
     }
 
-    private var header: some View {
-        HStack {
-            Button {
-                withAnimation(.quick) { app.overlay = .appsDirectory }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-
-            Spacer()
-
-            Button { closeOverlay(app) } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
-    }
-
     private func summary(_ item: DirectoryApp) -> some View {
         HStack(alignment: .top, spacing: 14) {
-            AppLogo(app: item, size: 76, cornerRadius: 18)
+            AppLogo(app: item, size: 76, cornerRadius: Theme.cornerLarge)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.name)
@@ -276,27 +515,27 @@ struct AppDetailOverlay: View {
                 if let author = item.author?.username {
                     Text("@\(author)")
                         .font(Theme.body(13, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                 }
 
                 HStack(spacing: 6) {
                     if let installs = item.installsCount {
                         Text("\(installs) 次安装")
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.55))
+                            .foregroundStyle(Theme.textMuted)
                     }
                     // Who actually plays it, not just who installed it.
                     if let active = item.activeUsers, active > 0 {
-                        Text("·").foregroundStyle(Theme.muted(0.35))
+                        Text(verbatim: "·").foregroundStyle(Theme.textFaint)
                         Text(AppString("\(active) 人在玩"))
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.55))
+                            .foregroundStyle(Theme.textMuted)
                     }
                     if let version = item.versionNumber {
-                        Text("·").foregroundStyle(Theme.muted(0.35))
-                        Text("v\(version)")
+                        Text(verbatim: "·").foregroundStyle(Theme.textFaint)
+                        Text(verbatim: "v\(version)")
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.55))
+                            .foregroundStyle(Theme.textMuted)
                     }
                 }
             }
@@ -312,38 +551,20 @@ struct AppDetailOverlay: View {
             // resolves — otherwise the discussion is the only entry point.
             if item.isWebview, FeatureFlags.shared.miniAppsEnabled {
                 Button {
-                    guard let installID else { return }
-                    // Guideline 4.7.5 then 4.7.3: an age has to be declared,
-                    // and this particular app's scopes accepted, before any of
-                    // its code runs.
-                    guard MiniAppGate.isAgeSatisfied else {
-                        showAgeGate = true
-                        return
-                    }
-                    guard MiniAppGate.hasConsented(to: item.slug) else {
-                        pendingLaunch = installID
-                        return
-                    }
-                    webviewTarget = WebviewTarget(
-                        url: client.appWebviewURL(installID: installID),
-                        installID: installID
-                    )
+                    startGame(item)
                 } label: {
                     HStack(spacing: 6) {
                         if isResolving {
-                            ProgressView().controlSize(.mini).tint(.white)
+                            ProgressView().controlSize(.mini).tint(Theme.onAccent)
                         } else {
                             Image(systemName: "play.fill").font(.system(size: 12, weight: .bold))
                         }
                         Text("开始游戏")
-                            .font(Theme.body(15, weight: .semibold))
                     }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                    .background(installID == nil ? Theme.muted(0.3) : Theme.accent, in: Capsule())
                 }
-                .buttonStyle(.pressable)
+                .buttonStyle(FilledButtonStyle(block: true))
+                // The style has no disabled look of its own.
+                .opacity(installID == nil ? 0.4 : 1)
                 .disabled(installID == nil)
             }
 
@@ -357,8 +578,35 @@ struct AppDetailOverlay: View {
                     .overlay(Capsule().strokeBorder(Theme.divider, lineWidth: 1))
             }
             .buttonStyle(.pressable)
-            .disabled(item.hostTopicID == nil)
+            .disabled(item.hostTopic?.id == nil)
         }
+    }
+
+    /// 开始游戏: guideline 4.7.5 then 4.7.3 — an age has to be declared, and
+    /// this app's scopes accepted, before any of its code runs.
+    private func startGame(_ item: DirectoryApp) {
+        guard let installID else { return }
+        guard MiniAppGate.isAgeSatisfied else {
+            showAgeGate = true
+            return
+        }
+        guard MiniAppGate.hasConsented(to: item.slug) else {
+            pendingLaunch = installID
+            return
+        }
+        webviewTarget = WebviewTarget(
+            url: client.appWebviewURL(installID: installID),
+            installID: installID
+        )
+    }
+
+    /// Opened to play (a 最近玩过 row): start once the install resolves. One
+    /// that can't run here just stays on its page.
+    private func autoStartIfAsked() {
+        guard app.autoStartAppSlug == slug else { return }
+        app.autoStartAppSlug = nil
+        guard let item, item.isWebview, FeatureFlags.shared.miniAppsEnabled, installID != nil else { return }
+        startGame(item)
     }
 
     private func resolveInstall() async {
@@ -367,15 +615,41 @@ struct AppDetailOverlay: View {
             return
         }
         isResolving = true
-        installID = await store.installID(for: item)
+        installID = await installID(for: item)
         isResolving = false
+    }
+
+    /// The install the app's host post embeds (`data-app-install="8"` in its
+    /// HTML) — the one the web's 开始 goes to — read from the post `home_url`
+    /// names rather than only the first.
+    ///
+    /// Read from the topic's raw JSON, not `client.topic(id:)`: the reader's
+    /// markup pass (`NodelocMarkup`) replaces every app embed with a "open it
+    /// on the web" note, install id included, so the shaped topic never has
+    /// one to find and 开始游戏 stayed disabled for every app.
+    private func installID(for item: DirectoryApp) async -> Int? {
+        await Self.resolveInstallID(for: item)
+    }
+
+    /// Shared with the directory's 开始, which runs a game without this page.
+    static func resolveInstallID(for item: DirectoryApp) async -> Int? {
+        let client = DiscourseClient()
+        guard let host = item.hostTopic,
+              let data = try? await client.http.send("GET", "api/v1/topics/\(host.id)"),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let posts = object["posts"] as? [[String: Any]] else { return nil }
+        let wanted = host.postNumber ?? 1
+        let post = posts.first { ($0["post_number"] as? Int) == wanted } ?? posts.first
+        let html = (post?["html"] as? String) ?? (post?["cooked"] as? String) ?? ""
+        return AppsDirectoryStore.installID(inCooked: html)
     }
 
     /// Opens the app's host topic through the existing post reader.
     private func openDiscussion(_ item: DirectoryApp) {
-        guard let topicID = item.hostTopicID else { return }
-        // No queue — see `ProfileView.openAction`.
-        app.openReader(Post(
+        guard let topicID = item.hostTopic?.id else { return }
+        // Pushed on the page stack this page is on: the reader overlay draws
+        // in `MainView`, underneath it.
+        app.openPostPage(Post(
             id: topicID,
             node: "",
             avatarLetter: String(item.name.prefix(1)).uppercased(),
@@ -387,9 +661,6 @@ struct AppDetailOverlay: View {
             comments: 0,
             hasImage: false
         ))
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
     }
 }
 
@@ -409,6 +680,9 @@ struct AppWebViewOverlay: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             AppWebView(url: url, isLoading: $isLoading)
+                // Every way of starting a game ends here: remembered for the
+                // sidebar's 最近玩过.
+                .onAppear { RecentAppsStore.shared.record(app) }
 
             controls
                 .padding(.trailing, 12)
@@ -421,7 +695,7 @@ struct AppWebViewOverlay: View {
             AppAboutSheet(app: app, installID: installID)
         }
         .sheet(isPresented: $showFlag) {
-            if let topicID = app.hostTopicID {
+            if let topicID = app.hostTopic?.id {
                 FlagSheet(
                     target: FlagTarget(
                         kind: .topic,
@@ -431,6 +705,25 @@ struct AppWebViewOverlay: View {
                 )
             }
         }
+    }
+
+    @Environment(AppState.self) private var appState
+
+    /// Leaves the game (it can't keep running under the app's pages) and
+    /// opens its node.
+    private func openDiscussionNode() async {
+        guard let topicID = app.hostTopic?.id,
+              let data = try? await DiscourseClient().http.send("GET", "api/v1/topics/\(topicID)", query: [URLQueryItem(name: "limit", value: "1")]),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let topic = object["topic"] as? [String: Any],
+              let slug = topic["node_slug"] as? String, !slug.isEmpty
+        else {
+            ToastCenter.shared.show(AppString("找不到这个游戏的节点"))
+            return
+        }
+        onClose()
+        try? await Task.sleep(for: .milliseconds(350))
+        appState.openNode(slug: slug)
     }
 
     /// Ignoring the author hides their posts and stops notifications from
@@ -458,10 +751,19 @@ struct AppWebViewOverlay: View {
                 } label: {
                     Label("关于", systemImage: "info.circle")
                 }
+                // The node the game's host topic is in: apps carry no node of
+                // their own, so it is read from that topic (`node_slug`).
+                if app.hostTopic?.id != nil {
+                    Button {
+                        Task { await openDiscussionNode() }
+                    } label: {
+                        Label(AppString("讨论"), systemImage: "bubble.left.and.bubble.right")
+                    }
+                }
                 // Guideline 4.7.1 requires a way to report the software and to
                 // block an abusive author. The report goes to the same
                 // moderation queue as any flag, so staff already see it.
-                if app.hostTopicID != nil {
+                if app.hostTopic?.id != nil {
                     Button {
                         showFlag = true
                     } label: {
@@ -519,7 +821,7 @@ private struct AppAboutSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack(spacing: 12) {
-                        AppLogo(app: app, size: 56, cornerRadius: 14)
+                        AppLogo(app: app, size: 56, cornerRadius: Theme.cornerLarge)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(app.name)
                                 .font(Theme.heading(18, weight: .bold))
@@ -527,7 +829,7 @@ private struct AppAboutSheet: View {
                             if let author = app.author?.username {
                                 Text("@\(author)")
                                     .font(Theme.body(13, weight: .semibold))
-                                    .foregroundStyle(Theme.muted(0.6))
+                                    .foregroundStyle(Theme.textMuted)
                             }
                         }
                         Spacer(minLength: 0)
@@ -545,9 +847,9 @@ private struct AppAboutSheet: View {
                         factRow(AppString("版本"), app.versionNumber.map { "v\($0)" } ?? "—")
                         factRow(AppString("安装"), "#\(installID)")
                     }
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                             .strokeBorder(Theme.divider, lineWidth: 1)
                     }
 
@@ -559,7 +861,7 @@ private struct AppAboutSheet: View {
                         if permissions.isEmpty {
                             Text("除了在此面板上绘制内容以外，什么都不做。")
                                 .font(Theme.body(13))
-                                .foregroundStyle(Theme.muted(0.6))
+                                .foregroundStyle(Theme.textMuted)
                         } else {
                             ForEach(permissions, id: \.self) { permission in
                                 HStack(alignment: .top, spacing: 8) {
@@ -578,7 +880,7 @@ private struct AppAboutSheet: View {
 
                     Text("应用运行在沙盒中，无法访问你的账号，只能做上述权限允许的事情。")
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(18)
@@ -604,7 +906,7 @@ private struct AppAboutSheet: View {
         HStack {
             Text(label)
                 .font(Theme.body(13))
-                .foregroundStyle(Theme.muted(0.6))
+                .foregroundStyle(Theme.textMuted)
             Spacer()
             Text(value)
                 .font(Theme.body(13, weight: .semibold))
@@ -690,6 +992,26 @@ private struct AppWebView: UIViewRepresentable {
         ) {
             isLoading.wrappedValue = false
         }
+    }
+}
+
+// MARK: - Host topic
+
+extension DirectoryApp {
+    /// The topic (and floor) hosting the app, out of `home_url`. The server
+    /// writes `/t/{id}?post={n}`, which `hostTopicID` — looking for an
+    /// all-digit path segment after `t` — can't read, because the id segment
+    /// arrives as "103048?post=1" once split on "/". Parsed as a URL here so
+    /// the query is separated first; the older `/t/{slug}/{id}/{n}` form still
+    /// works.
+    var hostTopic: (id: Int, postNumber: Int?)? {
+        guard let homeUrl, let components = URLComponents(string: homeUrl) else { return nil }
+        let parts = components.path.split(separator: "/")
+        guard let tIndex = parts.firstIndex(of: "t") else { return nil }
+        let numbers = parts[parts.index(after: tIndex)...].compactMap { Int($0) }
+        guard let id = numbers.first else { return nil }
+        let post = components.queryItems?.first { $0.name == "post" }?.value.flatMap(Int.init)
+        return (id, post ?? (numbers.count > 1 ? numbers[1] : nil))
     }
 }
 

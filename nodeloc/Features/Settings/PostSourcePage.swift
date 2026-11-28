@@ -140,8 +140,8 @@ struct PostSourcePage: View {
         VStack(spacing: 0) {
             header
 
-            ScrollView {
-                VStack(spacing: 0) {
+            Form {
+                Group {
                     SettingsSection(title: AppString("显示内容"), footer: levelFooter) {
                         SettingsPickerRow(
                             title: AppString("来源信息"),
@@ -162,16 +162,14 @@ struct PostSourcePage: View {
                         }
                     }
                 }
-                .padding(.bottom, 32)
             }
             .scrollIndicators(.hidden)
         }
         .background(Theme.bg.ignoresSafeArea())
         .task { await store.load() }
-        .confirmationDialog(
+        .alert(
             AppString("清除所有帖子的来源？"),
-            isPresented: $isConfirmingClear,
-            titleVisibility: .visible
+            isPresented: $isConfirmingClear
         ) {
             Button("清除", role: .destructive) {
                 Task { await store.clearHistory() }
@@ -183,26 +181,11 @@ struct PostSourcePage: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.text)
-                    .frame(width: 34, height: 34)
-            }
-            .glassButton(tint: Theme.bg.opacity(0.34), shape: .circle)
-
-            Text("发帖来源").font(Theme.body(15, weight: .medium))
-
-            Spacer()
-
+        SettingsBar(title: AppString("发帖来源"), onClose: onClose) {
             if store.isLoading || store.isSaving {
                 ProgressView().controlSize(.small)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
     }
 
     /// States the default outright. The site shows the model unless told

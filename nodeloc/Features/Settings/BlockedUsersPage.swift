@@ -36,20 +36,27 @@ struct BlockedUsersPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsPageHeader(title: AppString("屏蔽的用户"), onClose: onClose)
+            SettingsBar(title: AppString("屏蔽的用户"), onClose: onClose)
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
+            Form {
+                Group {
                     if isLoading, store.usernames.isEmpty {
-                        ProgressView()
-                            .tint(Theme.accent)
-                            .padding(.vertical, 40)
+                        Section {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 40)
+                                .listRowBackground(Color.clear)
+                        }
                     } else if store.usernames.isEmpty {
-                        EmptyStateView(
-                            icon: "hand.raised",
-                            message: AppString("你还没有屏蔽任何人")
-                        )
-                        .padding(.vertical, 40)
+                        Section {
+                            EmptyStateView(
+                                icon: "hand.raised",
+                                message: AppString("你还没有屏蔽任何人")
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
+                            .listRowBackground(Color.clear)
+                        }
                     } else {
                         SettingsSection(
                             title: AppString("已屏蔽 (\(store.usernames.count))"),
@@ -62,15 +69,13 @@ struct BlockedUsersPage: View {
                     }
 
                     if let errorText {
-                        Text(errorText)
-                            .font(Theme.body(13))
-                            .foregroundStyle(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 12)
+                        Section {
+                            Text(errorText)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                     }
                 }
-                .padding(.bottom, 30)
             }
             .scrollIndicators(.hidden)
             .refreshable { await reload() }
@@ -109,30 +114,24 @@ struct BlockedUsersPage: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("@\(username)")
-                    .font(Theme.body(15, weight: .semibold))
-                    .foregroundStyle(Theme.text)
                 if store.localOnly.contains(username) {
                     Text("仅在此设备隐藏")
-                        .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
 
             Spacer(minLength: 8)
 
             if busyUsername == username {
-                ProgressView().tint(Theme.accent)
+                ProgressView()
             } else {
                 Button(AppString("解除")) {
                     Task { await unblock(username) }
                 }
-                .font(Theme.body(14, weight: .semibold))
-                .foregroundStyle(Theme.accent)
+                .buttonStyle(.borderless)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func reload() async {

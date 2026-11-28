@@ -72,8 +72,5 @@ struct PostReferenceSheet: View {
         // No queue: a reference is a jump sideways out of whatever list the
         // reader came from, so there is no "next post" here.
         app.openReader(post)
-        withAnimation(.expandCollapse) {
-            app.overlay = .post
-        }
     }
 }

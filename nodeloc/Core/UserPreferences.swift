@@ -289,6 +289,9 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
     /// The same topics as 最新 under the same filters, ordered by when they
     /// were *posted* — a reply can't drag an old topic back to the top.
     case fresh = 5
+    /// Topics from the nodes the reader joined (`joined=1`), the web front
+    /// page's 关注. Needs an account.
+    case following = 6
 
     var id: Int { rawValue }
 
@@ -300,6 +303,7 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
         case .top: return "top.json"
         case .rising: return "rising.json"
         case .fresh: return "fresh.json"
+        case .following: return "following.json"
         }
     }
 
@@ -322,6 +326,7 @@ enum HomeFeed: Int, CaseIterable, Identifiable {
         case .top: return AppString("热门")
         case .rising: return AppString("上升中")
         case .fresh: return AppString("新鲜")
+        case .following: return AppString("关注")
         }
     }
 
@@ -539,7 +544,7 @@ extension TextSize {
 final class UserPreferencesStore {
     static let shared = UserPreferencesStore()
 
-    private enum Key {
+    fileprivate enum Key {
         static let colorMode = "prefInterfaceColorMode"
         static let textSize = "prefTextSize"
         static let homeFeed = "prefHomeFeed"
@@ -553,12 +558,12 @@ final class UserPreferencesStore {
     var errorText: String?
 
     /// Mirrored locally so the first frame is already correct.
-    private(set) var colorMode: InterfaceColorMode
-    private(set) var textSize: TextSize
+    fileprivate(set) var colorMode: InterfaceColorMode
+    fileprivate(set) var textSize: TextSize
 
     /// Read by `Theme.body`/`Theme.heading` on every font construction, so it
     /// must stay a cheap stored-property read rather than a lookup.
-    private(set) var textScale: CGFloat
+    fileprivate(set) var textScale: CGFloat
 
     /// Local, unlike the rest of this type — see `HomeFeed`. Nil means nobody
     /// has chosen yet, which is what lets `homepage_id` seed it exactly once
@@ -747,16 +752,16 @@ extension UserPreferencesStore {
 
     /// Colour mode and text size need their own bindings: both also drive the
     /// local mirror, and text size travels as a name rather than an integer.
+    ///
+    /// Both are device-local: the backend keeps no equivalent (see
+    /// `DiscourseClient.updatePreferences`), and going through `save` made
+    /// them dead for a guest, who has no username to save under.
     var colorModeBinding: Binding<InterfaceColorMode> {
         Binding(
             get: { self.colorMode },
             set: { newValue in
-                Task {
-                    await self.save(
-                        { $0.interfaceColorMode = newValue.rawValue },
-                        items: [("interface_color_mode", String(newValue.rawValue))]
-                    )
-                }
+                self.colorMode = newValue
+                UserDefaults.standard.set(newValue.rawValue, forKey: Key.colorMode)
             }
         )
     }
@@ -765,12 +770,9 @@ extension UserPreferencesStore {
         Binding(
             get: { self.textSize },
             set: { newValue in
-                Task {
-                    await self.save(
-                        { $0.textSize = newValue.wireName },
-                        items: [("text_size", newValue.wireName)]
-                    )
-                }
+                self.textSize = newValue
+                self.textScale = newValue.scale
+                UserDefaults.standard.set(newValue.rawValue, forKey: Key.textSize)
             }
         )
     }
@@ -803,4 +805,229 @@ extension UserPreferencesStore {
             }
         )
     }
+}
+
+// MARK: - Account settings (`/api/v1/me/settings`)
+
+/// 谁可以私信我 / 谁可以 @ 我. The backend's wire names.
+enum ContactPolicy: String, CaseIterable, Identifiable {
+    case everyone
+    case following
+    case nobody
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .everyone: return AppString("所有人")
+        case .following: return AppString("我关注的人")
+        case .nobody: return AppString("不允许")
+        }
+    }
+}
+
+/// 邮件精选摘要 frequency.
+enum DigestFrequency: String, CaseIterable, Identifiable {
+    case daily
+    case weekly
+    case off
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .daily: return AppString("每天")
+        case .weekly: return AppString("每周")
+        case .off: return AppString("不发送")
+        }
+    }
+}
+
+/// One switchable notification kind. `key` is the site channel's key in
+/// `settings.notify`; the e-mail channel is `key + ".mail"`.
+struct NotifyKind: Identifiable {
+    let key: String
+    let title: String
+    var detail: String?
+    var id: String { key }
+
+    /// Grouped as the web and Android settings group them. `safe` is left out:
+    /// its site and e-mail channels can't be turned off.
+    static var groups: [(title: String, kinds: [NotifyKind])] {
+        [
+            (AppString("互动"), [
+                NotifyKind(key: "reply", title: AppString("有人回复我的帖子")),
+                NotifyKind(key: "reply_comment", title: AppString("有人回复我的评论")),
+                NotifyKind(key: "mention", title: AppString("有人 @ 我")),
+                NotifyKind(key: "vote", title: AppString("我的内容被赞同或打赏"), detail: AppString("短时间内的多次赞同会合并成一条")),
+                NotifyKind(key: "repost", title: AppString("我的帖子被转发")),
+            ]),
+            (AppString("关注与私信"), [
+                NotifyKind(key: "follow", title: AppString("新的关注者")),
+                NotifyKind(key: "message", title: AppString("新的私信")),
+                NotifyKind(key: "watching", title: AppString("我关注的主题有新回帖")),
+                NotifyKind(key: "followed_topic", title: AppString("我关注的人发了新主题")),
+                NotifyKind(key: "bookmark", title: AppString("收藏的提醒到了")),
+            ]),
+            (AppString("节点"), [
+                NotifyKind(key: "node_announce", title: AppString("已加入节点的公告")),
+                NotifyKind(key: "node_topic", title: AppString("已加入节点的新帖")),
+                NotifyKind(key: "node_hot_topic", title: AppString("已加入节点的热门帖")),
+                NotifyKind(key: "mod", title: AppString("我管理的节点有待处理事项")),
+            ]),
+            (AppString("交易与资产"), [
+                NotifyKind(key: "trade", title: AppString("交易状态变化")),
+                NotifyKind(key: "energy", title: AppString("能量与红包到账")),
+            ]),
+            (AppString("等级与成就"), [
+                NotifyKind(key: "level", title: AppString("升级和解锁成就")),
+            ]),
+        ]
+    }
+}
+
+/// The account's own settings on the NodeLoc backend.
+///
+/// The preference pages used to bind Discourse `user_option` keys, which this
+/// backend doesn't have: `updatePreferences` drops them, so every switch flipped
+/// on screen and reverted on the next launch. These are the fields
+/// `GET/PUT /api/v1/me/settings` actually store — the same ones the web
+/// settings page and the Android app use.
+@MainActor
+@Observable
+final class AccountSettingsStore {
+    static let shared = AccountSettingsStore()
+
+    struct Settings: Decodable, Equatable {
+        var notify: [String: Bool]?
+        var messagePolicy: String?
+        var mentionPolicy: String?
+        var allowFollow: Bool?
+        var searchIndex: Bool?
+        var showUpvotes: Bool?
+        var showJoinedNodes: Bool?
+        var showOnline: Bool?
+        var showLevel: Bool?
+        var digest: String?
+    }
+
+    struct Channels: Decodable, Equatable {
+        var site: Bool?
+        var mail: Bool?
+        var tg: Bool?
+    }
+
+    private struct Envelope: Decodable {
+        var settings: Settings?
+        var notifyDefaults: [String: Channels]?
+    }
+
+    private let client = DiscourseClient()
+
+    private(set) var settings: Settings?
+    private(set) var notifyDefaults: [String: Channels] = [:]
+    private(set) var isLoading = false
+    private(set) var isSaving = false
+    /// Set when the first load failed, so the page can offer a retry.
+    private(set) var loadFailed = false
+    var errorText: String?
+
+    func load(force: Bool = false) async {
+        guard DiscourseAuth.shared.isAuthenticated else { return }
+        guard force || settings == nil, !isLoading else { return }
+        isLoading = true
+        loadFailed = false
+        defer { isLoading = false }
+        do {
+            let data = try await client.http.send("GET", "api/v1/me/settings")
+            adopt(try NodelocJSON.decode(Envelope.self, from: data))
+        } catch {
+            if settings == nil { loadFailed = true }
+        }
+    }
+
+    private func adopt(_ envelope: Envelope) {
+        if let settings = envelope.settings { self.settings = settings }
+        if let defaults = envelope.notifyDefaults { notifyDefaults = defaults }
+    }
+
+    /// Writes a partial patch; the server answers with the whole bag. On
+    /// failure the previous values come back and the reason is surfaced.
+    private func save(_ patch: [String: Any], optimistic mutate: (inout Settings) -> Void) async {
+        guard var updated = settings else { return }
+        let snapshot = settings
+        mutate(&updated)
+        settings = updated
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            let data = try await client.http.send("PUT", "api/v1/me/settings", body: .json(patch))
+            if let envelope = try? NodelocJSON.decode(Envelope.self, from: data) { adopt(envelope) }
+        } catch {
+            settings = snapshot
+            errorText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    // MARK: Bindings
+
+    func flag(_ keyPath: WritableKeyPath<Settings, Bool?>, _ wireKey: String, default fallback: Bool) -> Binding<Bool> {
+        Binding(
+            get: { self.settings?[keyPath: keyPath] ?? fallback },
+            set: { newValue in
+                Task { await self.save([wireKey: newValue]) { $0[keyPath: keyPath] = newValue } }
+            }
+        )
+    }
+
+    func policy(_ keyPath: WritableKeyPath<Settings, String?>, _ wireKey: String) -> Binding<ContactPolicy> {
+        Binding(
+            get: { self.settings?[keyPath: keyPath].flatMap(ContactPolicy.init(rawValue:)) ?? .everyone },
+            set: { newValue in
+                Task { await self.save([wireKey: newValue.rawValue]) { $0[keyPath: keyPath] = newValue.rawValue } }
+            }
+        )
+    }
+
+    var digestBinding: Binding<DigestFrequency> {
+        Binding(
+            get: { self.settings?.digest.flatMap(DigestFrequency.init(rawValue:)) ?? .off },
+            set: { newValue in
+                Task { await self.save(["digest": newValue.rawValue]) { $0.digest = newValue.rawValue } }
+            }
+        )
+    }
+
+    /// A `settings.notify` switch. Kinds fall back to the server's defaults;
+    /// the channel switches (`email`, `push`) are on unless turned off.
+    func notify(_ key: String) -> Binding<Bool> {
+        Binding(
+            get: { self.notifyValue(key) },
+            set: { newValue in
+                Task {
+                    await self.save(["notify": [key: newValue]]) { settings in
+                        var notify = settings.notify ?? [:]
+                        notify[key] = newValue
+                        settings.notify = notify
+                    }
+                }
+            }
+        )
+    }
+
+    private func notifyValue(_ key: String) -> Bool {
+        if let stored = settings?.notify?[key] { return stored }
+        let (row, channel) = key.split(separator: ".", maxSplits: 1).map(String.init).pair
+        guard let defaults = notifyDefaults[row] else { return true }
+        switch channel {
+        case "mail": return defaults.mail ?? false
+        case "tg": return defaults.tg ?? false
+        default: return defaults.site ?? true
+        }
+    }
+}
+
+private extension Array where Element == String {
+    /// The first two parts of a `row.channel` key; a missing channel is "".
+    var pair: (String, String) { (first ?? "", count > 1 ? self[1] : "") }
 }

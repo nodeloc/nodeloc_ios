@@ -25,6 +25,32 @@ private enum MessagePane: CaseIterable {
     }
 }
 
+/// The chips over 通知. 版务 only shows for someone with something to
+/// moderate.
+private enum NotificationFilter: CaseIterable {
+    case all, replies, likes, system, moderation
+
+    var title: String {
+        switch self {
+        case .all: return AppString("全部")
+        case .replies: return AppString("回复")
+        case .likes: return AppString("赞同")
+        case .system: return AppString("系统")
+        case .moderation: return AppString("版务")
+        }
+    }
+
+    func includes(_ notification: AppNotification) -> Bool {
+        switch self {
+        case .all: return true
+        case .replies: return notification.kind == .comment && !notification.isModeration
+        case .likes: return notification.kind == .like
+        case .system: return (notification.kind == .system || notification.kind == .star) && !notification.isModeration
+        case .moderation: return notification.isModeration
+        }
+    }
+}
+
 private enum ChatInboxFilter: CaseIterable {
     case messages
     case threads
@@ -99,6 +125,10 @@ struct ChatView: View {
     @State private var store = MessageCenterStore.shared
     @State private var selection: MessagePane = .chat
     @State private var chatFilter: ChatInboxFilter = .messages
+    @State private var notificationFilter: NotificationFilter = .all
+    /// What waits in the review queue; nil for a reader who moderates nothing.
+    @State private var pendingReview: Int?
+    @State private var dashboardScope: DiscourseClient.ReviewScope?
     @State private var isShowingNewChat = false
     @State private var chatSearchText = ""
     @State private var chatSearchTask: Task<Void, Never>?
@@ -130,30 +160,37 @@ struct ChatView: View {
                         .toolbar(.hidden, for: .navigationBar)
                         .toolbar(.hidden, for: .tabBar)
                     case .profile(let target):
+                        // Pushed, so its bar keeps the system back button.
                         ChatPublicProfileView(target: target)
-                            .toolbar(.hidden, for: .navigationBar)
                             .toolbar(.hidden, for: .tabBar)
                     }
                 }
-                .toolbar(usesTopTabBar ? .visible : .hidden, for: .navigationBar)
-                // No leading item: the tab capsule leaves that corner too
-                // narrow for "收件箱", which truncated to "I…", and the tab
-                // itself already says which screen this is. The phone's own
-                // header still draws the title.
-                .tabBarHeader(isPinned: usesTopTabBar, needsNavigationStack: false) {
-                    EmptyView()
-                } trailing: {
-                    inboxHeaderTools
+                .toolbar {
+                    SidebarToolbarItem(sidebarIsPinned: sidebarIsPinned)
+                    // On iPad the top tab bar owns the centre of this row, so
+                    // the switch gets a row of its own in `inboxBody`.
+                    if !usesTopTabBar {
+                        ToolbarItem(placement: .principal) {
+                            paneSwitch
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        inboxHeaderTools
+                    }
                 }
+                .tabRootNavigationBar()
         }
     }
 
     private var inboxBody: some View {
         VStack(spacing: 0) {
-            if !usesTopTabBar {
-                messageHeader
+            if usesTopTabBar {
+                // The tab bar's row has no room in its centre for the switch,
+                // so on iPad it gets a row of its own.
+                paneSwitch
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
             }
-            messageTabs
 
             if store.needsLogin {
                 guestPrompt
@@ -177,6 +214,19 @@ struct ChatView: View {
         }
         .onChange(of: selection) { _, pane in
             if pane == .notifications { Task { await store.markNotificationsRead() } }
+        }
+        .onAppear { pendingReview = NodelocRealtime.shared.pendingReview }
+        .onReceive(NotificationCenter.default.publisher(for: NodelocRealtime.pendingReviewDidChange)) { _ in
+            pendingReview = NodelocRealtime.shared.pendingReview
+        }
+        // Pushed on the app-wide stack, with the system bar.
+        .onChange(of: dashboardScope) { _, scope in
+            guard let scope else { return }
+            switch scope {
+            case .site: app.pushPage(.moderationDashboard(node: nil))
+            case .node(let slug): app.pushPage(.moderationDashboard(node: slug))
+            }
+            dashboardScope = nil
         }
         .onChange(of: app.inboxRequestedGroup) { _, _ in
             Task { await applyInboxRequestIfNeeded() }
@@ -223,12 +273,6 @@ struct ChatView: View {
         return true
     }
 
-    private var inboxTitle: some View {
-        Text("收件箱")
-            .font(Theme.heading(24, weight: .semibold))
-            .foregroundStyle(Theme.text)
-    }
-
     /// Guests get 登录 where the tools would be — every inbox action needs an
     /// account anyway.
     @ViewBuilder
@@ -236,72 +280,44 @@ struct ChatView: View {
         if app.isGuest {
             GuestLoginButton()
         } else {
-            HStack(spacing: 8) {
-                newChatButton
-                markAllReadButton
+            inboxActionsMenu
+        }
+    }
+
+    /// The inbox's actions behind one ⋯ toolbar button, so the bar has one
+    /// control per corner like the other tabs. 发起聊天 only belongs to 聊天;
+    /// 全部已读 clears every pane, so both offer it.
+    private var inboxActionsMenu: some View {
+        Menu {
+            if selection == .chat {
+                // One person or several — `target_usernames[]` takes a list,
+                // and Discourse makes it a group direct message when there is
+                // more than one.
+                Button {
+                    isShowingNewChat = true
+                } label: {
+                    Label(AppString("发起聊天"), systemImage: "square.and.pencil")
+                }
             }
-        }
-    }
-
-    private var messageHeader: some View {
-        ZStack {
-            inboxTitle
-
-            HStack {
-                SidebarMenuButton()
-
-                Spacer()
-
-                inboxHeaderTools
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 18)
-    }
-
-    /// Starts a chat. One person or several — `target_usernames[]` takes a list,
-    /// and Discourse makes it a group direct message when there is more than one.
-    /// Until now the app could only open a one-to-one chat from a profile.
-    private var newChatButton: some View {
-        Button {
-            isShowingNewChat = true
-        } label: {
-            Image(systemName: "square.and.pencil")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(Theme.text)
-                .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
-        }
-        .headerControlGlass(tint: FloatingHeader.glassTint)
-        .accessibilityLabel("发起聊天")
-    }
-
-    /// 全部已读. One round glass button, built like every other header control
-    /// (the hamburger beside it included) instead of a capsule of three — the
-    /// other two had no actions behind them.
-    private var markAllReadButton: some View {
-        Button {
-            Task {
-                await store.markAllRead()
-                ToastCenter.shared.show(AppString("已全部标为已读"))
+            Button {
+                Task {
+                    await store.markAllRead()
+                    ToastCenter.shared.show(AppString("已全部标为已读"))
+                }
+            } label: {
+                // Lucide's double tick, the mark messaging apps use for
+                // "read"; template-rendered so the menu tints it.
+                Label {
+                    Text(AppString("全部已读"))
+                } icon: {
+                    Image("LucideCheckCheck").renderingMode(.template)
+                }
             }
         } label: {
-            // Lucide's double tick, the mark messaging apps use for "read".
-            // Template-rendered so it takes `Theme.text` like the SF Symbols
-            // in the other headers.
-            Image("LucideCheckCheck")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 18, height: 18)
+            Image(systemName: "ellipsis")
                 .foregroundStyle(Theme.text)
-                .frame(width: FloatingHeader.controlHeight, height: FloatingHeader.controlHeight)
         }
-        .headerControlGlass(tint: FloatingHeader.glassTint)
-        // Deliberately never disabled: a disabled `.glass` button gets no
-        // press response, which is what made this one feel dead next to the
-        // hamburger. With nothing unread the tap is simply a no-op.
-        .accessibilityLabel("全部已读")
+        .accessibilityLabel(AppString("更多"))
     }
 
     private func count(for pane: MessagePane) -> Int {
@@ -312,50 +328,40 @@ struct ChatView: View {
         }
     }
 
-    private var messageTabs: some View {
-        HStack(spacing: 0) {
-            ForEach(MessagePane.allCases.filter { $0 != .privateMessages || NodelocFeatures.topicPrivateMessages }, id: \.self) { pane in
-                Button {
-                    withAnimation(.quicker) {
-                        selection = pane
-                    }
-                } label: {
-                    VStack(spacing: 10) {
-                        HStack(spacing: 6) {
-                            Text(pane.title)
-                                .font(Theme.body(18, weight: selection == pane ? .semibold : .medium))
-                                .foregroundStyle(selection == pane ? Theme.text : Theme.muted(0.5))
-                            if count(for: pane) > 0 {
-                                Text("\(count(for: pane))")
-                                    .font(Theme.body(11, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(minWidth: 18, minHeight: 18)
-                                    .padding(.horizontal, 3)
-                                    .background(Theme.accent, in: Capsule())
-                            }
-                        }
-                        Rectangle()
-                            .fill(selection == pane ? Theme.accent : Color.clear)
-                            .frame(width: 56, height: 3)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.pressable)
+    private var visiblePanes: [MessagePane] {
+        MessagePane.allCases.filter { $0 != .privateMessages || NodelocFeatures.topicPrivateMessages }
+    }
+
+    /// The segment's text. A native segment can't host a badge, so the unread
+    /// count rides in the label itself, capped like the other badges.
+    private func segmentTitle(for pane: MessagePane) -> String {
+        let unread = count(for: pane)
+        guard unread > 0 else { return pane.title }
+        return "\(pane.title) \(unread > 99 ? "99+" : "\(unread)")"
+    }
+
+    /// The panes as the system's segmented control in the bar's centre, like
+    /// 电话 › 最近通话. Selecting 通知 is still what marks notifications read
+    /// (see `onChange`).
+    private var paneSwitch: some View {
+        Picker(AppString("消息"), selection: $selection) {
+            ForEach(visiblePanes, id: \.self) { pane in
+                Text(verbatim: segmentTitle(for: pane)).tag(pane)
             }
         }
-        .padding(.horizontal, 20)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.divider)
-                .frame(height: 1)
-        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.large)
+        .frame(width: 212)
+        .sensoryFeedback(.selection, trigger: selection)
     }
 
     private var messageContent: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                if selection == .chat {
+                // With threads and search off the bar was a lone 消息 chip that
+                // chose nothing, so it only shows when there's a choice.
+                if selection == .chat, NodelocFeatures.chatThreadsAndSearch {
                     chatFilterBar
                         .padding(.bottom, 8)
                 }
@@ -368,7 +374,16 @@ struct ChatView: View {
 
                 switch selection {
                 case .notifications:
-                    notificationList(store.notifications, emptyTitle: AppString("暂无通知"), emptyIcon: "bell")
+                    if let pendingReview, pendingReview > 0 {
+                        moderationCard(pending: pendingReview)
+                    }
+                    notificationFilterBar
+                        .padding(.bottom, 8)
+                    notificationList(
+                        store.notifications.filter(notificationFilter.includes),
+                        emptyTitle: AppString("暂无通知"),
+                        emptyIcon: "bell"
+                    )
                 case .privateMessages:
                     privateMessageList
                 case .chat:
@@ -380,7 +395,7 @@ struct ChatView: View {
                         .font(Theme.body(12, weight: .medium))
                         .foregroundStyle(Theme.danger)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 20)
+                        .padding(.horizontal, Theme.pagePadding)
                         .padding(.top, 14)
                 }
             }
@@ -388,6 +403,10 @@ struct ChatView: View {
             .padding(.bottom, 100)
         }
         .scrollIndicators(.hidden)
+        // The list loads once per launch; without this a failed first load
+        // (the red line under the list) had no way back short of relaunching.
+        .refreshable { await store.reload() }
+        .tabBarFollowsScrollDirection()
         .scrollPosition($inboxScroll)
         .onChange(of: app.scrollToTopRequests) { _, _ in
             withAnimation(.easeOut(duration: 0.3)) {
@@ -412,7 +431,7 @@ struct ChatView: View {
                     } label: {
                         Text(filter.title)
                             .font(Theme.body(15, weight: chatFilter == filter ? .semibold : .medium))
-                            .foregroundStyle(chatFilter == filter ? Theme.text : Theme.muted(0.58))
+                            .foregroundStyle(chatFilter == filter ? Theme.text : Theme.textMuted)
                             .lineLimit(1)
                             .minimumScaleFactor(0.86)
                             .padding(.horizontal, 16)
@@ -428,7 +447,7 @@ struct ChatView: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
     }
 
     @ViewBuilder
@@ -486,6 +505,68 @@ struct ChatView: View {
         }
     }
 
+    private var notificationFilterBar: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(NotificationFilter.allCases.filter { $0 != .moderation || pendingReview != nil }, id: \.self) { filter in
+                    pmFilterChip(title: filter.title, isSelected: notificationFilter == filter) {
+                        notificationFilter = filter
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.pagePadding)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    /// The pinned 版务 card: what waits in the queue, opening the 管理台. Staff
+    /// get the site's; someone who only manages nodes gets the node with the
+    /// most waiting.
+    private func moderationCard(pending: Int) -> some View {
+        let byNode = NodelocRealtime.shared.pendingReviewByNode
+        let busiest = byNode.max { $0.value < $1.value }
+        let isStaff = DiscourseAuth.shared.isStaff
+        let title: String = {
+            if !isStaff, let busiest, byNode.count == 1 {
+                return AppString("n/\(busiest.key) 有 \(pending) 条内容等待审核")
+            }
+            return AppString("有 \(pending) 条内容等待审核")
+        }()
+        return Button {
+            if isStaff {
+                dashboardScope = .site
+            } else if let busiest {
+                dashboardScope = .node(busiest.key)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "tray.full")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 36, height: 36)
+                    .background(Theme.accent.opacity(0.12), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(Theme.body(15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(AppString("版务 · 打开管理台"))
+                        .font(Theme.body(12))
+                        .foregroundStyle(Theme.neutral700)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.neutral600)
+            }
+            .padding(14)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
+    }
+
     /// 个人 + one chip per group with a message inbox.
     private var pmFilterBar: some View {
         ScrollViewReader { proxy in
@@ -502,7 +583,7 @@ struct ChatView: View {
                         .id(group)
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, Theme.pagePadding)
             }
             .scrollIndicators(.hidden)
             // Center the active chip — chiefly when a notification jumps to a
@@ -527,7 +608,7 @@ struct ChatView: View {
         } label: {
             Text(title)
                 .font(Theme.body(15, weight: isSelected ? .semibold : .medium))
-                .foregroundStyle(isSelected ? Theme.text : Theme.muted(0.58))
+                .foregroundStyle(isSelected ? Theme.text : Theme.textMuted)
                 .lineLimit(1)
                 .padding(.horizontal, 16)
                 .frame(height: 38)
@@ -595,7 +676,7 @@ struct ChatView: View {
                     .font(Theme.body(12, weight: .medium))
                     .foregroundStyle(Theme.danger)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, Theme.pagePadding)
                     .padding(.top, 14)
             }
         }
@@ -605,7 +686,7 @@ struct ChatView: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.48))
+                .foregroundStyle(Theme.textFaint)
 
             TextField("搜索聊天消息", text: $chatSearchText)
                 .font(Theme.body(15))
@@ -625,7 +706,7 @@ struct ChatView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.42))
+                        .foregroundStyle(Theme.textFaint)
                 }
                 .buttonStyle(.pressable)
             }
@@ -637,7 +718,7 @@ struct ChatView: View {
             Capsule()
                 .strokeBorder(Theme.divider, lineWidth: 1)
         )
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .onChange(of: chatSearchText) { _, newValue in
             scheduleChatSearch(newValue)
         }
@@ -650,10 +731,10 @@ struct ChatView: View {
         VStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 32, weight: .medium))
-                .foregroundStyle(Theme.muted(0.38))
+                .foregroundStyle(Theme.textFaint)
             Text(title)
                 .font(Theme.body(14, weight: .medium))
-                .foregroundStyle(Theme.muted(0.58))
+                .foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 80)
@@ -690,12 +771,9 @@ struct ChatView: View {
     private var guestPrompt: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image(systemName: "tray")
-                .font(.system(size: 34, weight: .medium))
-                .foregroundStyle(Theme.neutral500)
-            Text("登录后查看消息")
-                .font(Theme.body(14, weight: .medium))
-                .foregroundStyle(Theme.muted(0.6))
+            EmptyStateView(icon: "tray", message: AppString("登录后查看消息"), iconSize: 34)
+            Button(AppString("登录")) { requestLogin(app, .chat) }
+                .buttonStyle(.bordered)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -730,14 +808,14 @@ private struct MessageSearchResultRow: View {
 
                     Text(result.message.time)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(result.message.authorName)
                         .font(Theme.body(13, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.62))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
 
                     Text(searchExcerpt)
@@ -748,7 +826,7 @@ private struct MessageSearchResultRow: View {
             }
         }
         .padding(.vertical, 13)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .contentShape(Rectangle())
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.divider).frame(height: 1)
@@ -765,7 +843,7 @@ private struct ChatPublicProfileView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        PublicProfileOverlay(target: target) {
+        PublicProfileOverlay(target: target, navigation: .pushed) {
             dismiss()
         }
     }
@@ -778,15 +856,21 @@ private struct MessageNotificationRow: View {
     var onOpen: (() -> Void)?
     @Environment(\.openURL) private var openURL
 
+    /// A notification with nowhere to go opens its own text rather than
+    /// leaving a row that ignores the tap.
+    @State private var showsDetail = false
+
     var body: some View {
         Button {
             onOpen?()
-            if let url = notification.url { openURL(url) }
+            if let url = notification.url { openURL(url) } else { showsDetail = true }
         } label: {
             rowContent
         }
         .buttonStyle(.pressable)
-        .disabled(notification.url == nil)
+        .sheet(isPresented: $showsDetail) {
+            NotificationDetailSheet(notification: notification)
+        }
     }
 
     private var rowContent: some View {
@@ -809,7 +893,7 @@ private struct MessageNotificationRow: View {
                     Spacer(minLength: 8)
                     Text(notification.time)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
@@ -828,7 +912,7 @@ private struct MessageNotificationRow: View {
             }
         }
         .padding(.vertical, 13)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .background(notification.unread ? Theme.accent.opacity(0.05) : Color.clear)
         .overlay(alignment: .bottom) {
             Rectangle().fill(Theme.divider).frame(height: 1)
@@ -873,7 +957,7 @@ private struct MessageNotificationRow: View {
     }
 }
 
-private struct PMConversationRow: View {
+struct PMConversationRow: View {
     let conversation: PMConversation
 
     var body: some View {
@@ -894,7 +978,7 @@ private struct PMConversationRow: View {
                     Spacer(minLength: 8)
                     Text(conversation.time)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
@@ -911,7 +995,7 @@ private struct PMConversationRow: View {
             }
         }
         .padding(.vertical, 13)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .contentShape(Rectangle())
         .background(conversation.unread ? Theme.accent.opacity(0.05) : Color.clear)
         .overlay(alignment: .bottom) {
@@ -936,7 +1020,7 @@ private struct MessageChatRow: View {
                     Spacer(minLength: 8)
                     Text(chat.time)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
@@ -960,7 +1044,7 @@ private struct MessageChatRow: View {
             }
         }
         .padding(.vertical, 13)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .contentShape(Rectangle())
         .background(chat.unread ? Theme.accent.opacity(0.05) : Color.clear)
         .overlay(alignment: .bottom) {
@@ -985,18 +1069,18 @@ private struct MessageThreadRow: View {
                     Spacer(minLength: 8)
                     Text(thread.time)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
                 HStack(spacing: 6) {
                     Text(thread.channelName)
                         .font(Theme.body(13, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.55))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                     Text("•")
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.35))
+                        .foregroundStyle(Theme.textFaint)
                     Text(thread.excerpt)
                         .font(Theme.body(14))
                         .foregroundStyle(Theme.text.opacity(0.68))
@@ -1011,7 +1095,7 @@ private struct MessageThreadRow: View {
             }
         }
         .padding(.vertical, 13)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .contentShape(Rectangle())
         .background(thread.unread ? Theme.accent.opacity(0.05) : Color.clear)
         .overlay(alignment: .bottom) {
@@ -1033,7 +1117,7 @@ private struct ChatMessageVideo: View {
     @State private var posterURL: URL?
 
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 14, style: .continuous)
+        RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
     }
 
     var body: some View {
@@ -1215,7 +1299,15 @@ private struct ChatConversationView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var store = ChatConversationStore()
+    /// The message as sent: site emoji as `:code:`. Mirrors `draftRich`.
     @State private var draft = ""
+    /// The message as edited: site emoji as images (see `ComposerTextEditor`).
+    @State private var draftRich = AttributedString()
+    @State private var draftSelection: Range<Int> = 0..<0
+    /// The emoji panel in the keyboard's place.
+    @State private var showsEmojiPanel = false
+    /// The input's height: one line up to four, then it scrolls.
+    @State private var inputHeight: CGFloat = 42
     @State private var appliedScrollSignature: String?
     @State private var selectedMedia: PostMedia?
     /// Picked-but-not-yet-sent media, mirroring how the post composer holds
@@ -1247,7 +1339,7 @@ private struct ChatConversationView: View {
     /// Raising the keyboard has to bring the transcript with it. Anchoring the
     /// scroll view's bottom for `.sizeChanges` was not enough on device — the
     /// newest messages stayed behind the keyboard — so the scroll is explicit.
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused = false
     /// Held so the send path and the keyboard can scroll without being inside
     /// the `ScrollViewReader`'s closure.
     @State private var scrollProxy: ScrollViewProxy?
@@ -1292,22 +1384,18 @@ private struct ChatConversationView: View {
             }
         }
         .sheet(isPresented: $isShowingEmojiPicker) {
+            // Reactions only: composing uses the panel under the input.
             EmojiPickerSheet { emoji in
-                if let target = reactionTarget {
-                    // Reacting is one emoji, so the sheet closes behind it.
-                    isShowingEmojiPicker = false
-                    reactionTarget = nil
-                    Task {
-                        await store.toggleReaction(
-                            emoji: emoji.name,
-                            messageID: target.id,
-                            channelID: chat.id
-                        )
-                    }
-                } else {
-                    // Composing: stays open, because sending several in a row is
-                    // the common case.
-                    insert(emoji)
+                guard let target = reactionTarget else { return }
+                // Reacting is one emoji, so the sheet closes behind it.
+                isShowingEmojiPicker = false
+                reactionTarget = nil
+                Task {
+                    await store.toggleReaction(
+                        emoji: emoji.name,
+                        messageID: target.id,
+                        channelID: chat.id
+                    )
                 }
             }
         }
@@ -1332,10 +1420,9 @@ private struct ChatConversationView: View {
         // Retry or throw away. Deliberately not automatic: a message that has
         // failed three times is failing for a reason, and silently retrying
         // forever is how a chat app ends up sending something an hour late.
-        .confirmationDialog(
+        .alert(
             AppString("这条消息没有发送成功"),
-            isPresented: Binding(get: { failedMessage != nil }, set: { if !$0 { failedMessage = nil } }),
-            titleVisibility: .visible
+            isPresented: Binding(get: { failedMessage != nil }, set: { if !$0 { failedMessage = nil } })
         ) {
             Button(AppString("重新发送")) {
                 guard let outboxID = failedMessage?.outboxID,
@@ -1357,13 +1444,12 @@ private struct ChatConversationView: View {
                 Text(text)
             }
         }
-        .confirmationDialog(
+        .alert(
             AppString("删除这条消息？"),
             isPresented: Binding(
                 get: { deleteTargetMessage != nil },
                 set: { if !$0 { deleteTargetMessage = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button("删除", role: .destructive) {
                 guard let target = deleteTargetMessage else { return }
@@ -1372,10 +1458,9 @@ private struct ChatConversationView: View {
             }
             Button("取消", role: .cancel) { deleteTargetMessage = nil }
         }
-        .confirmationDialog(
+        .alert(
             store.isDirectMessage ? AppString("退出这个会话？") : AppString("退出这个频道？"),
-            isPresented: $isConfirmingLeave,
-            titleVisibility: .visible
+            isPresented: $isConfirmingLeave
         ) {
             Button("退出", role: .destructive) {
                 Task {
@@ -1449,7 +1534,7 @@ private struct ChatConversationView: View {
                         .lineLimit(1)
                     Text(pin.excerpt)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
 
@@ -1458,7 +1543,7 @@ private struct ChatConversationView: View {
                 if store.pins.count > 1 {
                     Text("\(store.pins.count)")
                         .font(Theme.body(11, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.5))
+                        .foregroundStyle(Theme.textMuted)
                         .monospacedDigit()
                 }
             }
@@ -1517,9 +1602,9 @@ private struct ChatConversationView: View {
                     if store.memberTotal > store.members.count {
                         Text("另有 \(store.memberTotal - store.members.count) 位成员")
                             .font(Theme.body(12))
-                            .foregroundStyle(Theme.muted(0.5))
+                            .foregroundStyle(Theme.textMuted)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 20)
+                            .padding(.horizontal, Theme.pagePadding)
                             .padding(.top, 12)
                     }
                 }
@@ -1559,7 +1644,7 @@ private struct ChatConversationView: View {
                     .lineLimit(1)
                 Text("@\(member.username)")
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.55))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
             }
 
@@ -1567,9 +1652,9 @@ private struct ChatConversationView: View {
 
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.muted(0.4))
+                .foregroundStyle(Theme.textFaint)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.pagePadding)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -1661,7 +1746,7 @@ private struct ChatConversationView: View {
                 if let selectedThread = store.selectedThread {
                     Text(selectedThread.channelName)
                         .font(Theme.body(12, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.54))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
             }
@@ -1770,10 +1855,10 @@ private struct ChatConversationView: View {
                         VStack(spacing: 10) {
                             Image(systemName: "bubble.left.and.bubble.right")
                                 .font(.system(size: 30, weight: .medium))
-                                .foregroundStyle(Theme.muted(0.34))
+                                .foregroundStyle(Theme.textFaint)
                             Text(store.selectedThread == nil ? AppString("暂无消息") : AppString("暂无线程回复"))
                                 .font(Theme.body(14, weight: .medium))
-                                .foregroundStyle(Theme.muted(0.56))
+                                .foregroundStyle(Theme.textMuted)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 54)
@@ -1791,7 +1876,7 @@ private struct ChatConversationView: View {
                         .frame(height: Self.bottomGap)
                         .id(Self.bottomAnchor)
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, 22)
             }
             .scrollIndicators(.hidden)
@@ -1869,7 +1954,7 @@ private struct ChatConversationView: View {
             if !chat.lastMsg.isEmpty {
                 Text(chat.lastMsg)
                     .font(Theme.body(14, weight: .medium))
-                    .foregroundStyle(Theme.muted(0.58))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             }
@@ -1930,9 +2015,9 @@ private struct ChatConversationView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                 .strokeBorder(Theme.divider, lineWidth: 1)
         )
     }
@@ -1952,7 +2037,7 @@ private struct ChatConversationView: View {
                 }
                 Text(thread.time)
                     .font(Theme.body(11))
-                    .foregroundStyle(Theme.muted(0.45))
+                    .foregroundStyle(Theme.textFaint)
             }
             selectedThreadSummary(thread)
         }
@@ -2106,21 +2191,21 @@ private struct ChatConversationView: View {
                         .overlay {
                             Image(systemName: attachment.isVideo ? "film" : "photo")
                                 .font(.system(size: 18))
-                                .foregroundStyle(Theme.muted(0.45))
+                                .foregroundStyle(Theme.textFaint)
                         }
                 }
             }
             .frame(width: 62, height: 62)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                     .strokeBorder(Theme.divider, lineWidth: 1)
             }
             // Still uploading: dim it and say so, rather than letting the send
             // button look ready when the id isn't back yet.
             .overlay {
                 if attachment.uploadID == nil {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.cornerMedium, style: .continuous)
                         .fill(Color.black.opacity(0.35))
                         .overlay { ProgressView().tint(.white) }
                 }
@@ -2158,16 +2243,33 @@ private struct ChatConversationView: View {
             .buttonStyle(.pressable)
             .disabled(attachments.count >= Self.maxAttachments)
 
-            TextField("消息", text: $draft, axis: .vertical)
-                .font(Theme.body(16))
-                .foregroundStyle(Theme.text)
-                .focused($isInputFocused)
-                .lineLimit(1...4)
-                .textInputAutocapitalization(.sentences)
-                .padding(.leading, 14)
-                .padding(.trailing, 4)
-                .padding(.vertical, 11)
-                .background(Theme.surface, in: Capsule())
+            ComposerTextEditor(
+                text: $draftRich,
+                selection: $draftSelection,
+                isFocused: $isInputFocused,
+                showsEmojiPanel: $showsEmojiPanel,
+                style: .chat(),
+                onContentHeight: { height in
+                    let clamped = min(max(height, 42), 112)
+                    if abs(clamped - inputHeight) > 0.5 { inputHeight = clamped }
+                }
+            )
+                .frame(height: inputHeight)
+                .overlay(alignment: .leading) {
+                    if draftRich.characters.isEmpty {
+                        Text("消息")
+                            .font(Theme.body(16))
+                            .foregroundStyle(Theme.textFaint)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .padding(.leading, 9)
+                .padding(.trailing, 38)
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 21, style: .continuous))
+                .onChange(of: draftRich) { _, value in
+                    draft = ComposerEmojiCodec.plain(value)
+                }
                 // Inside the field's capsule, where the system keyboard puts its
                 // own emoji key — and out of the way of 发送.
                 .overlay(alignment: .trailing) { emojiButton }
@@ -2177,7 +2279,7 @@ private struct ChatConversationView: View {
             } label: {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(canSend ? Theme.accent700 : Theme.muted(0.35))
+                    .foregroundStyle(canSend ? Theme.accent700 : Theme.textFaint)
                     .frame(width: 42, height: 42)
             }
             .buttonStyle(.pressable)
@@ -2199,7 +2301,7 @@ private struct ChatConversationView: View {
                     .lineLimit(1)
                 Text(target.text)
                     .font(Theme.body(12))
-                    .foregroundStyle(Theme.muted(0.6))
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
             }
 
@@ -2210,7 +2312,7 @@ private struct ChatConversationView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Theme.muted(0.5))
+                    .foregroundStyle(Theme.textMuted)
                     .frame(width: 28, height: 28)
                     .contentShape(Circle())
             }
@@ -2220,33 +2322,23 @@ private struct ChatConversationView: View {
         .padding(.bottom, 8)
     }
 
-    /// Opens the site's emoji, standard and custom.
-    ///
-    /// Inserted as `:shortcode:` rather than a character: the custom ones have
-    /// no Unicode form, and Discourse cooks the shortcode into the same image on
-    /// both ends — which is also how the bubble renderer already displays them
-    /// in received messages.
+    /// Swaps the keyboard for the emoji panel and back. Site emoji show as
+    /// images in the field and are sent as `:shortcode:`, which Discourse
+    /// cooks into the same image on both ends.
     private var emojiButton: some View {
-        Button {
-            isShowingEmojiPicker = true
+        let panelUp = showsEmojiPanel && isInputFocused
+        return Button {
+            showsEmojiPanel.toggle()
+            isInputFocused = true
         } label: {
-            Image(systemName: "face.smiling")
+            Image(systemName: panelUp ? "keyboard" : "face.smiling")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(Theme.muted(0.5))
+                .foregroundStyle(Theme.textMuted)
                 .frame(width: 38, height: 38)
                 .contentShape(Circle())
         }
         .buttonStyle(.pressableIcon)
-        .accessibilityLabel("表情")
-    }
-
-    /// Appends the shortcode to the draft, spaced so two in a row don't run
-    /// together into something Discourse won't recognise (`:a::b:`).
-    private func insert(_ emoji: DiscourseEmoji) {
-        if !draft.isEmpty, draft.last?.isWhitespace == false {
-            draft += " "
-        }
-        draft += emoji.shortcode + " "
+        .accessibilityLabel(panelUp ? AppString("键盘") : AppString("表情"))
     }
 
     private static let maxAttachments = 5
@@ -2344,6 +2436,8 @@ private struct ChatConversationView: View {
                 await store.enqueueToSelectedThread(text, inReplyToID: inReplyToID, uploadIDs: uploadIDs)
             }
             draft = ""
+            draftRich = AttributedString()
+            draftSelection = 0..<0
             attachments = []
             replyTarget = nil
             // Your own message should always land in view, gap included. The
@@ -2438,9 +2532,9 @@ private struct ChatThreadPill: View {
         }
         .frame(width: 190, alignment: .leading)
         .padding(12)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                 .strokeBorder(thread.unread ? Theme.accent.opacity(0.45) : Theme.divider, lineWidth: 1)
         )
     }
@@ -2482,12 +2576,12 @@ private struct ChatMessageBubble: View {
                 HStack(spacing: 5) {
                     Text(message.authorName)
                         .font(Theme.body(12, weight: .semibold))
-                        .foregroundStyle(Theme.muted(0.58))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                     if !message.time.isEmpty {
                         Text(message.time)
                             .font(Theme.body(11))
-                            .foregroundStyle(Theme.muted(0.42))
+                            .foregroundStyle(Theme.textFaint)
                             .lineLimit(1)
                     }
                     // The server tracks this (`edited`); saying so is what stops
@@ -2495,7 +2589,7 @@ private struct ChatMessageBubble: View {
                     if message.isEdited {
                         Text("已编辑")
                             .font(Theme.body(10))
-                            .foregroundStyle(Theme.muted(0.38))
+                            .foregroundStyle(Theme.textFaint)
                     }
 
                     // Only ever on your own rows, and only until the server
@@ -2508,7 +2602,7 @@ private struct ChatMessageBubble: View {
                     case .sending:
                         Image(systemName: "clock")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Theme.muted(0.42))
+                            .foregroundStyle(Theme.textFaint)
                             .accessibilityLabel(AppString("发送中"))
                     case .failed:
                         Button {
@@ -2537,10 +2631,10 @@ private struct ChatMessageBubble: View {
                         .padding(.vertical, 10)
                         .background(
                             message.isMine ? Theme.accent.opacity(0.16) : Theme.surface,
-                            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous)
                                 .strokeBorder(message.isMine ? Color.clear : Theme.divider, lineWidth: 1)
                         )
                 }
@@ -2580,7 +2674,7 @@ private struct ChatMessageBubble: View {
                             if !thread.time.isEmpty {
                                 Text(thread.time)
                                     .font(Theme.body(11))
-                                    .foregroundStyle(Theme.muted(0.48))
+                                    .foregroundStyle(Theme.textFaint)
                             }
                         }
                         .foregroundStyle(Theme.accent700)
@@ -2667,13 +2761,13 @@ private struct ChatMessageBubble: View {
                         } placeholder: {
                             Text(reaction.shortcode)
                                 .font(Theme.body(9))
-                                .foregroundStyle(Theme.muted(0.5))
+                                .foregroundStyle(Theme.textMuted)
                         }
                         .frame(width: 16, height: 16)
 
                         Text("\(reaction.count)")
                             .font(Theme.body(11, weight: .semibold))
-                            .foregroundStyle(reaction.reacted ? Theme.accent700 : Theme.muted(0.6))
+                            .foregroundStyle(reaction.reacted ? Theme.accent700 : Theme.textMuted)
                             .monospacedDigit()
                     }
                     .padding(.horizontal, 8)
@@ -2717,7 +2811,7 @@ private struct ChatMessageBubble: View {
                         .lineLimit(1)
                     Text(quoted.excerpt)
                         .font(Theme.body(12))
-                        .foregroundStyle(Theme.muted(0.6))
+                        .foregroundStyle(Theme.textMuted)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
@@ -2914,16 +3008,16 @@ private struct ChatMessageImage: View {
                     Theme.neutral300
                     Image(systemName: "photo")
                         .font(.system(size: 24, weight: .medium))
-                        .foregroundStyle(Theme.muted(0.38))
+                        .foregroundStyle(Theme.textFaint)
                 }
             }
             .frame(width: imageWidth, height: imageHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous)
                     .strokeBorder(Theme.divider, lineWidth: 1)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.cornerSmall, style: .continuous))
         }
         .buttonStyle(.pressable)
     }
@@ -3071,7 +3165,14 @@ private struct ChatImagePreview: View {
                !(200..<300).contains(httpResponse.statusCode) {
                 throw ChatImagePreviewError.loadFailed
             }
-            guard let loadedImage = UIImage(data: data) else {
+            // Decoded off the main thread (capped, see
+            // `RemoteImageDiskCache.fullResolutionCap`): `UIImage(data:)` is
+            // lazy, so the full-size decode used to land on the main thread
+            // at first draw.
+            let decoded = await Task.detached(priority: .userInitiated) {
+                RemoteImageDiskCache.decode(data, maxPixel: 0)
+            }.value
+            guard let loadedImage = decoded else {
                 throw ChatImagePreviewError.loadFailed
             }
 
@@ -3162,7 +3263,7 @@ private struct ChatMessageEditSheet: View {
                     .focused($isFocused)
                     .lineLimit(3...10)
                     .padding(14)
-                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.cornerLarge, style: .continuous))
                     .padding(16)
 
                 Spacer(minLength: 0)
@@ -3196,3 +3297,6 @@ private struct ChatMessageEditSheet: View {
         return !trimmed.isEmpty && trimmed != original.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+
+

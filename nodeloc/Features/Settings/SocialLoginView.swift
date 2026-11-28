@@ -49,8 +49,11 @@ struct SocialAuthProvider: Identifiable, Hashable {
         }
     }
 
-    /// Brand artwork in the asset catalog (vector SVG, original colours).
-    /// Nil for a provider the site has enabled but we ship no mark for.
+    /// Brand artwork in the asset catalog: the web front end's own marks
+    /// (static/brands/), as vector PDFs. X and GitHub are template images
+    /// that take the foreground colour (black in light mode, white in dark);
+    /// Google and Telegram keep their colours. Nil for a provider the site
+    /// has enabled but we ship no mark for.
     var assetName: String? {
         switch name {
         case "google_oauth2", "google": return "SocialGoogle"
@@ -104,7 +107,7 @@ struct SocialAuthButtonStyle: ButtonStyle {
     /// with Apple button on iOS. It is also what fixes the oversized labels:
     /// the title is a fixed *proportion* of the height (below), so the 48 this
     /// used to be forced a ~21pt title on every row.
-    static let height: CGFloat = 44
+    static let height: CGFloat = AuthMetrics.controlHeight
     static let cornerRadius: CGFloat = 8
 
     /// Apple's required proportion for a custom Sign in with Apple button:
@@ -117,7 +120,9 @@ struct SocialAuthButtonStyle: ButtonStyle {
     static let textHeightRatio: CGFloat = 0.43
 
     static func titleSize(for height: CGFloat) -> CGFloat {
-        (height * textHeightRatio).rounded()
+        // Capped at 17: at the auth pages' 50pt the ratio gave 22pt text.
+        // These are our own buttons; Apple's is the native control.
+        min((height * textHeightRatio).rounded(), 17)
     }
 
     /// The system font, which Apple asks custom buttons to prefer. Weight is
@@ -256,6 +261,8 @@ struct SocialProviderIcon: View {
                 Image(assetName)
                     .resizable()
                     .scaledToFit()
+                    // Only the monochrome (template) marks take this colour.
+                    .foregroundStyle(monochromeTint ?? Theme.text)
                     .environment(\.colorScheme, assetColorScheme ?? systemScheme)
             } else {
                 Image(systemName: provider.fallbackSymbol)

@@ -82,13 +82,12 @@ struct EditHistorySheet: View {
         }
         .standardSheet([.large])
         .task { await reload() }
-        .confirmationDialog(
+        .alert(
             AppString("回滚到 v\(confirmRestore ?? 0)？"),
             isPresented: Binding(
                 get: { confirmRestore != nil },
                 set: { if !$0 { confirmRestore = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button(AppString("回滚")) {
                 guard let number = confirmRestore else { return }
@@ -135,64 +134,61 @@ struct EditHistorySheet: View {
                     revisionDetail(revision)
                 }
             }
-            .padding(20)
+            .padding(Theme.pagePadding)
         }
         .scrollIndicators(.hidden)
     }
 
+    /// The versions as a row of cards, newest first (design App-iOS-History):
+    /// version and badges, who and when, then what changed.
     private var versionList: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(newestFirst.enumerated()), id: \.element.number) { index, revision in
-                if index > 0 { Divider().overlay(Theme.divider).padding(.leading, 56) }
-                versionRow(revision)
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(newestFirst) { revision in
+                    versionCard(revision)
+                }
             }
+            .padding(.horizontal, Theme.pagePadding)
         }
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous))
+        .scrollIndicators(.hidden)
+        .padding(.horizontal, -Theme.pagePadding)
     }
 
-    private func versionRow(_ revision: NLRevision) -> some View {
+    private func versionCard(_ revision: NLRevision) -> some View {
         let isSelected = revision.number == selectedRevision?.number
+        let shape = RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous)
         return Button {
             withAnimation(SegmentedControl<Mode>.switching) { selected = revision.number }
         } label: {
-            HStack(spacing: 12) {
-                Text(verbatim: "v\(revision.number)")
-                    .font(Theme.heading(13, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color.white : Theme.text)
-                    .frame(width: 32, height: 32)
-                    .background(
-                        isSelected ? Theme.accent : Theme.bg,
-                        in: Circle()
-                    )
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(editorName(revision))
-                            .font(Theme.body(14, weight: .semibold))
-                            .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                        if revision.number == currentNumber {
-                            badge(AppString("当前"), tint: Theme.accent)
-                        }
-                        if revision.byModerator == true {
-                            badge(AppString("版主"), tint: Theme.accent2_600)
-                        }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(verbatim: "v\(revision.number)")
+                        .font(Theme.heading(15, weight: .semibold))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.text)
+                    if revision.number == currentNumber {
+                        badge(AppString("当前"), tint: Theme.accent)
                     }
-                    Text(DiscourseFormat.relative(revision.createdAt))
-                        .font(Theme.body(12))
-                        .foregroundStyle(Theme.neutral700)
+                    if revision.byModerator == true {
+                        badge(AppString("版主"), tint: Theme.accent2_600)
+                    }
                 }
-
-                Spacer(minLength: 8)
-
+                Text(verbatim: "\(editorName(revision)) · \(DiscourseFormat.relative(revision.createdAt))")
+                    .font(Theme.body(12))
+                    .foregroundStyle(Theme.neutral700)
+                    .lineLimit(1)
                 Text(summary(of: revision))
                     .font(Theme.body(12, weight: .medium))
-                    .foregroundStyle(Theme.neutral700)
+                    .foregroundStyle(Theme.neutral600)
                     .lineLimit(1)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .contentShape(Rectangle())
+            .frame(minWidth: 128, alignment: .leading)
+            .background(isSelected ? Theme.accent.opacity(0.08) : Theme.surface, in: shape)
+            .overlay {
+                shape.strokeBorder(isSelected ? Theme.accent : .clear, lineWidth: 1.5)
+            }
+            .contentShape(shape)
         }
         .buttonStyle(.pressable)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -210,20 +206,31 @@ struct EditHistorySheet: View {
     @ViewBuilder
     private func revisionDetail(_ revision: NLRevision) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(detailHeader(revision))
-                .font(Theme.body(12, weight: .medium))
-                .foregroundStyle(Theme.neutral700)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(detailHeader(revision))
+                    .font(Theme.body(12, weight: .medium))
+                    .foregroundStyle(Theme.neutral700)
 
-            switch mode {
-            case .compare:
-                compareBody(revision)
-            case .full:
-                Text(revision.raw ?? "")
-                    .font(Theme.body(15))
-                    .foregroundStyle(Theme.text)
-                    .lineSpacing(5)
-                    .textSelection(.enabled)
+                switch mode {
+                case .compare:
+                    compareBody(revision)
+                case .full:
+                    if let title = revision.title, !title.isEmpty {
+                        Text(title)
+                            .font(Theme.heading(20, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(revision.raw ?? "")
+                        .font(Theme.body(15))
+                        .foregroundStyle(Theme.text)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                }
             }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radiusLg, style: .continuous))
 
             if mode == .compare, previous(of: revision) != nil {
                 HStack(spacing: 14) {
@@ -242,7 +249,7 @@ struct EditHistorySheet: View {
                 } label: {
                     Label(AppString("回滚到 v\(revision.number)"), systemImage: "arrow.uturn.backward")
                 }
-                .buttonStyle(PrimaryButtonStyle(block: true))
+                .buttonStyle(SecondaryButtonStyle(block: true))
                 .padding(.top, 4)
             }
         }
@@ -253,6 +260,13 @@ struct EditHistorySheet: View {
         if let before = previous(of: revision) {
             let blocks = RevisionDiff.blocks(from: before.raw ?? "", to: revision.raw ?? "")
             VStack(alignment: .leading, spacing: 12) {
+                // The title, when this version changed it: diffed like a
+                // paragraph, at the title's size (first posts only).
+                if let old = before.title, let new = revision.title, old != new {
+                    Text(attributed(RevisionDiff.characterRuns(old, new)))
+                        .font(Theme.heading(20, weight: .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                     switch block {
                     case .unchanged(let count):
